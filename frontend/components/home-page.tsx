@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 type Locale = "en" | "fr";
 type IconName =
@@ -320,6 +320,10 @@ export default function HomePage() {
   const [locale, setLocale] = useState<Locale>("en");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const t = copy[locale];
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   const navLinks = [
     { label: t.nav.home, href: "#home" },
