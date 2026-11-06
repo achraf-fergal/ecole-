@@ -7,7 +7,6 @@ use App\\Models\\Course;
 use App\\Models\\Language;
 use App\\Models\\Level;
 use Illuminate\\Database\\Seeder;
-use Illuminate\\Support\\Str;
 use RuntimeException;
 
 class DemoCourseSeeder extends Seeder
