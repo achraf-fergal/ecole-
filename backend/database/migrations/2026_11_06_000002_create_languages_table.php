@@ -10,11 +10,15 @@ return new class extends Migration
     {
         Schema::create('languages', function (Blueprint $table) {
             $table->id();
-            $table->string('code', 10)->unique();
+            $table->foreignId('center_id')->constrained()->cascadeOnDelete();
+            $table->string('code', 10);
             $table->string('name');
             $table->string('native_name')->nullable();
             $table->boolean('is_active')->default(true)->index();
             $table->timestamps();
+
+            $table->unique(['center_id', 'code']);
+            $table->unique(['center_id', 'id']);
         });
     }
 
