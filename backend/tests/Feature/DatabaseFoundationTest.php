@@ -16,7 +16,6 @@ class DatabaseFoundationTest extends TestCase
             'centers',
             'center_user',
             'languages',
-            'center_languages',
             'levels',
             'courses',
         ] as $table) {
