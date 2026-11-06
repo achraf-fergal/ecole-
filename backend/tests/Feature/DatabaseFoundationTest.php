@@ -30,6 +30,6 @@ class DatabaseFoundationTest extends TestCase
     public function test_existing_users_table_is_reused(): void
     {
         $this->assertTrue(Schema::hasTable('users'));
-        $this->assertSame(1, Schema::getColumnListing('users') ? 1 : 0);
+        $this->assertContains('email', Schema::getColumnListing('users'));
     }
 }
