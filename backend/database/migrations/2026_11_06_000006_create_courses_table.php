@@ -11,7 +11,7 @@ return new class extends Migration
         Schema::create('courses', function (Blueprint $table) {
             $table->id();
             $table->foreignId('center_id')->constrained()->cascadeOnDelete();
-            $table->foreignId('language_id')->constrained()->restrictOnDelete();
+            $table->unsignedBigInteger('language_id');
             $table->foreignId('level_id')->constrained()->restrictOnDelete();
             $table->string('title');
             $table->string('slug');
@@ -30,6 +30,11 @@ return new class extends Migration
             $table->unique(['center_id', 'slug']);
             $table->index(['center_id', 'status', 'sort_order']);
             $table->index(['center_id', 'language_id', 'level_id']);
+
+            $table->foreign(['center_id', 'language_id'])
+                ->references(['center_id', 'id'])
+                ->on('languages')
+                ->restrictOnDelete();
         });
     }
 
