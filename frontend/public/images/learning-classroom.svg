@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" fill="none">
+  <defs>
+    <linearGradient id="wall" x1="90" y1="45" x2="1050" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4F8F7"/>
+      <stop offset="1" stop-color="#DCEDEE"/>
+    </linearGradient>
+    <linearGradient id="desk" x1="330" y1="570" x2="880" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D9A66F"/>
+      <stop offset="1" stop-color="#B97E54"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#wall)" d="M0 0h1200v800H0z"/>
+  <circle cx="1000" cy="140" r="210" fill="#D5EBE8"/>
+  <path d="M0 635c190-62 315-36 477 0 184 42 401 54 723-18v183H0V635Z" fill="#E9E5D8"/>
+  <rect x="720" y="105" width="340" height="310" rx="24" fill="#fff"/>
+  <rect x="743" y="128" width="294" height="264" rx="12" fill="#B7DAD8"/>
+  <path d="M890 128v264M743 260h294" stroke="#F7FBF9" stroke-width="16"/>
+  <path d="m744 337 91-77 58 43 74-91 70 59v121H744V337Z" fill="#6BA6A2" opacity=".76"/>
+  <rect x="125" y="140" width="370" height="20" rx="10" fill="#C5D8D9"/>
+  <rect x="125" y="184" width="276" height="13" rx="6.5" fill="#D8E4E3"/>
+  <rect x="125" y="215" width="320" height="13" rx="6.5" fill="#D8E4E3"/>
+  <rect x="154" y="275" width="205" height="88" rx="18" fill="#fff"/>
+  <path d="M186 319h140M186 339h94" stroke="#7CA9A6" stroke-width="10" stroke-linecap="round"/>
+  <path d="M201 552c0-80 48-130 120-130s120 50 120 130v83H201v-83Z" fill="#0E8988"/>
+  <circle cx="321" cy="365" r="65" fill="#C9825E"/>
+  <path d="M258 363c-3-65 28-103 70-103 43 0 69 34 63 83-30-3-58-18-78-42-11 29-31 49-55 62Z" fill="#173655"/>
+  <path d="M280 421c21 25 61 25 82 0" stroke="#F2B894" stroke-width="12" stroke-linecap="round"/>
+  <path d="M80 652h1040l-72 61H152l-72-61Z" fill="url(#desk)"/>
+  <path d="m238 713-18 87m760-87 18 87" stroke="#8C6146" stroke-width="22" stroke-linecap="round"/>
+  <rect x="508" y="566" width="190" height="76" rx="12" fill="#F8F4E8" transform="rotate(-5 508 566)"/>
+  <path d="m540 596 119-10m-116 32 92-8" stroke="#83AAA4" stroke-width="9" stroke-linecap="round"/>
+  <path d="M552 558c10-48 47-74 88-66 34 7 55 39 51 73l-139-7Z" fill="#E6B954"/>
+</svg>
