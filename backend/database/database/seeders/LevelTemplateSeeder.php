@@ -13,37 +13,37 @@ class LevelTemplateSeeder extends Seeder
             [
                 'code' => 'A1',
                 'name' => 'Beginner',
-                'description' => 'Basic language knowledge and simple communication.',
+                'description' => 'Basic language knowledge.',
                 'sort_order' => 1,
             ],
             [
                 'code' => 'A2',
                 'name' => 'Elementary',
-                'description' => 'Basic everyday communication and familiar topics.',
+                'description' => 'Elementary communication skills.',
                 'sort_order' => 2,
             ],
             [
                 'code' => 'B1',
                 'name' => 'Intermediate',
-                'description' => 'Independent communication in familiar situations.',
+                'description' => 'Independent communication.',
                 'sort_order' => 3,
             ],
             [
                 'code' => 'B2',
                 'name' => 'Upper Intermediate',
-                'description' => 'More fluent communication across different topics.',
+                'description' => 'Confident communication across different topics.',
                 'sort_order' => 4,
             ],
             [
                 'code' => 'C1',
                 'name' => 'Advanced',
-                'description' => 'Effective communication in complex situations.',
+                'description' => 'Advanced language proficiency.',
                 'sort_order' => 5,
             ],
             [
                 'code' => 'C2',
                 'name' => 'Proficiency',
-                'description' => 'Advanced understanding and precise expression.',
+                'description' => 'Advanced understanding and expression.',
                 'sort_order' => 6,
             ],
         ];

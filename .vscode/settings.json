@@ -1,3 +1,6 @@
 {
-  "css.customData": [".vscode/tailwind-css.json"]
+  "css.customData": [".vscode/tailwind-css.json"],
+  "php.problems.exclude": {
+    "**/vendor/**": true
+  }
 }
