@@ -615,3 +615,568 @@ export async function getCourses(
     };
   }
 }
+
+
+/* =========================================================
+   COURSE DETAILS TYPES
+   These types describe the public course details API.
+========================================================= */
+
+export type CoursePricingMode =
+  | "fixed"
+  | "from"
+  | "free"
+  | "upon_request";
+
+export type LessonContentType =
+  | "video"
+  | "text"
+  | "resource"
+  | "quiz";
+
+export interface CourseOutcome {
+  content: string;
+  isHighlight: boolean;
+}
+
+export interface CourseLessonPreview {
+  id: string;
+  title: string;
+  contentType: LessonContentType;
+  durationMinutes: number | null;
+}
+
+export interface CourseModulePreview {
+  id: string;
+  title: string;
+  description: string | null;
+  lessons: CourseLessonPreview[];
+}
+
+export interface CourseGroupSchedule {
+  dayOfWeek: string;
+  startTime: string;
+  endTime: string;
+}
+
+export interface CourseGroupPreview {
+  id: string;
+  name: string;
+  startDate: string | null;
+  endDate: string | null;
+  locationLabel: string | null;
+  roomLabel: string | null;
+  enrollmentStatus: "open" | "closed" | "waitlist";
+  schedules: CourseGroupSchedule[];
+}
+
+export interface CourseDetails {
+  id: string;
+  slug: string;
+
+  localization: {
+    requestedLocale: string;
+    contentLocale: string;
+    isTranslated: boolean;
+    availableLocales: string[];
+  };
+
+  title: string;
+  shortDescription: string | null;
+  description: string | null;
+  prerequisites: string | null;
+  targetAudience: string | null;
+
+  language: CourseOption;
+  level: CourseOption;
+
+  studyFormat: StudyFormat | null;
+  durationHours: number | null;
+
+  coverImage: {
+    url: string | null;
+    alt: string;
+  };
+
+  pricing: {
+    mode: CoursePricingMode;
+    amount: string | null;
+    currency: string;
+  };
+
+  outcomes: CourseOutcome[];
+
+  curriculum: {
+    isPublic: boolean;
+    modules: CourseModulePreview[];
+  };
+
+  availableGroups: CourseGroupPreview[];
+
+  seo: {
+    title: string;
+    description: string;
+  };
+}
+
+export type CourseDetailsResult =
+  | {
+      kind: "success";
+      course: CourseDetails;
+    }
+  | {
+      kind: "not-found";
+    }
+  | {
+      kind: "translation-unavailable";
+      sourceLocale: string;
+      availableLocales: string[];
+    }
+  | {
+      kind: "not-configured";
+    };
+
+/* =========================================================
+   API NORMALIZATION
+   Keep API parsing separate from the UI components.
+========================================================= */
+
+function normalizeLessonType(
+  value: unknown
+): LessonContentType {
+  switch (getString(value)) {
+    case "video":
+      return "video";
+
+    case "text":
+      return "text";
+
+    case "resource":
+    case "file":
+      return "resource";
+
+    case "quiz":
+    case "exercise":
+      return "quiz";
+
+    default:
+      return "text";
+  }
+}
+
+function normalizeLessonPreview(
+  value: unknown
+): CourseLessonPreview | null {
+  if (!isRecord(value)) return null;
+
+  const title = getString(value.title);
+
+  if (!title) return null;
+
+  const duration = getNumber(
+    value.duration_minutes,
+    0
+  );
+
+  return {
+    id: String(value.id ?? title),
+    title,
+    contentType: normalizeLessonType(value.content_type),
+    durationMinutes: duration > 0 ? duration : null,
+  };
+}
+
+function normalizeModulePreview(
+  value: unknown
+): CourseModulePreview | null {
+  if (!isRecord(value)) return null;
+
+  const title = getString(value.title);
+
+  if (!title) return null;
+
+  const lessons = Array.isArray(value.lessons)
+    ? value.lessons
+        .map(normalizeLessonPreview)
+        .filter(
+          (item): item is CourseLessonPreview =>
+            item !== null
+        )
+    : [];
+
+  return {
+    id: String(value.id ?? title),
+    title,
+    description: getNullableString(value.description),
+    lessons,
+  };
+}
+
+function normalizeGroupSchedule(
+  value: unknown
+): CourseGroupSchedule | null {
+  if (!isRecord(value)) return null;
+
+  const dayOfWeek = getString(value.day_of_week);
+  const startTime = getString(value.start_time);
+  const endTime = getString(value.end_time);
+
+  if (!dayOfWeek || !startTime || !endTime) {
+    return null;
+  }
+
+  return {
+    dayOfWeek,
+    startTime,
+    endTime,
+  };
+}
+
+function normalizeGroup(
+  value: unknown
+): CourseGroupPreview | null {
+  if (!isRecord(value)) return null;
+
+  const name = getString(value.name);
+
+  if (!name) return null;
+
+  const rawStatus = getString(
+    value.enrollment_status
+  );
+
+  const enrollmentStatus =
+    rawStatus === "closed" || rawStatus === "waitlist"
+      ? rawStatus
+      : "open";
+
+  const schedules = Array.isArray(value.schedules)
+    ? value.schedules
+        .map(normalizeGroupSchedule)
+        .filter(
+          (item): item is CourseGroupSchedule =>
+            item !== null
+        )
+    : [];
+
+  return {
+    id: String(value.id ?? name),
+    name,
+    startDate: getNullableString(value.start_date),
+    endDate: getNullableString(value.end_date),
+    locationLabel: getNullableString(value.location_label),
+    roomLabel: getNullableString(value.room_label),
+    enrollmentStatus,
+    schedules,
+  };
+}
+
+function normalizeCourseDetails(
+  value: unknown
+): CourseDetails | null {
+  if (!isRecord(value)) return null;
+
+  const id = value.id;
+  const slug = getString(value.slug);
+  const title = getString(value.title);
+
+  const language = normalizeOption(value.language);
+  const level = normalizeOption(value.level);
+
+  if (
+    (typeof id !== "string" && typeof id !== "number") ||
+    !slug ||
+    !title ||
+    !language ||
+    !level
+  ) {
+    return null;
+  }
+
+  const localization = isRecord(value.localization)
+    ? value.localization
+    : {};
+
+  const coverImage = isRecord(value.cover_image)
+    ? value.cover_image
+    : {};
+
+  const rawPricing = isRecord(value.pricing)
+    ? value.pricing
+    : {};
+
+  const rawCurriculum = isRecord(value.curriculum)
+    ? value.curriculum
+    : {};
+
+  const rawSeo = isRecord(value.seo)
+    ? value.seo
+    : {};
+
+  const rawAmount = rawPricing.amount;
+
+  const amount =
+    (typeof rawAmount === "string" ||
+      typeof rawAmount === "number") &&
+    Number.isFinite(Number(rawAmount)) &&
+    Number(rawAmount) > 0
+      ? String(rawAmount)
+      : null;
+
+  const requestedPricingMode = getString(
+    rawPricing.mode
+  );
+
+  let pricingMode: CoursePricingMode =
+    requestedPricingMode === "fixed" ||
+    requestedPricingMode === "from" ||
+    requestedPricingMode === "free"
+      ? requestedPricingMode
+      : "upon_request";
+
+  // Invalid fixed pricing must never be presented as a real price.
+  if (
+    (pricingMode === "fixed" || pricingMode === "from") &&
+    amount === null
+  ) {
+    pricingMode = "upon_request";
+  }
+
+  const format = getString(value.study_format);
+
+  const studyFormat: StudyFormat | null =
+    format === "online" ||
+    format === "in_person" ||
+    format === "hybrid"
+      ? format
+      : null;
+
+  const rawDuration = Number(value.duration_hours);
+
+  const durationHours =
+    Number.isFinite(rawDuration) && rawDuration > 0
+      ? rawDuration
+      : null;
+
+  const outcomes = Array.isArray(value.outcomes)
+    ? value.outcomes
+        .filter(isRecord)
+        .filter((item) => Boolean(getString(item.content)))
+        .map((item) => ({
+          content: getString(item.content),
+          isHighlight: item.is_highlight === true,
+        }))
+    : [];
+
+  const modules = Array.isArray(rawCurriculum.modules)
+    ? rawCurriculum.modules
+        .map(normalizeModulePreview)
+        .filter(
+          (item): item is CourseModulePreview =>
+            item !== null
+        )
+    : [];
+
+  const groups = Array.isArray(value.available_groups)
+    ? value.available_groups
+        .map(normalizeGroup)
+        .filter(
+          (item): item is CourseGroupPreview =>
+            item !== null
+        )
+    : [];
+
+  const availableLocales = Array.isArray(
+    localization.available_locales
+  )
+    ? localization.available_locales.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0
+      )
+    : [];
+
+  return {
+    id: String(id),
+    slug,
+
+    localization: {
+      requestedLocale: getString(
+        localization.requested_locale,
+        "en"
+      ),
+      contentLocale: getString(
+        localization.content_locale,
+        "en"
+      ),
+      isTranslated: localization.is_translated === true,
+      availableLocales,
+    },
+
+    title,
+    shortDescription: getNullableString(
+      value.short_description
+    ),
+    description: getNullableString(value.description),
+    prerequisites: getNullableString(value.prerequisites),
+    targetAudience: getNullableString(value.target_audience),
+
+    language,
+    level,
+
+    studyFormat,
+    durationHours,
+
+    coverImage: {
+      // Reuse the media-host validation already used by the course listing.
+      url: isAllowedImageUrl(coverImage.url),
+      alt: getString(coverImage.alt, title),
+    },
+
+    pricing: {
+      mode: pricingMode,
+      amount,
+      currency: getString(rawPricing.currency, "MAD"),
+    },
+
+    outcomes,
+
+    curriculum: {
+      isPublic: rawCurriculum.is_public === true,
+      modules,
+    },
+
+    availableGroups: groups,
+
+    seo: {
+      title: getString(rawSeo.title, title),
+      description: getString(
+        rawSeo.description,
+        getString(value.short_description, title)
+      ),
+    },
+  };
+}
+
+/* =========================================================
+   COURSE DETAILS API
+   The cache key includes the tenant, slug and locale.
+========================================================= */
+
+async function getCachedCourseDetails(
+  apiBase: string,
+  centerSlug: string,
+  slug: string,
+  locale: Locale
+): Promise<CourseDetailsResult> {
+  "use cache";
+
+  cacheLife({ revalidate: 60 });
+
+  const baseUrl = new URL(apiBase);
+
+  // Allow HTTP only for local development.
+  if (
+    baseUrl.protocol !== "https:" &&
+    !(
+      process.env.NODE_ENV === "development" &&
+      baseUrl.protocol === "http:"
+    )
+  ) {
+    throw new Error("Invalid Laravel API protocol.");
+  }
+
+  const endpoint = new URL(
+    `/api/public/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(slug)}`,
+    baseUrl
+  );
+
+  endpoint.searchParams.set("locale", locale);
+
+  const response = await fetch(endpoint.toString(), {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+  });
+
+  let payload: unknown = null;
+
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  // Handle a missing course or an unavailable translation separately.
+  if (response.status === 404) {
+    if (
+      isRecord(payload) &&
+      isRecord(payload.error) &&
+      payload.error.code === "translation_unavailable"
+    ) {
+      const error = payload.error;
+
+      const availableLocales = Array.isArray(
+        error.available_locales
+      )
+        ? error.available_locales.filter(
+            (item): item is string =>
+              typeof item === "string"
+          )
+        : [];
+
+      return {
+        kind: "translation-unavailable",
+        sourceLocale: getString(
+          error.source_locale,
+          "en"
+        ),
+        availableLocales,
+      };
+    }
+
+    return { kind: "not-found" };
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `Laravel Course Details API returned ${response.status}.`
+    );
+  }
+
+  if (!isRecord(payload)) {
+    throw new Error("Invalid Course Details API response.");
+  }
+
+  const course = normalizeCourseDetails(payload.data);
+
+  if (!course) {
+    throw new Error(
+      "The Course Details API returned an invalid course."
+    );
+  }
+
+  return {
+    kind: "success",
+    course,
+  };
+}
+
+export async function getCourseDetails(
+  slug: string,
+  locale: Locale
+): Promise<CourseDetailsResult> {
+  const apiBase = process.env.LARAVEL_API_URL;
+  const centerSlug = process.env.CENTER_SLUG;
+
+  if (!apiBase || !centerSlug) {
+    return { kind: "not-configured" };
+  }
+
+  return getCachedCourseDetails(
+    apiBase,
+    centerSlug,
+    slug,
+    locale
+  );
+}
