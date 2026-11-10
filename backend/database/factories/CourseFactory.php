@@ -21,10 +21,11 @@ class CourseFactory extends Factory
         $title = fake()->words(2, true);
 
         return [
-            // Must be provided through forCenter().
             'center_id' => null,
             'language_id' => null,
             'level_id' => null,
+
+            'source_locale' => 'en',
 
             'title' => Str::title($title),
             'slug' => Str::slug($title).'-'.fake()->unique()->numerify('####'),
@@ -32,15 +33,22 @@ class CourseFactory extends Factory
             'short_description' => fake()->sentence(),
             'description' => fake()->paragraphs(2, true),
             'prerequisites' => null,
+            'target_audience' => null,
 
             'study_format' => 'in_person',
             'duration_hours' => null,
 
-            // Images are optional and can be external URLs.
             'cover_image_url' => null,
+            'cover_image_alt' => null,
 
             'price' => null,
             'currency' => 'MAD',
+            'pricing_mode' => 'upon_request',
+
+            'is_curriculum_public' => false,
+
+            'meta_title' => null,
+            'meta_description' => null,
 
             'status' => 'draft',
             'sort_order' => 0,
@@ -48,13 +56,11 @@ class CourseFactory extends Factory
         ];
     }
 
-    /**
-     * Create language and level records that belong to the same center.
-     */
     public function forCenter(Center $center): static
     {
         return $this->state([
             'center_id' => $center->id,
+            'source_locale' => $center->default_locale,
 
             'language_id' => Language::factory()
                 ->for($center),
@@ -64,9 +70,6 @@ class CourseFactory extends Factory
         ]);
     }
 
-    /**
-     * Override the automatically generated language.
-     */
     public function withLanguage(Language $language): static
     {
         return $this->state([
@@ -74,9 +77,6 @@ class CourseFactory extends Factory
         ]);
     }
 
-    /**
-     * Override the automatically generated level.
-     */
     public function withLevel(Level $level): static
     {
         return $this->state([
