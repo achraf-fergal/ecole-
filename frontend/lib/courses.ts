@@ -23,6 +23,7 @@ export interface Course {
   slug: string;
   title: string;
   description: string;
+  availableLocales?: Locale[];
   language: CourseOption;
   level: CourseOption | null;
   studyFormat: StudyFormat | null;
@@ -398,6 +399,12 @@ function normalizeCourse(value: unknown): Course | null {
 
   const level = normalizeOption(value.level);
 
+  const availableLocales = Array.isArray(value.available_locales)
+    ? value.available_locales.filter(
+        (item): item is Locale => item === "en" || item === "fr"
+      )
+    : [];
+
   const format = getString(value.study_format);
 
   const studyFormat: StudyFormat | null =
@@ -412,6 +419,7 @@ function normalizeCourse(value: unknown): Course | null {
     slug,
     title,
     description: getString(value.short_description),
+    availableLocales,
     language,
     level,
     studyFormat,
@@ -1179,4 +1187,66 @@ export async function getCourseDetails(
     slug,
     locale
   );
+}
+
+export interface CourseSitemapItem {
+  slug: string;
+  availableLocales: Locale[];
+}
+
+export async function getCourseSitemapItems(
+  locale: Locale
+): Promise<CourseSitemapItem[]> {
+  const query: CourseQuery = {
+    search: "",
+    language: "",
+    level: "",
+    format: "",
+    sort: "recommended",
+    page: 1,
+    locale,
+  };
+
+  const firstPage = await getCourses(query);
+
+  if (firstPage.source !== "api") {
+    return [];
+  }
+
+  const courses = [...firstPage.courses];
+  const lastPage = firstPage.pagination.lastPage;
+
+  for (let startPage = 2; startPage <= lastPage; startPage += 4) {
+    const pageNumbers = Array.from(
+      {
+        length: Math.min(4, lastPage - startPage + 1),
+      },
+      (_, index) => startPage + index
+    );
+
+    const results = await Promise.all(
+      pageNumbers.map((page) =>
+        getCourses({
+          ...query,
+          page,
+        })
+      )
+    );
+
+    if (results.some((result) => result.source !== "api")) {
+      return [];
+    }
+
+    courses.push(...results.flatMap((result) => result.courses));
+  }
+
+  return courses
+    .map((course) => ({
+      slug: course.slug,
+      availableLocales: course.availableLocales ?? [],
+    }))
+    .filter(
+      (course) =>
+        course.slug.length > 0 && course.availableLocales.length > 0
+    );
 }

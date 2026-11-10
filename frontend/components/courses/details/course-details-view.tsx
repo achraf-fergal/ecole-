@@ -20,12 +20,12 @@ const translations = {
     about: "About Us",
     courses: "Courses",
     contact: "Contact",
-    portal: "Student Portal",
     preRegister: "Pre-registration",
 
     breadcrumb: "Course Details",
     level: "LEVEL",
     overview: "COURSE OVERVIEW",
+    heroHighlights: "KEY LEARNING HIGHLIGHTS",
 
     requestEnrollment: "Request Enrollment",
     contactCenter: "Talk to our team",
@@ -78,6 +78,7 @@ const translations = {
     legal: "Legal",
     privacy: "Privacy policy",
     terms: "Terms and conditions",
+    legalUnavailable: "Legal pages are being prepared.",
     rights: "All rights reserved.",
 
     noTranslation: "This course is not available in the selected language.",
@@ -104,12 +105,12 @@ const translations = {
     about: "À propos",
     courses: "Cours",
     contact: "Contact",
-    portal: "Espace étudiant",
     preRegister: "Préinscription",
 
     breadcrumb: "Détails du cours",
     level: "NIVEAU",
     overview: "PRÉSENTATION DU COURS",
+    heroHighlights: "POINTS CLÉS DE LA FORMATION",
 
     requestEnrollment: "Demander une inscription",
     contactCenter: "Contacter notre équipe",
@@ -162,6 +163,7 @@ const translations = {
     legal: "Informations légales",
     privacy: "Politique de confidentialité",
     terms: "Conditions d'utilisation",
+    legalUnavailable: "Les pages légales sont en préparation.",
     rights: "Tous droits réservés.",
 
     noTranslation: "Ce cours n'est pas disponible dans la langue sélectionnée.",
@@ -285,12 +287,9 @@ function CourseDetailsHeader({
 }) {
   const t = translations[locale];
 
-  // Only offer website languages that have published course content.
-  const availableLocales: Locale[] = ["en", "fr"];
-
-  if (!availableLocales.includes(locale)) {
-    availableLocales.push(locale);
-  }
+  const availableLocales = course.localization.availableLocales.filter(
+    (item): item is Locale => item === "en" || item === "fr"
+  );
 
   return (
     <header className="sticky top-0 z-50 border-b border-white/10 bg-[#092443] text-white shadow-lg">
@@ -383,13 +382,6 @@ function CourseDetailsHeader({
           </div>
 
           <Link
-            href="/student/login"
-            className="hidden rounded-full border border-white/40 px-4 py-2.5 text-xs font-bold transition hover:bg-white/10 sm:inline-flex"
-          >
-            {t.portal}
-          </Link>
-
-          <Link
             href="/#contact"
             className="rounded-full bg-[#f6a23b] px-4 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451] sm:px-5"
           >
@@ -413,6 +405,9 @@ function CourseHero({
   locale: Locale;
 }) {
   const t = translations[locale];
+  const heroHighlights = course.outcomes
+    .filter((outcome) => outcome.isHighlight)
+    .slice(0, 3);
 
   return (
     <section className="bg-gradient-to-br from-white via-[#f1f7f9] to-[#eaf4f5]">
@@ -474,6 +469,41 @@ function CourseHero({
             <p className="mt-5 max-w-xl text-sm leading-7 text-slate-600 sm:text-base">
               {course.shortDescription}
             </p>
+          )}
+
+          {heroHighlights.length > 0 && (
+            <div className="mt-6">
+              <p className="mb-3 text-[10px] font-extrabold uppercase tracking-[0.15em] text-[#0e8988]">
+                {t.heroHighlights}
+              </p>
+
+              <ul className="grid gap-2 sm:grid-cols-2">
+                {heroHighlights.map((outcome, index) => (
+                  <li
+                    key={`${index}-${outcome.content}`}
+                    className="flex items-start gap-2 text-sm leading-6 text-slate-600"
+                  >
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#e0f2ef] text-[#087b83]">
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="m5 12 4 4L19 6" />
+                      </svg>
+                    </span>
+
+                    <span>{outcome.content}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -1103,14 +1133,21 @@ function CourseDetailsFooter({
             {t.legal}
           </h2>
 
-          <div className="mt-4 flex flex-col gap-3 text-sm text-slate-400">
-            <Link href="/privacy" className="hover:text-white">
+          <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
+            <span
+              aria-disabled="true"
+              title={t.legalUnavailable}
+              className="cursor-not-allowed opacity-60"
+            >
               {t.privacy}
-            </Link>
-
-            <Link href="/terms" className="hover:text-white">
+            </span>
+            <span
+              aria-disabled="true"
+              title={t.legalUnavailable}
+              className="cursor-not-allowed opacity-60"
+            >
               {t.terms}
-            </Link>
+            </span>
           </div>
         </div>
       </div>
@@ -1143,7 +1180,7 @@ export default function CourseDetailsView({
   return (
     <main
       lang={locale}
-      className="min-h-screen bg-[#f8fafc] text-[#102b4c]"
+      className="min-h-screen bg-[#f8fafc] pb-24 text-[#102b4c] md:pb-0"
     >
       <CourseDetailsHeader
         locale={locale}
@@ -1173,6 +1210,7 @@ export default function CourseDetailsView({
             {course.description && (
               <section aria-labelledby="about-course-heading">
                 <SectionHeading
+                  id="about-course-heading"
                   eyebrow="ABOUT THE PROGRAMME"
                   title={t.aboutTitle}
                 />
@@ -1253,6 +1291,35 @@ export default function CourseDetailsView({
       </section>
 
       <CourseDetailsFooter locale={locale} />
+
+      <div
+        role="region"
+        aria-label={translations[locale].requestEnrollment}
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-5 pt-3 shadow-[0_-8px_25px_rgba(9,36,67,0.08)] backdrop-blur-md md:hidden"
+        style={{
+          paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))",
+        }}
+      >
+        <div className="mx-auto flex max-w-[600px] items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-[10px] font-semibold text-slate-500">
+              {translations[locale].pricingTitle}
+            </p>
+
+            <p className="truncate text-sm font-black text-[#102b4c]">
+              {getPriceLabel(course, locale)}
+            </p>
+          </div>
+
+          <Link
+            href="/#contact"
+            className="inline-flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#f6a23b] px-5 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#0e8988]"
+          >
+            {translations[locale].requestEnrollment}
+            <span aria-hidden="true">→</span>
+          </Link>
+        </div>
+      </div>
     </main>
   );
 }

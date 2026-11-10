@@ -112,7 +112,7 @@ export async function generateMetadata({
       title: "Course translation unavailable",
       robots: {
         index: false,
-        follow: false,
+        follow: true,
       },
     };
   }

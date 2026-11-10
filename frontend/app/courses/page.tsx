@@ -77,7 +77,6 @@ const translations = {
       "Our team can help you understand the available programmes and choose your next step.",
     helpButton: "Contact the centre",
 
-    portal: "Student Portal",
     preRegister: "Pre-registration",
 
     footerDescription:
@@ -86,6 +85,7 @@ const translations = {
     legal: "Legal",
     privacy: "Privacy policy",
     terms: "Terms and conditions",
+    legalUnavailable: "Legal pages are being prepared.",
 
     pagination: "Course results",
   },
@@ -139,7 +139,6 @@ const translations = {
       "Notre équipe peut vous aider à découvrir les programmes et à choisir la prochaine étape.",
     helpButton: "Contacter le centre",
 
-    portal: "Espace étudiant",
     preRegister: "Préinscription",
 
     footerDescription:
@@ -148,6 +147,7 @@ const translations = {
     legal: "Informations légales",
     privacy: "Politique de confidentialité",
     terms: "Conditions d'utilisation",
+    legalUnavailable: "Les pages légales sont en préparation.",
 
     pagination: "Résultats des cours",
   },
@@ -382,13 +382,6 @@ function Header({
           </Link>
 
           <Link
-            href="/student/login"
-            className="hidden rounded-full border border-white/40 px-4 py-2.5 text-xs font-bold transition hover:bg-white/10 sm:inline-flex"
-          >
-            {query.locale === "en" ? "Student Portal" : "Espace étudiant"}
-          </Link>
-
-          <Link
             href="/#contact"
             className="rounded-full bg-[#f6a23b] px-4 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451] sm:px-5"
           >
@@ -453,9 +446,21 @@ function Footer({
         <div>
           <h2 className="font-extrabold">{t.legal}</h2>
 
-          <div className="mt-4 flex flex-col gap-3 text-sm text-slate-400">
-            <Link href="/privacy" className="hover:text-white">{t.privacy}</Link>
-            <Link href="/terms" className="hover:text-white">{t.terms}</Link>
+          <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
+            <span
+              aria-disabled="true"
+              title={t.legalUnavailable}
+              className="cursor-not-allowed opacity-60"
+            >
+              {t.privacy}
+            </span>
+            <span
+              aria-disabled="true"
+              title={t.legalUnavailable}
+              className="cursor-not-allowed opacity-60"
+            >
+              {t.terms}
+            </span>
           </div>
         </div>
       </div>

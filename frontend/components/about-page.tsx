@@ -10,7 +10,6 @@ type Locale = "en" | "fr";
 const content = {
   en: {
     nav: ["Home", "About Us", "Courses", "Contact"],
-    portal: "Student Portal",
     preRegister: "Pre-Registration",
 
     heroLabel: "GET TO KNOW US",
@@ -124,12 +123,12 @@ const content = {
     legal: "Legal",
     privacy: "Privacy Policy",
     terms: "Terms & Conditions",
+    legalUnavailable: "Legal pages are being prepared.",
     rights: "All rights reserved.",
   },
 
   fr: {
     nav: ["Accueil", "À propos", "Cours", "Contact"],
-    portal: "Espace étudiant",
     preRegister: "Préinscription",
 
     heroLabel: "DÉCOUVREZ NOTRE CENTRE",
@@ -243,6 +242,7 @@ const content = {
     legal: "Informations légales",
     privacy: "Politique de confidentialité",
     terms: "Conditions d'utilisation",
+    legalUnavailable: "Les pages légales sont en préparation.",
     rights: "Tous droits réservés.",
   },
 } as const;
@@ -389,7 +389,7 @@ export default function AboutPage() {
     document.documentElement.lang = locale;
   }, [locale]);
 
-  const navTargets = ["/", "/about", "/courses", "/contact"];
+  const navTargets = ["/", "/about", "/courses", "/#contact"];
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#f8fafc] text-[#102b4c]">
@@ -402,7 +402,7 @@ export default function AboutPage() {
 
           <nav className="hidden items-center gap-7 lg:flex">
             {t.nav.map((item, index) => (
-              <a
+            <Link
                 key={item}
                 href={navTargets[index]}
                 className={`text-sm font-semibold transition hover:text-[#f6a23b] ${
@@ -410,7 +410,7 @@ export default function AboutPage() {
                 }`}
               >
                 {item}
-              </a>
+              </Link>
             ))}
           </nav>
 
@@ -426,13 +426,6 @@ export default function AboutPage() {
               <Icon name="globe" size={16} />
               {locale.toUpperCase()}
             </button>
-
-            <a
-              href="/student/login"
-              className="rounded-full border border-white/40 px-4 py-2.5 text-xs font-bold transition hover:bg-white/10"
-            >
-              {t.portal}
-            </a>
 
             <Link
               href="/#contact"
@@ -469,22 +462,16 @@ export default function AboutPage() {
           <nav className="border-t border-white/10 bg-[#092443] px-5 py-4 md:hidden">
             <div className="flex flex-col gap-1">
               {t.nav.map((item, index) => (
-                <a
+              <Link
                   key={item}
                   href={navTargets[index]}
                   onClick={() => setMenuOpen(false)}
                   className="rounded-xl px-3 py-3 text-sm font-semibold hover:bg-white/10"
                 >
                   {item}
-                </a>
+                </Link>
               ))}
 
-              <a
-                href="/student/login"
-                className="mt-2 rounded-xl border border-white/25 px-3 py-3 text-sm font-semibold"
-              >
-                {t.portal}
-              </a>
             </div>
           </nav>
         )}
@@ -511,13 +498,13 @@ export default function AboutPage() {
               {t.heroDescription}
             </p>
 
-            <a
+          <Link
               href="#our-story"
               className="mt-8 inline-flex items-center justify-center gap-3 rounded-full bg-[#092b4d] px-7 py-4 font-bold text-white shadow-lg transition hover:-translate-y-1 hover:bg-[#15476e]"
             >
               {t.heroButton}
               <Icon name="arrow" size={18} />
-            </a>
+            </Link>
           </div>
 
           <div className="relative">
@@ -574,7 +561,7 @@ export default function AboutPage() {
 
           <div className="space-y-16 sm:space-y-24">
             {t.timeline.map((item, index) => (
-              <article
+            <article
                 key={item.number}
                 className="relative pl-10 sm:pl-16"
               >
@@ -633,7 +620,7 @@ className="object-cover transition duration-700 hover:scale-105"
         <div className="mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-12">
           <div className="grid gap-6 lg:grid-cols-2">
 
-            <article className="relative overflow-hidden rounded-[2rem] bg-[#092443] p-8 text-white sm:p-11">
+          <article className="relative overflow-hidden rounded-[2rem] bg-[#092443] p-8 text-white sm:p-11">
               <div className="absolute -right-12 -top-12 h-48 w-48 rounded-full bg-[#0e8988]/20 blur-3xl" />
 
               <div className="relative">
@@ -655,7 +642,7 @@ className="object-cover transition duration-700 hover:scale-105"
               </div>
             </article>
 
-            <article className="relative overflow-hidden rounded-[2rem] bg-[#e9f5f4] p-8 text-[#102b4c] sm:p-11">
+          <article className="relative overflow-hidden rounded-[2rem] bg-[#e9f5f4] p-8 text-[#102b4c] sm:p-11">
               <div className="absolute -right-12 -top-12 h-48 w-48 rounded-full bg-[#f6a23b]/20 blur-3xl" />
 
               <div className="relative">
@@ -699,7 +686,7 @@ className="object-cover transition duration-700 hover:scale-105"
 
         <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
           {t.values.map((value) => (
-            <article
+          <article
               key={value.title}
               className="group rounded-[1.7rem] border border-slate-200 bg-white p-7 transition duration-300 hover:-translate-y-1 hover:border-[#9ddbd5] hover:bg-[#f4fbfa] hover:shadow-xl"
             >
@@ -740,7 +727,7 @@ className="object-cover transition duration-700 hover:scale-105"
           {/* Empty testimonial slots: real approved reviews will replace these. */}
           <div className="grid gap-5 md:grid-cols-3">
             {[1, 2, 3].map((item) => (
-              <article
+            <article
                 key={item}
                 className="flex min-h-[245px] flex-col justify-between rounded-[1.7rem] border border-slate-200 bg-white p-7 shadow-sm"
               >
@@ -793,20 +780,20 @@ className="object-cover transition duration-700 hover:scale-105"
             </div>
 
             <div className="flex shrink-0 flex-col gap-3 sm:flex-row lg:flex-col">
-              <a
-                href="/courses"
-                className="inline-flex items-center justify-center gap-3 rounded-full bg-[#f6a23b] px-7 py-4 text-sm font-extrabold text-[#102b4c] transition hover:-translate-y-1 hover:bg-[#ffb451]"
-              >
-                {t.ctaButton}
-                <Icon name="arrow" size={17} />
-              </a>
+<Link
+href="/courses"
+className="inline-flex items-center justify-center gap-3 rounded-full bg-[#f6a23b] px-7 py-4 text-sm font-extrabold text-[#102b4c] transition hover:-translate-y-1 hover:bg-[#ffb451]"
+>
+{t.ctaButton}
+<Icon name="arrow" size={17} />
+</Link>
 
-              <a
-                href="/contact"
+            <Link
+                href="/#contact"
                 className="inline-flex items-center justify-center rounded-full border border-white/40 px-7 py-4 text-sm font-bold text-white transition hover:bg-white/10"
               >
                 {t.contactButton}
-              </a>
+              </Link>
             </div>
           </div>
         </div>
@@ -829,9 +816,9 @@ className="object-cover transition duration-700 hover:scale-105"
 
             <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
               <Link href="/" className="hover:text-white">{t.nav[0]}</Link>
-              <a href="/about" className="hover:text-white">{t.nav[1]}</a>
-              <a href="/courses" className="hover:text-white">{t.nav[2]}</a>
-              <a href="/contact" className="hover:text-white">{t.nav[3]}</a>
+            <Link href="/about" className="hover:text-white">{t.nav[1]}</Link>
+            <Link href="/courses" className="hover:text-white">{t.nav[2]}</Link>
+              <Link href="/#contact" className="hover:text-white">{t.nav[3]}</Link>
             </div>
           </div>
 
@@ -839,9 +826,20 @@ className="object-cover transition duration-700 hover:scale-105"
             <h3 className="font-extrabold">{t.legal}</h3>
 
             <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
-              <a href="/privacy" className="hover:text-white">{t.privacy}</a>
-              <a href="/terms" className="hover:text-white">{t.terms}</a>
-              <a href="/student/login" className="hover:text-white">{t.portal}</a>
+              <span
+                aria-disabled="true"
+                title={t.legalUnavailable}
+                className="cursor-not-allowed opacity-60"
+              >
+                {t.privacy}
+              </span>
+              <span
+                aria-disabled="true"
+                title={t.legalUnavailable}
+                className="cursor-not-allowed opacity-60"
+              >
+                {t.terms}
+              </span>
             </div>
           </div>
 

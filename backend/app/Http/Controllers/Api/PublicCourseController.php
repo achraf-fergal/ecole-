@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Center;
 use App\Models\Course;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -44,6 +45,15 @@ class PublicCourseController extends Controller
             ->with([
                 'language:id,center_id,code,name,native_name',
                 'level:id,center_id,code,name',
+                'translations' => fn (HasMany $query) => $query
+                    ->published()
+                    ->select([
+                        'id',
+                        'center_id',
+                        'course_id',
+                        'locale',
+                    ])
+                    ->orderBy('locale'),
             ])
             ->where('center_id', $center->id)
             ->published()
@@ -55,7 +65,7 @@ class PublicCourseController extends Controller
             });
 
         // Search
-        if (!empty($validated['search'])) {
+        if (! empty($validated['search'])) {
             $search = trim($validated['search']);
 
             $coursesQuery->where(function (Builder $query) use ($search) {
@@ -66,29 +76,27 @@ class PublicCourseController extends Controller
         }
 
         // Language filter: use language code, not database ID.
-        if (!empty($validated['language'])) {
+        if (! empty($validated['language'])) {
             $languageCode = $validated['language'];
 
             $coursesQuery->whereHas(
                 'language',
-                fn (Builder $query) =>
-                    $query->where('code', $languageCode)
+                fn (Builder $query) => $query->where('code', $languageCode)
             );
         }
 
         // Level filter: use level code, not database ID.
-        if (!empty($validated['level'])) {
+        if (! empty($validated['level'])) {
             $levelCode = $validated['level'];
 
             $coursesQuery->whereHas(
                 'level',
-                fn (Builder $query) =>
-                    $query->where('code', $levelCode)
+                fn (Builder $query) => $query->where('code', $levelCode)
             );
         }
 
         // Study format
-        if (!empty($validated['format'])) {
+        if (! empty($validated['format'])) {
             $coursesQuery->where(
                 'study_format',
                 $validated['format']
@@ -120,9 +128,16 @@ class PublicCourseController extends Controller
                     'id' => $course->id,
                     'slug' => $course->slug,
                     'title' => $course->title,
+                    'available_locales' => collect([
+                        $course->source_locale,
+                        ...$course->translations->pluck('locale')->all(),
+                    ])
+                        ->filter(fn ($locale) => is_string($locale) && $locale !== '')
+                        ->unique()
+                        ->values()
+                        ->all(),
 
-                    'short_description' =>
-                        $course->short_description,
+                    'short_description' => $course->short_description,
 
                     'language' => [
                         'code' => $language->code,
@@ -139,7 +154,7 @@ class PublicCourseController extends Controller
                     'study_format' => $course->study_format,
 
                     'duration_label' => $course->duration_hours
-                        ? $course->duration_hours . ' hours'
+                        ? $course->duration_hours.' hours'
                         : null,
 
                     'cover_image_url' => $course->cover_image_url,
@@ -179,11 +194,9 @@ class PublicCourseController extends Controller
         $formats = Course::query()
             ->where('center_id', $center->id)
             ->published()
-            ->whereHas('language', fn (Builder $q) =>
-                $q->where('is_active', true)
+            ->whereHas('language', fn (Builder $q) => $q->where('is_active', true)
             )
-            ->whereHas('level', fn (Builder $q) =>
-                $q->where('is_active', true)
+            ->whereHas('level', fn (Builder $q) => $q->where('is_active', true)
             )
             ->distinct()
             ->orderBy('study_format')

@@ -3,13 +3,12 @@
 
 import Image from "next/image";
 import { Suspense, useEffect, useState } from "react";
-
+import Link from "next/link";
 type Locale = "en" | "fr";
 
 const content = {
   en: {
     nav: ["Home", "Courses", "About us", "Teachers", "FAQ", "Contact"],
-    portal: "Student Portal",
     preRegister: "Pre-Registration",
     heroLabel: "LANGUAGE CENTER · CASABLANCA",
     heroTitle: "Learn a Language.",
@@ -109,6 +108,7 @@ const content = {
     legal: "Legal",
     privacy: "Privacy Policy",
     terms: "Terms & Conditions",
+    legalUnavailable: "Legal pages are being prepared.",
     footerNote:
       "A learning experience designed around your goals. Programme information is managed by each centre.",
     copyright: "All rights reserved.",
@@ -116,7 +116,6 @@ const content = {
 
   fr: {
     nav: ["Accueil", "Cours", "À propos", "Enseignants", "FAQ", "Contact"],
-    portal: "Espace étudiant",
     preRegister: "Préinscription",
     heroLabel: "CENTRE DE LANGUES · CASABLANCA",
     heroTitle: "Apprenez une langue.",
@@ -216,6 +215,7 @@ const content = {
     legal: "Informations légales",
     privacy: "Politique de confidentialité",
     terms: "Conditions d'utilisation",
+    legalUnavailable: "Les pages légales sont en préparation.",
     footerNote:
       "Une expérience d'apprentissage adaptée à vos objectifs. Les informations sont gérées par chaque centre.",
     copyright: "Tous droits réservés.",
@@ -309,7 +309,7 @@ export default function HomePage() {
       <header className="sticky top-0 z-50 bg-[#092443] text-white shadow-lg">
         <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-4 px-5 py-3 sm:px-8 lg:px-12">
 
-          <a href="#home" className="flex items-center gap-3">
+         <Link href="#home" className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#f6a23b] text-[#092443]">
               <Icon name="graduation" size={28} />
             </div>
@@ -319,17 +319,17 @@ export default function HomePage() {
                 {t.footerTagline}
               </div>
             </div>
-          </a>
+          </Link>
 
           <nav className="hidden items-center gap-6 lg:flex">
             {t.nav.map((item, index) => (
-              <a
+             <Link
                 key={item}
                 href={["#home", "#programs", "#about", "#approach", "#faq", "#contact"][index]}
                 className="text-sm font-semibold transition hover:text-[#f6a23b]"
               >
                 {item}
-              </a>
+              </Link>
             ))}
           </nav>
 
@@ -343,19 +343,12 @@ export default function HomePage() {
               {locale.toUpperCase()}
             </button>
 
-            <a
-              href="/student/login"
-              className="rounded-full border border-white/40 px-4 py-2.5 text-xs font-bold hover:bg-white/10"
-            >
-              {t.portal}
-            </a>
-
-            <a
+           <Link
               href="#contact"
               className="rounded-full bg-[#f6a23b] px-5 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451]"
             >
               {t.preRegister}
-            </a>
+            </Link>
           </div>
 
           <div className="flex items-center gap-2 md:hidden">
@@ -382,18 +375,15 @@ export default function HomePage() {
         {menuOpen && (
           <nav className="flex flex-col gap-1 border-t border-white/10 p-4 lg:hidden">
             {t.nav.map((item, index) => (
-              <a
+             <Link
                 key={item}
                 href={["#home", "#programs", "#about", "#approach", "#faq", "#contact"][index]}
                 onClick={() => setMenuOpen(false)}
                 className="rounded-lg px-3 py-3 text-sm font-semibold hover:bg-white/10"
               >
                 {item}
-              </a>
+              </Link>
             ))}
-            <a href="/student/login" className="px-3 py-3 text-sm font-semibold">
-              {t.portal}
-            </a>
           </nav>
         )}
       </header>
@@ -419,21 +409,21 @@ export default function HomePage() {
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <a
+             <Link
                 href="#programs"
                 className="inline-flex items-center justify-center gap-3 rounded-full bg-[#092b4d] px-7 py-4 font-bold text-white transition hover:bg-[#15476e]"
               >
                 {t.explore}
                 <Icon name="arrow" />
-              </a>
+              </Link>
 
-              <a
+             <Link
                 href="#contact"
                 className="inline-flex items-center justify-center gap-3 rounded-full border border-[#aabcc9] bg-white px-7 py-4 font-bold text-[#173655] transition hover:border-[#0e8988]"
               >
                 <Icon name="mail" />
                 {t.contact}
-              </a>
+              </Link>
             </div>
 
             <div className="mt-7 flex flex-wrap items-center gap-2 text-sm text-slate-500">
@@ -481,15 +471,15 @@ export default function HomePage() {
             </p>
           </div>
 
-          <a href="/courses" className="flex items-center gap-2 font-bold text-[#0b688d]">
+         <Link href="/courses" className="flex items-center gap-2 font-bold text-[#0b688d]">
             {t.allCourses} <Icon name="arrow" />
-          </a>
+          </Link>
         </div>
 
         {/* Temporary preview data. Replace with published Laravel API courses later. */}
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {programmes.map((programme) => (
-            <article
+           <article
               key={programme.id}
               className="group overflow-hidden rounded-[1.7rem] border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-xl"
             >
@@ -525,13 +515,13 @@ export default function HomePage() {
                   {t.level}
                 </div>
 
-                <a
+               <Link
                   href="/courses"
                   className="mt-6 inline-flex items-center gap-2 font-extrabold text-[#086b98] hover:gap-3"
                 >
                   {locale === "en" ? "Explore programme" : "Découvrir le programme"}
                   <Icon name="arrow" size={16} />
-                </a>
+                </Link>
               </div>
             </article>
           ))}
@@ -557,7 +547,7 @@ export default function HomePage() {
 
           <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
             {t.benefits.map((benefit) => (
-              <article
+             <article
                 key={benefit.title}
                 className="rounded-2xl border border-slate-200 bg-[#f8fafc] p-6 transition hover:border-[#9ad8d4] hover:bg-[#f2fbfa]"
               >
@@ -617,13 +607,13 @@ export default function HomePage() {
             ))}
           </div>
 
-          <a
+         <Link
             href="#programs"
             className="mt-8 inline-flex items-center gap-3 rounded-full bg-[#092b4d] px-7 py-4 font-bold text-white hover:bg-[#15476e]"
           >
             {t.approachButton}
             <Icon name="arrow" />
-          </a>
+          </Link>
         </div>
       </section>
 
@@ -646,7 +636,7 @@ export default function HomePage() {
 
           <div className="grid gap-5 md:grid-cols-3">
             {t.steps.map((step, index) => (
-              <article
+             <article
                 key={step.title}
                 className="rounded-3xl border border-white/15 bg-white/[0.06] p-7"
               >
@@ -718,13 +708,13 @@ export default function HomePage() {
             </p>
           </div>
 
-          <a
-            href="/contact"
+         <Link
+            href="/#contact"
             className="inline-flex shrink-0 items-center justify-center gap-3 rounded-full bg-[#f6a23b] px-7 py-4 font-extrabold text-[#172b43] transition hover:bg-[#ffb451]"
           >
             <Icon name="mail" />
             {t.contactButton}
-          </a>
+          </Link>
         </div>
       </section>
 
@@ -753,10 +743,10 @@ export default function HomePage() {
           <div>
             <h3 className="font-extrabold">{t.quickLinks}</h3>
             <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
-              <a href="#home" className="hover:text-white">{t.nav[0]}</a>
-              <a href="#programs" className="hover:text-white">{t.nav[1]}</a>
-              <a href="#about" className="hover:text-white">{t.nav[2]}</a>
-              <a href="#contact" className="hover:text-white">{t.nav[5]}</a>
+             <Link href="#home" className="hover:text-white">{t.nav[0]}</Link>
+             <Link href="#programs" className="hover:text-white">{t.nav[1]}</Link>
+             <Link href="#about" className="hover:text-white">{t.nav[2]}</Link>
+             <Link href="#contact" className="hover:text-white">{t.nav[5]}</Link>
             </div>
           </div>
 
@@ -772,9 +762,20 @@ export default function HomePage() {
           <div>
             <h3 className="font-extrabold">{t.legal}</h3>
             <div className="mt-5 flex flex-col gap-3 text-sm text-slate-400">
-              <a href="/privacy" className="hover:text-white">{t.privacy}</a>
-              <a href="/terms" className="hover:text-white">{t.terms}</a>
-              <a href="/student/login" className="hover:text-white">{t.portal}</a>
+              <span
+                aria-disabled="true"
+                title={t.legalUnavailable}
+                className="cursor-not-allowed opacity-60"
+              >
+                {t.privacy}
+              </span>
+              <span
+                aria-disabled="true"
+                title={t.legalUnavailable}
+                className="cursor-not-allowed opacity-60"
+              >
+                {t.terms}
+              </span>
             </div>
           </div>
         </div>
