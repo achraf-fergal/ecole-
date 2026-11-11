@@ -528,6 +528,50 @@ function parseApiResponse(payload: unknown): CourseResult {
   };
 }
 
+/* =========================================================
+   LARAVEL API URL VALIDATION
+   HTTPS is required in production.
+   HTTP is allowed only for explicitly enabled loopback URLs.
+========================================================= */
+
+function getValidatedLaravelApiBaseUrl(apiBase: string): URL {
+  let baseUrl: URL;
+
+  try {
+    baseUrl = new URL(apiBase);
+  } catch {
+    throw new Error("Invalid Laravel API URL.");
+  }
+
+  const hostname = baseUrl.hostname
+    .replace(/^\[|\]$/g, "")
+    .toLowerCase();
+
+  const isLoopback = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+  ].includes(hostname);
+
+  const allowLocalHttp =
+    process.env.ALLOW_INSECURE_LOCAL_API === "true" &&
+    isLoopback;
+
+  if (
+    baseUrl.protocol !== "https:" &&
+    !(baseUrl.protocol === "http:" && allowLocalHttp)
+  ) {
+    throw new Error("Invalid API protocol.");
+  }
+
+  // Credentials must never be embedded in the API URL.
+  if (baseUrl.username || baseUrl.password) {
+    throw new Error("API URL must not contain credentials.");
+  }
+
+  return baseUrl;
+}
+
 export async function getCourses(
   query: CourseQuery
 ): Promise<CourseResult> {
@@ -560,16 +604,7 @@ export async function getCourses(
   }
 
   try {
-    const baseUrl = new URL(apiBase);
-
-    if (
-      baseUrl.protocol !== "https:" &&
-      !(process.env.NODE_ENV === "development" &&
-        baseUrl.protocol === "http:")
-    ) {
-      throw new Error("Invalid API protocol.");
-    }
-
+    const baseUrl = getValidatedLaravelApiBaseUrl(apiBase);
     const endpoint = new URL(
       `/api/public/centers/${encodeURIComponent(centerSlug)}/courses`,
       baseUrl
@@ -1080,18 +1115,7 @@ async function getCachedCourseDetails(
 
   cacheLife({ revalidate: 60 });
 
-  const baseUrl = new URL(apiBase);
-
-  // Allow HTTP only for local development.
-  if (
-    baseUrl.protocol !== "https:" &&
-    !(
-      process.env.NODE_ENV === "development" &&
-      baseUrl.protocol === "http:"
-    )
-  ) {
-    throw new Error("Invalid Laravel API protocol.");
-  }
+  const baseUrl = getValidatedLaravelApiBaseUrl(apiBase);
 
   const endpoint = new URL(
     `/api/public/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(slug)}`,

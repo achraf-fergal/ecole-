@@ -70,7 +70,15 @@ class Course extends Model
     {
         return $this->belongsTo(Center::class);
     }
-
+    /**
+     * Educational modules belonging to this course.
+     */
+    public function modules(): HasMany
+    {
+        return $this->hasMany(CourseModule::class)
+            ->orderBy('sort_order')
+            ->orderBy('id');
+    }
     public function language(): BelongsTo
     {
         return $this->belongsTo(Language::class);

@@ -38,7 +38,13 @@ class Center extends Model
             ->withPivot(['id', 'status'])
             ->withTimestamps();
     }
-
+    /**
+     * Educational modules belonging to this center.
+     */
+    public function courseModules(): HasMany
+    {
+        return $this->hasMany(CourseModule::class);
+    }
     public function languages(): HasMany
     {
         return $this->hasMany(Language::class);
@@ -53,7 +59,43 @@ class Center extends Model
     {
         return $this->hasMany(Course::class);
     }
+    public function lessons(): HasMany
+    {
+        return $this->hasMany(Lesson::class);
+    }
+    /**
+ * All educational assets belonging to this center.
+ */
+public function lessonAssets(): HasMany
+{
+    return $this->hasMany(LessonAsset::class);
+}
 
+
+
+/**
+ * Questions belonging to this center.
+ */
+public function questions(): HasMany
+{
+    return $this->hasMany(Question::class);
+}
+
+/**
+ * Question options belonging to this center.
+ */
+public function questionOptions(): HasMany
+{
+    return $this->hasMany(QuestionOption::class);
+}
+/**
+ * Exercises owned by this center.
+ */
+
+public function exercises(): HasMany
+{
+    return $this->hasMany(Exercise::class);
+}
     public function isActive(): bool
     {
         return $this->status === 'active';
