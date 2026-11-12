@@ -113,7 +113,15 @@ class Course extends Model
             ->whereNotNull('published_at')
             ->where('published_at', '<=', now());
     }
-
+    /**
+     * Actual teaching groups for this course.
+     */
+    public function cohorts(): HasMany
+    {
+        return $this->hasMany(Cohort::class)
+            ->orderBy('starts_at')
+            ->orderBy('id');
+    }
     public function isPublished(): bool
     {
         return $this->status === 'published'

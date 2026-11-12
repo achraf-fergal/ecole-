@@ -32,6 +32,9 @@ class DatabaseFoundationTest extends TestCase
             'level_templates',
             'levels',
             'courses',
+            'cohorts',
+            'cohort_schedules',
+            'student_profiles',
         ];
 
         foreach ($tables as $table) {

@@ -38,6 +38,16 @@ class User extends Authenticatable
         return $this->hasMany(CenterUser::class);
     }
 
+    /**
+     * Student profiles across all centers.
+     *
+     * One user may have a profile in multiple centers.
+     */
+    public function studentProfiles(): HasMany
+    {
+        return $this->hasMany(StudentProfile::class);
+    }
+
     public function centers(): BelongsToMany
     {
         return $this->belongsToMany(
@@ -49,7 +59,19 @@ class User extends Authenticatable
             ->withPivot(['id', 'status'])
             ->withTimestamps();
     }
-
+    /**
+     * Cohorts assigned to this teacher account.
+     *
+     * The query must always be scoped to the current center
+     * when used by teacher-facing features.
+     */
+    public function teachingCohorts(): HasMany
+    {
+        return $this->hasMany(
+            Cohort::class,
+            'teacher_user_id'
+        );
+    }
     public function platformAdmin(): HasOne
     {
         return $this->hasOne(PlatformAdmin::class);
