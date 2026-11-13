@@ -1,7 +1,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-
+import CourseRegistrationForm from "@/components/courses/details/course-registration-form";
 import CourseCurriculum from "@/components/courses/details/course-curriculum";
 
 import type {
@@ -382,7 +382,7 @@ function CourseDetailsHeader({
           </div>
 
           <Link
-            href="/#contact"
+            href="#request-enrollment-form"
             className="rounded-full bg-[#f6a23b] px-4 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451] sm:px-5"
           >
             {t.preRegister}
@@ -508,7 +508,7 @@ function CourseHero({
 
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Link
-              href="/#contact"
+              href="#request-enrollment-form"
               className="inline-flex min-h-12 items-center justify-center rounded-full bg-[#f6a23b] px-7 py-3 text-sm font-extrabold text-[#102b4c] transition hover:-translate-y-0.5 hover:bg-[#ffb451] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#0e8988]"
             >
               {t.requestEnrollment}
@@ -791,7 +791,7 @@ function CoursePricingCard({
       </div>
 
       <Link
-        href="/#contact"
+        href="#request-enrollment-form"
         className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-[#f6a23b] px-5 py-3 text-sm font-extrabold text-[#102b4c] transition hover:-translate-y-0.5 hover:bg-[#ffb451] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#0e8988]"
       >
         {t.requestEnrollment}
@@ -1051,9 +1051,17 @@ function CourseGroups({
                       {dayLabel(schedule.dayOfWeek)}
                     </span>
 
-                    <span className="font-bold text-[#173655]">
-                      {schedule.startTime} – {schedule.endTime}
-                    </span>
+                    <div className="text-right">
+                      <span className="block font-bold text-[#173655]">
+                        {schedule.startTime} – {schedule.endTime}
+                      </span>
+
+                      {schedule.locationLabel && (
+                        <span className="mt-1 block text-[11px] text-slate-500">
+                          {schedule.locationLabel}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1167,9 +1175,13 @@ function CourseDetailsFooter({
 export default function CourseDetailsView({
   course,
   locale,
+  centerSlug,
+  apiBaseUrl,
 }: {
   course: CourseDetails;
   locale: Locale;
+  centerSlug: string;
+  apiBaseUrl: string;
 }) {
   const t = translations[locale];
 
@@ -1260,6 +1272,20 @@ export default function CourseDetailsView({
         </div>
       </section>
 
+      {/* Course-specific registration form */}
+      <section
+        id="request-enrollment-form"
+        className="mx-auto max-w-[1440px] scroll-mt-28 px-5 py-12 sm:px-8 lg:px-12 lg:py-16"
+      >
+        <CourseRegistrationForm
+          apiBaseUrl={apiBaseUrl}
+          centerSlug={centerSlug}
+          courseSlug={course.slug}
+          courseTitle={course.title}
+          locale={locale}
+        />
+      </section>
+
       {/* Final Enrollment CTA */}
       <section
         id="request-enrollment"
@@ -1281,7 +1307,7 @@ export default function CourseDetailsView({
           </div>
 
           <Link
-            href="/#contact"
+            href="#request-enrollment-form"
             className="inline-flex min-h-12 shrink-0 items-center justify-center gap-3 rounded-full bg-[#f6a23b] px-7 py-4 text-sm font-extrabold text-[#102b4c] transition hover:-translate-y-0.5 hover:bg-[#ffb451]"
           >
             {t.finalButton}
@@ -1312,7 +1338,7 @@ export default function CourseDetailsView({
           </div>
 
           <Link
-            href="/#contact"
+            href="#request-enrollment-form"
             className="inline-flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-[#f6a23b] px-5 py-3 text-xs font-extrabold text-[#102b4c] transition hover:bg-[#ffb451] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#0e8988]"
           >
             {translations[locale].requestEnrollment}

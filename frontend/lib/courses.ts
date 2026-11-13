@@ -700,6 +700,7 @@ export interface CourseGroupSchedule {
   dayOfWeek: string;
   startTime: string;
   endTime: string;
+  locationLabel: string | null;
 }
 
 export interface CourseGroupPreview {
@@ -872,6 +873,7 @@ function normalizeGroupSchedule(
     dayOfWeek,
     startTime,
     endTime,
+    locationLabel: getNullableString(value.location_label),
   };
 }
 

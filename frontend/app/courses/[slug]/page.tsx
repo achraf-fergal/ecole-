@@ -228,6 +228,8 @@ export default async function CourseDetailsPage({
     <CourseDetailsView
       course={result.course}
       locale={locale}
+      centerSlug={process.env.CENTER_SLUG ?? ""}
+      apiBaseUrl={process.env.LARAVEL_API_URL ?? ""}
     />
   );
 }

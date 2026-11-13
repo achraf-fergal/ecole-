@@ -34,6 +34,7 @@ class DatabaseFoundationTest extends TestCase
             'courses',
             'cohorts',
             'cohort_schedules',
+            'leads',
             'student_profiles',
         ];
 
