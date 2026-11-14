@@ -255,8 +255,6 @@ class PublicCourseDetailsController extends Controller
             ];
         }
 
-        
-        
         $publishedLessons = static function (
             $query
         ) use ($course, $contentLocale): void {
@@ -265,15 +263,13 @@ class PublicCourseDetailsController extends Controller
                 ->where('center_id', $course->center_id)
                 ->where('content_locale', $contentLocale);
         };
-        
 
         $modules = $course->modules()
             ->where('center_id', $course->center_id)
             ->published()
             ->whereHas('lessons', $publishedLessons)
             ->with([
-                'lessons' => static function (Builder $query) use (
-                    $course,
+                'lessons' => static function ($query) use ($course,
                     $contentLocale
                 ): void {
                     $query
@@ -344,7 +340,8 @@ class PublicCourseDetailsController extends Controller
     ): array {
         $validSchedules = static function (
             $query
-        ): void {            $query
+        ): void {
+            $query
                 ->whereBetween('day_of_week', [1, 7])
                 ->whereColumn('end_time', '>', 'start_time')
                 ->orderBy('day_of_week')

@@ -106,6 +106,7 @@ class Center extends Model
     {
         return $this->hasMany(Exercise::class);
     }
+
     /**
      * Course cohorts owned by this center.
      */
@@ -115,13 +116,23 @@ class Center extends Model
             ->orderBy('starts_at')
             ->orderBy('id');
     }
+
     /**
- * Weekly schedules belonging to this center.
- */
-public function cohortSchedules(): HasMany
-{
-    return $this->hasMany(CohortSchedule::class);
-}
+     * Weekly schedules belonging to this center.
+     */
+    public function cohortSchedules(): HasMany
+    {
+        return $this->hasMany(CohortSchedule::class);
+    }
+
+    /**
+     * Enrollments owned by this center.
+     */
+    public function enrollments(): HasMany
+    {
+        return $this->hasMany(Enrollment::class);
+    }
+
     public function isActive(): bool
     {
         return $this->status === 'active';

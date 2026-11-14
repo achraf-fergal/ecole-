@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+
 class Cohort extends Model
 {
     use HasFactory;
@@ -121,6 +122,7 @@ class Cohort extends Model
     {
         return $this->status === self::STATUS_COMPLETED;
     }
+
     /**
      * Recurring weekly schedules belonging to this cohort.
      */
@@ -131,6 +133,17 @@ class Cohort extends Model
             ->orderBy('start_time')
             ->orderBy('id');
     }
+
+    /**
+     * Students enrolled in this cohort.
+     */
+    public function enrollments(): HasMany
+    {
+        return $this->hasMany(Enrollment::class)
+            ->orderBy('created_at')
+            ->orderBy('id');
+    }
+
     public function isCancelled(): bool
     {
         return $this->status === self::STATUS_CANCELLED;
