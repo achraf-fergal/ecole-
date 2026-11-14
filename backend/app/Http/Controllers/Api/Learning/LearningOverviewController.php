@@ -9,7 +9,6 @@ use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\LessonProgress;
 use App\Models\StudentProfile;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 
@@ -24,7 +23,8 @@ class LearningOverviewController extends Controller
             $request->route('course')
         );
 
-        Gate::authorize('viewLearning', $course);
+        // Authorize the course within the current tenant.
+        Gate::authorize('viewLearning', [$course, $center]);
 
         $studentProfile = $this->resolveStudentProfile(
             $request,
@@ -36,7 +36,7 @@ class LearningOverviewController extends Controller
             ->where('course_id', $course->id)
             ->published()
             ->with([
-                'lessons' => function (Builder $query) use ($center) {
+                'lessons' => function ($query) use ($center) {
                     $query
                         ->forCenter($center->id)
                         ->published();
@@ -47,7 +47,9 @@ class LearningOverviewController extends Controller
             ->get();
 
         $lessonIds = $modules
-            ->flatMap(fn (CourseModule $module) => $module->lessons->pluck('id'))
+            ->flatMap(
+                fn ($module) => $module->lessons->pluck('id')
+            )
             ->values();
 
         $progressByLesson = $lessonIds->isEmpty()
@@ -60,15 +62,15 @@ class LearningOverviewController extends Controller
                 ->keyBy('lesson_id');
 
         $totalLessons = (int) $modules->sum(
-            fn (CourseModule $module) => $module->lessons->count()
+            fn ($module) => $module->lessons->count()
         );
 
         $completedLessons = $progressByLesson
-            ->where('status', 'completed')
+            ->where('status', LessonProgress::STATUS_COMPLETED)
             ->count();
 
         $inProgressLessons = $progressByLesson
-            ->where('status', 'in_progress')
+            ->where('status', LessonProgress::STATUS_IN_PROGRESS)
             ->count();
 
         $completionPercentage = $totalLessons > 0
@@ -134,7 +136,7 @@ class LearningOverviewController extends Controller
             ->first();
 
         abort_unless(
-            $profile,
+            $profile instanceof StudentProfile,
             403,
             'Active student profile required.'
         );

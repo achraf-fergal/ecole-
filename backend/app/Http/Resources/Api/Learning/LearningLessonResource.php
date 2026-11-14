@@ -3,6 +3,7 @@
 namespace App\Http\Resources\Api\Learning;
 
 use App\Models\Course;
+use App\Models\Exercise;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
 use Illuminate\Http\Request;
@@ -30,6 +31,7 @@ class LearningLessonResource extends JsonResource
             'module' => [
                 'id' => $lesson->courseModule->id,
                 'title' => $lesson->courseModule->title,
+                'description' => $lesson->courseModule->description,
             ],
 
             'lesson' => [
@@ -51,12 +53,14 @@ class LearningLessonResource extends JsonResource
                 'last_accessed_at' => $progress?->last_accessed_at?->toIso8601String(),
             ],
 
+            // Only expose safe asset metadata.
             'assets' => $this->resource['assets']->map(
-                function (LessonAsset $asset) {
+                function (LessonAsset $asset): array {
                     return [
                         'id' => $asset->id,
                         'title' => $asset->title,
                         'asset_type' => $asset->asset_type,
+                        'original_filename' => $asset->original_filename,
                         'mime_type' => $asset->mime_type,
                         'size_bytes' => $asset->size_bytes,
                         'duration_seconds' => $asset->duration_seconds,
@@ -64,6 +68,42 @@ class LearningLessonResource extends JsonResource
                         'caption' => $asset->caption,
                         'is_downloadable' => $asset->is_downloadable,
                         'sort_order' => $asset->sort_order,
+                    ];
+                }
+            )->values(),
+
+            // Question answers and explanations are intentionally excluded.
+            'exercises' => $this->resource['exercises']->map(
+                function (Exercise $exercise): array {
+                    return [
+                        'id' => $exercise->id,
+                        'title' => $exercise->title,
+                        'instructions' => $exercise->instructions,
+                        'max_attempts' => $exercise->max_attempts,
+                        'passing_score' => $exercise->passing_score,
+                        'sort_order' => $exercise->sort_order,
+
+                        'questions' => $exercise->questions->map(
+                            function ($question): array {
+                                return [
+                                    'id' => $question->id,
+                                    'question_type' => $question->question_type,
+                                    'prompt' => $question->prompt,
+                                    'points' => $question->points,
+                                    'sort_order' => $question->sort_order,
+
+                                    'options' => $question->options->map(
+                                        function ($option): array {
+                                            return [
+                                                'id' => $option->id,
+                                                'option_text' => $option->option_text,
+                                                'sort_order' => $option->sort_order,
+                                            ];
+                                        }
+                                    )->values(),
+                                ];
+                            }
+                        )->values(),
                     ];
                 }
             )->values(),

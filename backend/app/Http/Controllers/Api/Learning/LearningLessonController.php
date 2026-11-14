@@ -7,10 +7,12 @@ use App\Http\Resources\Api\Learning\LearningLessonResource;
 use App\Models\Center;
 use App\Models\Course;
 use App\Models\CourseModule;
+use App\Models\Exercise;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
 use App\Models\StudentProfile;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -23,8 +25,12 @@ class LearningLessonController extends Controller
         [$center, $course, $lesson, $studentProfile] =
             $this->resolveLearningContext($request);
 
-        $modules = $this->publishedCourseModules($center, $course);
+        $modules = $this->publishedCourseModules(
+            $center,
+            $course
+        );
 
+        /** @var EloquentCollection<int, Lesson> $lessonSequence */
         $lessonSequence = $modules
             ->flatMap(fn (CourseModule $module) => $module->lessons)
             ->values();
@@ -47,6 +53,7 @@ class LearningLessonController extends Controller
             ->where('lesson_id', $lesson->id)
             ->first();
 
+        // Retrieve active assets without exposing storage information.
         $assets = $lesson->assets()
             ->forCenter($center->id)
             ->active()
@@ -55,6 +62,7 @@ class LearningLessonController extends Controller
                 'lesson_id',
                 'title',
                 'asset_type',
+                'original_filename',
                 'mime_type',
                 'size_bytes',
                 'duration_seconds',
@@ -64,16 +72,43 @@ class LearningLessonController extends Controller
                 'sort_order',
             ]);
 
+        // Retrieve published exercises and safe student-facing question data.
+        $exercises = Exercise::query()
+            ->forCenter($center->id)
+            ->where('lesson_id', $lesson->id)
+            ->published()
+            ->with([
+                'questions' => function ($query) use ($center) {
+                    $query
+                        ->forCenter($center->id)
+                        ->with([
+                            'options' => function ($optionQuery) use ($center) {
+                                $optionQuery->forCenter($center->id);
+                            },
+                        ]);
+                },
+            ])
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get();
+
         return new LearningLessonResource([
             'course' => $course,
             'lesson' => $lesson,
             'progress' => $progress,
             'assets' => $assets,
+            'exercises' => $exercises,
             'previous_lesson' => $previousLesson,
             'next_lesson' => $nextLesson,
         ]);
     }
 
+    /**
+     * Update a student's lesson progress safely.
+     *
+     * The completed flag represents an explicit learner completion
+     * confirmation. Exercise grading must be handled by the assessment API.
+     */
     public function updateProgress(Request $request): JsonResponse
     {
         [$center, $course, $lesson, $studentProfile] =
@@ -92,53 +127,77 @@ class LearningLessonController extends Controller
             ],
         ]);
 
-        $progress = DB::transaction(function () use (
+        $now = now();
+
+        $completedRequested = (bool) ($validated['completed'] ?? false);
+
+        $progressValues = [
+            'center_id' => $center->id,
+            'student_profile_id' => $studentProfile->id,
+            'lesson_id' => $lesson->id,
+
+            'status' => LessonProgress::STATUS_IN_PROGRESS,
+
+            'last_position_seconds' => $validated['last_position_seconds'] ?? 0,
+
+            'started_at' => $now,
+            'completed_at' => null,
+            'last_accessed_at' => $now,
+
+            'created_at' => $now,
+            'updated_at' => $now,
+        ];
+
+        // Only update fields explicitly supplied by the client.
+        $updateColumns = [
+            'last_accessed_at',
+            'updated_at',
+        ];
+
+        if (array_key_exists('last_position_seconds', $validated)) {
+            $updateColumns[] = 'last_position_seconds';
+        }
+
+        DB::transaction(function () use (
+            $progressValues,
+            $updateColumns,
             $center,
-            $lesson,
             $studentProfile,
-            $validated
+            $lesson,
+            $completedRequested,
+            $now
         ) {
-            $progress = LessonProgress::query()
-                ->where('center_id', $center->id)
-                ->where('student_profile_id', $studentProfile->id)
-                ->where('lesson_id', $lesson->id)
-                ->lockForUpdate()
-                ->first();
+            // The unique database constraint protects simultaneous first writes.
+            DB::table('lesson_progresses')->upsert(
+                [$progressValues],
+                [
+                    'center_id',
+                    'student_profile_id',
+                    'lesson_id',
+                ],
+                $updateColumns
+            );
 
-            if (! $progress) {
-                $progress = new LessonProgress();
-
-                $progress->center_id = $center->id;
-                $progress->student_profile_id = $studentProfile->id;
-                $progress->lesson_id = $lesson->id;
-                $progress->status = 'in_progress';
-                $progress->last_position_seconds = 0;
+            // Preserve the original completion timestamp.
+            if ($completedRequested) {
+                DB::table('lesson_progresses')
+                    ->where('center_id', $center->id)
+                    ->where('student_profile_id', $studentProfile->id)
+                    ->where('lesson_id', $lesson->id)
+                    ->whereNull('completed_at')
+                    ->update([
+                        'status' => LessonProgress::STATUS_COMPLETED,
+                        'completed_at' => $now,
+                        'updated_at' => $now,
+                    ]);
             }
-
-            $now = now();
-
-            $progress->started_at ??= $now;
-            $progress->last_accessed_at = $now;
-
-            if (array_key_exists('last_position_seconds', $validated)) {
-                $progress->last_position_seconds =
-                    $validated['last_position_seconds'];
-            }
-
-            $completedRequested = (bool) ($validated['completed'] ?? false);
-
-            // Once completed, the lesson stays completed.
-            if ($completedRequested || $progress->status === 'completed') {
-                $progress->status = 'completed';
-                $progress->completed_at ??= $now;
-            } else {
-                $progress->status = 'in_progress';
-            }
-
-            $progress->save();
-
-            return $progress->fresh();
         });
+
+        $progress = LessonProgress::query()
+            ->where('center_id', $center->id)
+            ->where('student_profile_id', $studentProfile->id)
+            ->where('lesson_id', $lesson->id)
+            ->firstOrFail();
 
         return response()->json([
             'data' => [
@@ -152,6 +211,16 @@ class LearningLessonController extends Controller
         ]);
     }
 
+    /**
+     * Resolve and authorize the complete student learning context.
+     *
+     * @return array{
+     *     0: Center,
+     *     1: Course,
+     *     2: Lesson,
+     *     3: StudentProfile
+     * }
+     */
     private function resolveLearningContext(Request $request): array
     {
         $center = $request->attributes->get('current_center');
@@ -175,7 +244,8 @@ class LearningLessonController extends Controller
 
         $course = $courseQuery->firstOrFail();
 
-        Gate::authorize('viewLearning', $course);
+        // Authorize the course within its tenant.
+        Gate::authorize('viewLearning', [$course, $center]);
 
         $lessonParam = (string) $request->route('lesson');
 
@@ -203,7 +273,11 @@ class LearningLessonController extends Controller
             ])
             ->firstOrFail();
 
-        Gate::authorize('viewLearning', $lesson);
+        // Authorize the lesson inside the requested course and tenant.
+        Gate::authorize(
+            'viewLearning',
+            [$lesson, $course, $center]
+        );
 
         $studentProfile = StudentProfile::query()
             ->forCenter($center->id)
@@ -212,7 +286,7 @@ class LearningLessonController extends Controller
             ->first();
 
         abort_unless(
-            $studentProfile,
+            $studentProfile !== null,
             403,
             'Active student profile required.'
         );
@@ -225,16 +299,21 @@ class LearningLessonController extends Controller
         ];
     }
 
+    /**
+     * Retrieve the published course structure in display order.
+     *
+     * @return EloquentCollection<int, CourseModule>
+     */
     private function publishedCourseModules(
         Center $center,
         Course $course
-    ) {
+    ): EloquentCollection {
         return CourseModule::query()
             ->forCenter($center->id)
             ->where('course_id', $course->id)
             ->published()
             ->with([
-                'lessons' => function (Builder $query) use ($center) {
+                'lessons' => function ($query) use ($center) {
                     $query
                         ->forCenter($center->id)
                         ->published();

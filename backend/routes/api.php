@@ -208,6 +208,9 @@ Route::prefix('centers/{center}')
                 Route::get('/', LearningOverviewController::class)
                     ->name('api.centers.courses.learn.overview');
 
+                Route::get('/player', LearningOverviewController::class)
+                    ->name('api.centers.courses.learn.player');
+
                 // Retrieve one published lesson.
                 Route::get('/lessons/{lesson}', [
                     LearningLessonController::class,
