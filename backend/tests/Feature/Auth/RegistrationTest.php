@@ -36,6 +36,10 @@ class RegistrationTest extends TestCase
             'token_version' => 1,
         ]);
 
+        $createdUser = User::where('email', 'john.doe@example.com')->first();
+        $this->assertSame('user', $createdUser->getPrimaryRole());
+        $this->assertCount(0, $createdUser->centerMemberships);
+
         Event::assertDispatched(Registered::class);
     }
 

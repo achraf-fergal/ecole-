@@ -4,6 +4,7 @@ use App\Http\Middleware\AuthenticateJwt;
 use App\Http\Middleware\EnsureCenterRole;
 use App\Http\Middleware\EnsureCourseEnrollment;
 use App\Http\Middleware\EnsureEmailIsVerified;
+use App\Http\Middleware\EnsurePlatformAdmin;
 use App\Http\Middleware\ValidateApiCsrf;
 use App\Http\Middleware\ValidateTenantAccess;
 use Illuminate\Foundation\Application;
@@ -35,6 +36,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'tenant' => ValidateTenantAccess::class,
             'role' => EnsureCenterRole::class,
             'enrollment' => EnsureCourseEnrollment::class,
+            'platform.admin' => EnsurePlatformAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

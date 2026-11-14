@@ -4,9 +4,13 @@ use App\Http\Controllers\Api\Auth\AuthController;
 use App\Http\Controllers\Api\Auth\EmailVerificationController;
 use App\Http\Controllers\Api\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\Auth\PasswordResetController;
+use App\Http\Controllers\Api\Learning\LearningLessonController;
+use App\Http\Controllers\Api\Learning\LearningOverviewController;
+use App\Http\Controllers\Api\PlatformUserController;
 use App\Http\Controllers\Api\PublicCourseController;
 use App\Http\Controllers\Api\PublicCourseDetailsController;
 use App\Http\Controllers\Api\PublicLeadController;
+use App\Http\Controllers\Api\TenantUserController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -16,31 +20,30 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-Route::prefix('public/centers/{center:slug}')
-    ->group(function () {
-        // Public course registration request.
-        Route::post('/courses/{course:slug}/leads', [
-            PublicLeadController::class,
-            'store',
-        ])
-            ->scopeBindings()
-            ->middleware('throttle:10,1')
-            ->name('api.public.centers.courses.leads.store');
+Route::prefix('public/centers/{center:slug}')->group(function () {
+    // Public course registration request.
+    Route::post('/courses/{course:slug}/leads', [
+        PublicLeadController::class,
+        'store',
+    ])
+        ->scopeBindings()
+        ->middleware('throttle:10,1')
+        ->name('api.public.centers.courses.leads.store');
 
-        // Public courses listing
-        Route::get('/courses', [
-            PublicCourseController::class,
-            'index',
-        ])->name('api.public.centers.courses.index');
+    // Public courses listing.
+    Route::get('/courses', [
+        PublicCourseController::class,
+        'index',
+    ])->name('api.public.centers.courses.index');
 
-        // Public course details
-        Route::get('/courses/{course:slug}', [
-            PublicCourseDetailsController::class,
-            '__invoke',
-        ])
-            ->scopeBindings()
-            ->name('api.public.centers.courses.show');
-    });
+    // Public course details.
+    Route::get('/courses/{course:slug}', [
+        PublicCourseDetailsController::class,
+        '__invoke',
+    ])
+        ->scopeBindings()
+        ->name('api.public.centers.courses.show');
+});
 
 /*
 |--------------------------------------------------------------------------
@@ -62,24 +65,32 @@ Route::prefix('auth')->group(function () {
         ->middleware(['csrf.api'])
         ->name('api.auth.login');
 
-    // Google OAuth endpoints (Sign in / Register with Google)
+    // Google OAuth endpoints.
     Route::get('/google/redirect', [GoogleAuthController::class, 'redirect'])
         ->name('api.auth.google.redirect');
 
     Route::get('/google/callback', [GoogleAuthController::class, 'callback'])
         ->name('api.auth.google.callback');
 
-    Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword'])
+    Route::post('/forgot-password', [
+        PasswordResetController::class,
+        'forgotPassword',
+    ])
         ->middleware(['throttle:6,1', 'csrf.api'])
         ->name('api.auth.forgot-password');
 
-    Route::post('/reset-password', [PasswordResetController::class, 'resetPassword'])
+    Route::post('/reset-password', [
+        PasswordResetController::class,
+        'resetPassword',
+    ])
         ->middleware(['throttle:6,1', 'csrf.api'])
         ->name('api.auth.reset-password');
 
     // Email verification via signed link.
-    Route::get('/email/verify/{id}/{hash}', [EmailVerificationController::class, 'verify'])
-        ->name('verification.verify');
+    Route::get('/email/verify/{id}/{hash}', [
+        EmailVerificationController::class,
+        'verify',
+    ])->name('verification.verify');
 
     // Authenticated auth endpoints.
     Route::middleware(['csrf.api', 'auth.jwt'])->group(function () {
@@ -95,7 +106,10 @@ Route::prefix('auth')->group(function () {
         Route::post('/logout-all', [AuthController::class, 'logoutAll'])
             ->name('api.auth.logout-all');
 
-        Route::post('/email/verification-notification', [EmailVerificationController::class, 'resend'])
+        Route::post('/email/verification-notification', [
+            EmailVerificationController::class,
+            'resend',
+        ])
             ->middleware('throttle:6,1')
             ->name('api.auth.email.verification-notification');
     });
@@ -110,7 +124,7 @@ Route::prefix('auth')->group(function () {
 Route::prefix('centers/{center}')
     ->middleware(['auth.jwt', 'verified.api', 'tenant'])
     ->group(function () {
-        // Center home / membership validation
+        // Center home / membership validation.
         Route::get('/context', function (Request $request) {
             return response()->json([
                 'center' => $request->attributes->get('current_center'),
@@ -118,7 +132,7 @@ Route::prefix('centers/{center}')
             ]);
         })->name('api.centers.context');
 
-        // Center Admin area
+        // Center Admin area.
         Route::prefix('admin')
             ->middleware('role:center_admin')
             ->group(function () {
@@ -128,9 +142,41 @@ Route::prefix('centers/{center}')
                         'center_id' => $request->attributes->get('current_center')->id,
                     ]);
                 })->name('api.centers.admin.dashboard');
+
+                // User & Role Management within this center.
+                Route::get('/roles', [TenantUserController::class, 'availableRoles'])
+                    ->name('api.tenant.roles');
+
+                Route::get('/users', [TenantUserController::class, 'index'])
+                    ->name('api.tenant.users.index');
+
+                Route::post('/users', [TenantUserController::class, 'store'])
+                    ->middleware('csrf.api')
+                    ->name('api.tenant.users.store');
+
+                Route::put('/users/{user}/roles', [
+                    TenantUserController::class,
+                    'updateRoles',
+                ])
+                    ->middleware('csrf.api')
+                    ->name('api.tenant.users.roles.update');
+
+                Route::put('/users/{user}/status', [
+                    TenantUserController::class,
+                    'updateStatus',
+                ])
+                    ->middleware('csrf.api')
+                    ->name('api.tenant.users.status.update');
+
+                Route::delete('/users/{user}', [
+                    TenantUserController::class,
+                    'destroy',
+                ])
+                    ->middleware('csrf.api')
+                    ->name('api.tenant.users.destroy');
             });
 
-        // Teacher area
+        // Teacher area.
         Route::prefix('teacher')
             ->middleware('role:teacher')
             ->group(function () {
@@ -141,25 +187,80 @@ Route::prefix('centers/{center}')
                 })->name('api.centers.teacher.cohorts');
             });
 
-        // Student learning area with enrollment enforcement
+        /*
+        |--------------------------------------------------------------------------
+        | Student Learning API
+        |--------------------------------------------------------------------------
+        |
+        | Every endpoint here requires:
+        | - Authenticated JWT
+        | - Verified email
+        | - Active tenant access
+        | - Student role
+        | - Active course enrollment
+        |
+        */
+
         Route::prefix('courses/{course}/learn')
             ->middleware(['role:student', 'enrollment'])
             ->group(function () {
-                Route::get('/player', function (Request $request) {
-                    return response()->json([
-                        'message' => 'Course player access granted.',
-                    ]);
-                })->name('api.centers.courses.learn.player');
+                // Course learning overview.
+                Route::get('/', LearningOverviewController::class)
+                    ->name('api.centers.courses.learn.overview');
+
+                // Retrieve one published lesson.
+                Route::get('/lessons/{lesson}', [
+                    LearningLessonController::class,
+                    'show',
+                ])->name('api.centers.courses.learn.lessons.show');
+
+                // Save lesson progress.
+                Route::patch('/lessons/{lesson}/progress', [
+                    LearningLessonController::class,
+                    'updateProgress',
+                ])
+                    ->middleware('csrf.api')
+                    ->name('api.centers.courses.learn.lessons.progress.update');
             });
     });
 
-// Platform Super Admin area
+/*
+|--------------------------------------------------------------------------
+| Platform Super Admin area
+|--------------------------------------------------------------------------
+*/
+
 Route::prefix('platform-admin')
-    ->middleware(['auth.jwt', 'role:platform_admin'])
+    ->middleware(['auth.jwt', 'verified.api', 'platform.admin'])
     ->group(function () {
         Route::get('/stats', function () {
             return response()->json([
                 'message' => 'Platform admin access granted.',
             ]);
         })->name('api.platform-admin.stats');
+
+        Route::get('/users', [PlatformUserController::class, 'index'])
+            ->name('api.platform.users.index');
+
+        Route::put('/users/{user}/super-admin', [
+            PlatformUserController::class,
+            'toggleSuperAdmin',
+        ])
+            ->middleware('csrf.api')
+            ->name('api.platform.users.super-admin');
+
+        Route::put('/users/{user}/status', [
+            PlatformUserController::class,
+            'updateStatus',
+        ])
+            ->middleware('csrf.api')
+            ->name('api.platform.users.status');
+
+        Route::post('/users/{user}/centers', [
+            PlatformUserController::class,
+            'assignCenter',
+        ])
+            ->middleware('csrf.api')
+            ->name('api.platform.users.assign-center');
     });
+

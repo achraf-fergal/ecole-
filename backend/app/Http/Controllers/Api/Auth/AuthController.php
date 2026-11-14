@@ -214,6 +214,7 @@ class AuthController extends Controller
             'name' => $user->name,
             'email' => $user->email,
             'status' => $user->status,
+            'role' => $user->getPrimaryRole(),
             'email_verified' => $user->hasVerifiedEmail(),
             'is_platform_admin' => $user->isPlatformAdmin(),
             'centers' => $centers,

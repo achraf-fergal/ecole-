@@ -16,6 +16,7 @@ export interface AuthUser {
   name: string;
   email: string;
   status: string;
+  role?: string;
   email_verified: boolean;
   is_platform_admin: boolean;
   centers: UserCenterMembership[];

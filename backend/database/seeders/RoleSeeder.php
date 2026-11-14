@@ -28,6 +28,12 @@ class RoleSeeder extends Seeder
                 'description' => 'Accesses enrolled courses and learning content.',
                 'is_system' => true,
             ],
+            [
+                'key' => 'user',
+                'name' => 'User',
+                'description' => 'Registered user without teacher, student, or administrative role assignments.',
+                'is_system' => true,
+            ],
         ];
 
         foreach ($roles as $role) {

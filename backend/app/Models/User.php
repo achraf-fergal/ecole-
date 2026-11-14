@@ -76,6 +76,38 @@ class User extends Authenticatable implements JWTSubject, MustVerifyEmail
     }
 
     /**
+     * Determine the user's primary global or default role.
+     * Returns 'super_admin', 'center_admin', 'teacher', 'student', or 'user'.
+     */
+    public function getPrimaryRole(): string
+    {
+        if ($this->isPlatformAdmin()) {
+            return 'super_admin';
+        }
+
+        $allRoles = $this->centerMemberships()
+            ->where('status', 'active')
+            ->with('roles')
+            ->get()
+            ->flatMap(fn ($m) => $m->roles->pluck('key'))
+            ->unique();
+
+        if ($allRoles->contains('center_admin')) {
+            return 'center_admin';
+        }
+
+        if ($allRoles->contains('teacher')) {
+            return 'teacher';
+        }
+
+        if ($allRoles->contains('student')) {
+            return 'student';
+        }
+
+        return 'user';
+    }
+
+    /**
      * Check if user has a specific role key in a specific center.
      */
     public function hasRoleInCenter(Center|int $center, string $roleKey): bool
