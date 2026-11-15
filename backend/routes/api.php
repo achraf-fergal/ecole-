@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\Auth\PasswordResetController;
 use App\Http\Controllers\Api\Learning\LearningLessonController;
 use App\Http\Controllers\Api\Learning\LearningOverviewController;
+use App\Http\Controllers\Api\Learning\LessonAssetAccessController;
 use App\Http\Controllers\Api\PlatformUserController;
 use App\Http\Controllers\Api\PublicCourseController;
 use App\Http\Controllers\Api\PublicCourseDetailsController;
@@ -208,14 +209,33 @@ Route::prefix('centers/{center}')
                 Route::get('/', LearningOverviewController::class)
                     ->name('api.centers.courses.learn.overview');
 
-                Route::get('/player', LearningOverviewController::class)
-                    ->name('api.centers.courses.learn.player');
+                Route::get('/player', function (Request $request) {
+                    return response()->json([
+                        'message' => 'Course player access granted.',
+                    ]);
+                })->name('api.centers.courses.learn.player');
 
                 // Retrieve one published lesson.
                 Route::get('/lessons/{lesson}', [
                     LearningLessonController::class,
                     'show',
                 ])->name('api.centers.courses.learn.lessons.show');
+
+                // Retrieve short-lived access to lesson media.
+                Route::get('/lessons/{lesson}/assets/{asset}/access', [
+                    LessonAssetAccessController::class,
+                    'show',
+                ])
+                    ->middleware('throttle:30,1')
+                    ->name('api.centers.courses.learn.lessons.assets.access');
+
+                // Download an asset only when download permission is enabled.
+                Route::get('/lessons/{lesson}/assets/{asset}/download', [
+                    LessonAssetAccessController::class,
+                    'download',
+                ])
+                    ->middleware('throttle:30,1')
+                    ->name('api.centers.courses.learn.lessons.assets.download');
 
                 // Save lesson progress.
                 Route::patch('/lessons/{lesson}/progress', [
@@ -266,4 +286,3 @@ Route::prefix('platform-admin')
             ->middleware('csrf.api')
             ->name('api.platform.users.assign-center');
     });
-

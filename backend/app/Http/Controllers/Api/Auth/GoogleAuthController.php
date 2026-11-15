@@ -100,6 +100,9 @@ class GoogleAuthController extends Controller
         $cookie = $this->cookieService->createAuthCookie($token);
 
         $redirectPath = rtrim($frontendUrl, '/').'/courses';
+        if ($user->isPlatformAdmin() || $user->centerMemberships()->where('status', 'active')->whereHas('roles', fn ($q) => $q->where('key', 'center_admin'))->exists()) {
+            $redirectPath = rtrim($frontendUrl, '/').'/admin/users';
+        }
 
         return redirect()->to($redirectPath)->withCookie($cookie);
     }

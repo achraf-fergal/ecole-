@@ -40,5 +40,14 @@ return [
         'client_secret' => env('GOOGLE_CLIENT_SECRET'),
         'redirect' => env('GOOGLE_REDIRECT_URI', env('APP_URL', 'http://localhost:8000').'/api/auth/google/callback'),
     ],
+    'cloudflare_stream' => [
+        'account_id' => env('CLOUDFLARE_STREAM_ACCOUNT_ID'),
+        'api_token' => env('CLOUDFLARE_STREAM_API_TOKEN'),
+        'customer_code' => env('CLOUDFLARE_STREAM_CUSTOMER_CODE'),
 
+        'token_ttl_minutes' => (int) env(
+            'CLOUDFLARE_STREAM_TOKEN_TTL_MINUTES',
+            10
+        ),
+    ],
 ];

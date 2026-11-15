@@ -50,7 +50,21 @@ function LoginForm() {
         setUnverifiedState(true);
       }
 
-      router.push(redirectTarget);
+      let destination = redirectTarget;
+      if (!rawRedirect) {
+        if (
+          data.user?.is_platform_admin ||
+          data.user?.role === "center_admin" ||
+          data.user?.role === "super_admin" ||
+          data.user?.centers?.some((c) =>
+            c.roles.some((r) => r.key === "center_admin")
+          )
+        ) {
+          destination = "/admin/users";
+        }
+      }
+
+      router.push(destination);
       router.refresh();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Authentication failed.";

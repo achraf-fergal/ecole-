@@ -28,10 +28,17 @@ return [
             'report' => false,
         ],
 
-        // Explicit private disk used by lesson assets.
+        // Private storage dedicated to protected lesson assets.
         'private' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),
+
+            // A unique URL is required for each served local disk.
+            'url' => rtrim(
+                env('APP_URL', 'http://localhost:8000'),
+                '/'
+            ).'/private-storage',
+
             'serve' => true,
             'throw' => true,
             'report' => true,
@@ -41,7 +48,10 @@ return [
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
-            'url' => rtrim(env('APP_URL', 'http://localhost'), '/').'/storage',
+            'url' => rtrim(
+                env('APP_URL', 'http://localhost:8000'),
+                '/'
+            ).'/storage',
             'visibility' => 'public',
             'throw' => false,
             'report' => false,
@@ -56,7 +66,10 @@ return [
             'bucket' => env('AWS_BUCKET'),
             'url' => env('AWS_URL'),
             'endpoint' => env('AWS_ENDPOINT'),
-            'use_path_style_endpoint' => env('AWS_USE_PATH_STYLE_ENDPOINT', false),
+            'use_path_style_endpoint' => env(
+                'AWS_USE_PATH_STYLE_ENDPOINT',
+                false
+            ),
             'throw' => false,
             'report' => false,
         ],
