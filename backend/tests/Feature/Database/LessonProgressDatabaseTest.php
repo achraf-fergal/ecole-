@@ -12,7 +12,6 @@ use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
-
 class LessonProgressDatabaseTest extends TestCase
 {
     use RefreshDatabase;

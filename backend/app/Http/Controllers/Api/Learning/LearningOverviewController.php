@@ -11,7 +11,6 @@ use App\Models\LessonProgress;
 use App\Models\StudentProfile;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
-
 class LearningOverviewController extends Controller
 {
     public function __invoke(Request $request): LearningOverviewResource
