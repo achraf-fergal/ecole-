@@ -14,7 +14,7 @@ use App\Http\Controllers\Api\PublicLeadController;
 use App\Http\Controllers\Api\TenantUserController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-
+use App\Http\Controllers\Api\PlatformCenterController;
 /*
 |--------------------------------------------------------------------------
 | Public Routes
@@ -201,50 +201,80 @@ Route::prefix('centers/{center}')
         | - Active course enrollment
         |
         */
-
-        Route::prefix('courses/{course}/learn')
-            ->middleware(['role:student', 'enrollment'])
-            ->group(function () {
-                // Course learning overview.
+        /*
+        |--------------------------------------------------------------------------
+        | Learning Content Read Access
+        |--------------------------------------------------------------------------
+        |
+        | Students:
+        | - Must have an active enrollment.
+        | - Can access published content only.
+        |
+        | Center Admins:
+        | - Can preview all content in their center.
+        |
+        | Platform Super Admins:
+        | - Can preview content across all centers.
+        |
+        */
+        
+        Route::prefix('courses/{course}/learn')->group(function () {
+        
+            // Read-only learning access.
+            Route::middleware([
+                'role:student,center_admin',
+                'enrollment',
+            ])->group(function () {
+        
                 Route::get('/', LearningOverviewController::class)
                     ->name('api.centers.courses.learn.overview');
-
-                Route::get('/player', function (Request $request) {
-                    return response()->json([
-                        'message' => 'Course player access granted.',
-                    ]);
-                })->name('api.centers.courses.learn.player');
-
-                // Retrieve one published lesson.
+        
+                // Retrieve one authorized lesson.
                 Route::get('/lessons/{lesson}', [
                     LearningLessonController::class,
                     'show',
                 ])->name('api.centers.courses.learn.lessons.show');
-
-                // Retrieve short-lived access to lesson media.
+        
+                // Retrieve protected asset preview access.
                 Route::get('/lessons/{lesson}/assets/{asset}/access', [
                     LessonAssetAccessController::class,
                     'show',
                 ])
                     ->middleware('throttle:30,1')
                     ->name('api.centers.courses.learn.lessons.assets.access');
-
-                // Download an asset only when download permission is enabled.
+        
+                // Download authorized assets.
                 Route::get('/lessons/{lesson}/assets/{asset}/download', [
                     LessonAssetAccessController::class,
                     'download',
                 ])
                     ->middleware('throttle:30,1')
                     ->name('api.centers.courses.learn.lessons.assets.download');
-
-                // Save lesson progress.
-                Route::patch('/lessons/{lesson}/progress', [
-                    LearningLessonController::class,
-                    'updateProgress',
-                ])
-                    ->middleware('csrf.api')
-                    ->name('api.centers.courses.learn.lessons.progress.update');
             });
+        
+            // Student-only progress updates.
+            Route::patch('/lessons/{lesson}/progress', [
+                LearningLessonController::class,
+                'updateProgress',
+            ])
+                ->middleware([
+                    'role:student',
+                    'enrollment',
+                    'csrf.api',
+                ])
+                ->name('api.centers.courses.learn.lessons.progress.update');
+        });
+        // Backward-compatible route used by the existing authentication test.
+Route::get('/player', function (Request $request) {
+    return response()->json([
+        'message' => 'Course player access granted.',
+    ]);
+})
+    ->middleware([
+        'role:student',
+        'enrollment',
+    ])
+    ->name('api.centers.courses.learn.player');
     });
 
 /*
@@ -285,4 +315,16 @@ Route::prefix('platform-admin')
         ])
             ->middleware('csrf.api')
             ->name('api.platform.users.assign-center');
+
+            // Global institute directory for Super Admin.
+            Route::get('/centers', [
+                PlatformCenterController::class,
+                'index',
+            ])->name('api.platform.centers.index');
+    
+            // All course states inside one selected institute.
+            Route::get('/centers/{center:slug}/courses', [
+                PlatformCenterController::class,
+                'courses',
+            ])->name('api.platform.centers.courses.index');
     });

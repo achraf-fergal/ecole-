@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import type {
   LearningOverview,
+  LearningContentStatus,
   LessonProgressStatus,
 } from "@/lib/learning";
 
@@ -53,6 +54,26 @@ function StatusIcon({
   );
 }
 
+function ContentStatusBadge({
+  status,
+}: {
+  status: LearningContentStatus;
+}) {
+  const styles: Record<LearningContentStatus, string> = {
+    draft: "bg-amber-50 text-amber-700",
+    published: "bg-emerald-50 text-emerald-700",
+    archived: "bg-slate-100 text-slate-600",
+  };
+
+  return (
+    <span
+      className={`shrink-0 rounded-md px-2 py-1 text-[9px] font-extrabold uppercase tracking-wide ${styles[status]}`}
+    >
+      {status}
+    </span>
+  );
+}
+
 function formatDuration(minutes: number | null): string {
   if (!minutes || minutes <= 0) {
     return "";
@@ -68,6 +89,9 @@ export default function LearningSidebar({
   isMobileOpen,
   onClose,
 }: LearningSidebarProps) {
+  const isAdminPreview =
+    overview.access_mode === "admin_preview";
+
   const summary = overview.progress_summary;
 
   const percentage = Math.min(
@@ -105,6 +129,14 @@ export default function LearningSidebar({
               <h2 className="mt-2 line-clamp-2 text-base font-black text-[#102b4c]">
                 {overview.course.title}
               </h2>
+
+              {isAdminPreview && (
+                <div className="mt-2">
+                  <ContentStatusBadge
+                    status={overview.course.status}
+                  />
+                </div>
+              )}
             </div>
 
             <button
@@ -126,36 +158,39 @@ export default function LearningSidebar({
             </button>
           </div>
 
-          {/* Course Progress */}
-          <div className="mt-5">
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="font-bold text-slate-600">
-                Your progress
-              </span>
+          {/* Student progress is hidden during administrative previews. */}
+          {!isAdminPreview && (
+            <div className="mt-5">
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="font-bold text-slate-600">
+                  Your progress
+                </span>
 
-              <span className="font-black text-[#0e8988]">
-                {percentage}%
-              </span>
-            </div>
+                <span className="font-black text-[#0e8988]">
+                  {percentage}%
+                </span>
+              </div>
 
-            <div
-              className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100"
-              role="progressbar"
-              aria-label="Course completion"
-              aria-valuenow={percentage}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            >
               <div
-                className="h-full rounded-full bg-[#0e8988] transition-all duration-500"
-                style={{ width: `${percentage}%` }}
-              />
-            </div>
+                className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100"
+                role="progressbar"
+                aria-label="Course completion"
+                aria-valuenow={percentage}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="h-full rounded-full bg-[#0e8988] transition-all duration-500"
+                  style={{ width: `${percentage}%` }}
+                />
+              </div>
 
-            <p className="mt-2 text-[11px] text-slate-500">
-              {summary.completed_lessons} of {summary.total_lessons} lessons completed
-            </p>
-          </div>
+              <p className="mt-2 text-[11px] text-slate-500">
+                {summary.completed_lessons} of{" "}
+                {summary.total_lessons} lessons completed
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Scrollable Curriculum */}
@@ -163,11 +198,15 @@ export default function LearningSidebar({
           {overview.modules.length === 0 ? (
             <div className="rounded-2xl bg-slate-50 p-5 text-center">
               <p className="text-sm font-bold text-slate-700">
-                No lessons available
+                {isAdminPreview
+                  ? "No course content yet"
+                  : "No published lessons available"}
               </p>
 
               <p className="mt-2 text-xs leading-6 text-slate-500">
-                Your instructor has not published any lessons yet.
+                {isAdminPreview
+                  ? "No modules or lessons have been added to this course."
+                  : "Your instructor has not published any lessons yet."}
               </p>
             </div>
           ) : (
@@ -185,7 +224,8 @@ export default function LearningSidebar({
                     <div className="mb-3 flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <span className="text-[9px] font-extrabold uppercase tracking-[0.13em] text-[#0e8988]">
-                          MODULE {String(moduleIndex + 1).padStart(2, "0")}
+                          MODULE{" "}
+                          {String(moduleIndex + 1).padStart(2, "0")}
                         </span>
 
                         <h3
@@ -196,9 +236,15 @@ export default function LearningSidebar({
                         </h3>
                       </div>
 
-                      <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">
-                        {completedCount}/{module.lessons.length}
-                      </span>
+                      {isAdminPreview ? (
+                        <ContentStatusBadge
+                          status={module.status}
+                        />
+                      ) : (
+                        <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500">
+                          {completedCount}/{module.lessons.length}
+                        </span>
+                      )}
                     </div>
 
                     <div className="space-y-1">
@@ -222,9 +268,13 @@ export default function LearningSidebar({
                                 : "hover:bg-slate-50"
                             }`}
                           >
-                            <StatusIcon
-                              status={lesson.progress.status}
-                            />
+                            {isAdminPreview ? (
+                              <span className="w-5 shrink-0" aria-hidden="true" />
+                            ) : (
+                              <StatusIcon
+                                status={lesson.progress.status}
+                              />
+                            )}
 
                             <div className="min-w-0 flex-1">
                               <p
@@ -254,6 +304,12 @@ export default function LearningSidebar({
                                 )}
                               </div>
                             </div>
+
+                            {isAdminPreview && (
+                              <ContentStatusBadge
+                                status={lesson.status}
+                              />
+                            )}
 
                             {isActive && (
                               <span

@@ -14,11 +14,31 @@ use Illuminate\Database\Eloquent\Builder;
 class LearningAccessService
 {
     /**
-     * Resolve an active student profile for the requested center.
+     * Determine whether the user can preview unpublished content.
      *
-     * A platform administrator or center administrator does not gain
-     * student access automatically. The user must have an active
-     * student membership and an active student profile in this center.
+     * Platform admins have global access.
+     * Center admins are restricted to their active center membership.
+     */
+    public function isAdministrativeViewer(
+        User $user,
+        Center $center
+    ): bool {
+        if (! $user->isActive() || ! $center->isActive()) {
+            return false;
+        }
+
+        if ($user->isPlatformAdmin()) {
+            return true;
+        }
+
+        return $user->hasRoleInCenter(
+            $center,
+            'center_admin'
+        );
+    }
+
+    /**
+     * Resolve an active student profile for a center.
      */
     public function findActiveStudentProfile(
         User $user,
@@ -48,7 +68,10 @@ class LearningAccessService
     }
 
     /**
-     * Determine whether the student has a current enrollment in this course.
+     * Determine whether a user may access a course.
+     *
+     * Administrators can preview every course status.
+     * Students require a published course and active enrollment.
      */
     public function canAccessCourse(
         User $user,
@@ -56,13 +79,25 @@ class LearningAccessService
         Center $center
     ): bool {
         if (
-            (int) $course->center_id !== (int) $center->id
-            || ! $course->isPublished()
+            ! $user->isActive()
+            || ! $center->isActive()
+            || (int) $course->center_id !== (int) $center->id
         ) {
             return false;
         }
 
-        $studentProfile = $this->findActiveStudentProfile($user, $center);
+        if ($this->isAdministrativeViewer($user, $center)) {
+            return true;
+        }
+
+        if (! $course->isPublished()) {
+            return false;
+        }
+
+        $studentProfile = $this->findActiveStudentProfile(
+            $user,
+            $center
+        );
 
         if (! $studentProfile) {
             return false;
@@ -72,22 +107,27 @@ class LearningAccessService
             ->forCenter($center->id)
             ->forStudentProfile($studentProfile->id)
             ->activeAt()
-            ->whereHas('cohort', static function (Builder $query) use ($center, $course): void {
-                $query
-                    ->where('center_id', $center->id)
-                    ->where('course_id', $course->id)
-                    ->whereIn('status', [
-                        Cohort::STATUS_OPEN,
-                        Cohort::STATUS_IN_PROGRESS,
-                        Cohort::STATUS_COMPLETED,
-                    ]);
-            })
+            ->whereHas(
+                'cohort',
+                static function (Builder $query) use ($center, $course): void {
+                    $query
+                        ->where('center_id', $center->id)
+                        ->where('course_id', $course->id)
+                        ->whereIn('status', [
+                            Cohort::STATUS_OPEN,
+                            Cohort::STATUS_IN_PROGRESS,
+                            Cohort::STATUS_COMPLETED,
+                        ]);
+                }
+            )
             ->exists();
     }
 
     /**
-     * Determine whether the student may access a published lesson
-     * contained in the requested course and center.
+     * Determine whether a user may access a lesson.
+     *
+     * Administrators can preview unpublished lessons and modules,
+     * provided that they belong to the requested course and center.
      */
     public function canAccessLesson(
         User $user,
@@ -96,16 +136,32 @@ class LearningAccessService
         Center $center
     ): bool {
         if (
-            ! $this->canAccessCourse($user, $course, $center)
+            ! $user->isActive()
+            || ! $center->isActive()
+            || (int) $course->center_id !== (int) $center->id
             || (int) $lesson->center_id !== (int) $center->id
+        ) {
+            return false;
+        }
+
+        $moduleQuery = $lesson->courseModule()
+            ->where('center_id', $center->id)
+            ->where('course_id', $course->id);
+
+        // Administrators can inspect draft and archived course content.
+        if ($this->isAdministrativeViewer($user, $center)) {
+            return $moduleQuery->exists();
+        }
+
+        // Students can only access published learning content.
+        if (
+            ! $this->canAccessCourse($user, $course, $center)
             || ! $lesson->isPublished()
         ) {
             return false;
         }
 
-        return $lesson->courseModule()
-            ->where('center_id', $center->id)
-            ->where('course_id', $course->id)
+        return $moduleQuery
             ->published()
             ->exists();
     }

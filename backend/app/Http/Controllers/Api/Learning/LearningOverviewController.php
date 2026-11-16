@@ -9,10 +9,17 @@ use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\LessonProgress;
 use App\Models\StudentProfile;
+use App\Models\User;
+use App\Services\Learning\LearningAccessService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
+
 class LearningOverviewController extends Controller
 {
+    public function __construct(
+        protected LearningAccessService $learningAccess
+    ) {}
+
     public function __invoke(Request $request): LearningOverviewResource
     {
         $center = $this->currentCenter($request);
@@ -22,23 +29,39 @@ class LearningOverviewController extends Controller
             $request->route('course')
         );
 
-        // Authorize the course within the current tenant.
         Gate::authorize('viewLearning', [$course, $center]);
 
-        $studentProfile = $this->resolveStudentProfile(
-            $request,
-            $center
-        );
+        $isAdminPreview = $this->learningAccess
+            ->isAdministrativeViewer(
+                $request->user(),
+                $center
+            );
 
-        $modules = CourseModule::query()
+        $studentProfile = $isAdminPreview
+            ? null
+            : $this->resolveStudentProfile($request, $center);
+
+        // Students receive published content only.
+        // Administrators receive all module and lesson statuses.
+        $modulesQuery = CourseModule::query()
             ->forCenter($center->id)
-            ->where('course_id', $course->id)
-            ->published()
+            ->where('course_id', $course->id);
+
+        if (! $isAdminPreview) {
+            $modulesQuery->published();
+        }
+
+        $modules = $modulesQuery
             ->with([
-                'lessons' => function ($query) use ($center) {
-                    $query
-                        ->forCenter($center->id)
-                        ->published();
+                'lessons' => function ($query) use (
+                    $center,
+                    $isAdminPreview
+                ): void {
+                    $query->forCenter($center->id);
+
+                    if (! $isAdminPreview) {
+                        $query->published();
+                    }
                 },
             ])
             ->orderBy('sort_order')
@@ -51,14 +74,17 @@ class LearningOverviewController extends Controller
             )
             ->values();
 
-        $progressByLesson = $lessonIds->isEmpty()
-            ? collect()
-            : LessonProgress::query()
+        // Administrator previews never load or expose student progress.
+        $progressByLesson = collect();
+
+        if (! $isAdminPreview && $studentProfile !== null && $lessonIds->isNotEmpty()) {
+            $progressByLesson = LessonProgress::query()
                 ->where('center_id', $center->id)
                 ->where('student_profile_id', $studentProfile->id)
                 ->whereIn('lesson_id', $lessonIds)
                 ->get()
                 ->keyBy('lesson_id');
+        }
 
         $totalLessons = (int) $modules->sum(
             fn ($module) => $module->lessons->count()
@@ -80,6 +106,9 @@ class LearningOverviewController extends Controller
             'course' => $course,
             'modules' => $modules,
             'progress_by_lesson' => $progressByLesson,
+            'access_mode' => $isAdminPreview
+                ? 'admin_preview'
+                : 'student',
             'progress_summary' => [
                 'total_lessons' => $totalLessons,
                 'completed_lessons' => $completedLessons,
@@ -128,11 +157,10 @@ class LearningOverviewController extends Controller
         Request $request,
         Center $center
     ): StudentProfile {
-        $profile = StudentProfile::query()
-            ->forCenter($center->id)
-            ->where('user_id', $request->user()->id)
-            ->active()
-            ->first();
+        $profile = $this->learningAccess->findActiveStudentProfile(
+            $request->user(),
+            $center
+        );
 
         abort_unless(
             $profile instanceof StudentProfile,

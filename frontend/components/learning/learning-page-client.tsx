@@ -288,6 +288,14 @@ export default function LearningPageClient({
     async (
       payload: UpdateLessonProgressPayload
     ): Promise<boolean> => {
+      // Administrative previews must never modify student progress.
+      if (
+        overview?.access_mode !== "student" ||
+        lessonData?.access_mode !== "student"
+      ) {
+        return false;
+      }
+
       if (isSavingProgress) return false;
 
       setIsSavingProgress(true);
@@ -377,6 +385,8 @@ export default function LearningPageClient({
       currentPath,
       router,
       isSavingProgress,
+      overview?.access_mode,
+      lessonData?.access_mode,
     ]
   );
 
@@ -405,7 +415,13 @@ export default function LearningPageClient({
   const { lesson, module, progress, navigation } =
     lessonData;
 
-  const isCompleted = progress.status === "completed";
+  // The backend response determines the active learning mode.
+  const isAdminPreview =
+    overview.access_mode === "admin_preview" ||
+    lessonData.access_mode === "admin_preview";
+
+  const isCompleted =
+    !isAdminPreview && progress.status === "completed";
 
   const previousHref = navigation.previous_lesson
     ? `${currentPath.replace(
@@ -444,6 +460,12 @@ export default function LearningPageClient({
           </div>
 
           <div className="flex shrink-0 items-center gap-3">
+            {isAdminPreview && (
+              <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[9px] font-extrabold uppercase tracking-wide text-indigo-700">
+                Admin Preview
+              </span>
+            )}
+
             <div className="hidden text-right sm:block">
               <p className="text-[10px] text-slate-500">
                 Signed in as
@@ -507,15 +529,29 @@ export default function LearningPageClient({
                   )}
                 </div>
 
-                <span
-                  className={`rounded-full px-3 py-1.5 text-[10px] font-extrabold ${
-                    isCompleted
-                      ? "bg-[#e5f5f2] text-[#087b83]"
-                      : "bg-amber-50 text-amber-700"
-                  }`}
-                >
-                  {isCompleted ? "COMPLETED" : "IN PROGRESS"}
-                </span>
+                {isAdminPreview ? (
+                  <span
+                    className={`rounded-full px-3 py-1.5 text-[10px] font-extrabold uppercase ${
+                      lesson.status === "published"
+                        ? "bg-emerald-50 text-emerald-700"
+                        : lesson.status === "draft"
+                          ? "bg-amber-50 text-amber-700"
+                          : "bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    {lesson.status}
+                  </span>
+                ) : (
+                  <span
+                    className={`rounded-full px-3 py-1.5 text-[10px] font-extrabold ${
+                      isCompleted
+                        ? "bg-[#e5f5f2] text-[#087b83]"
+                        : "bg-amber-50 text-amber-700"
+                    }`}
+                  >
+                    {isCompleted ? "COMPLETED" : "IN PROGRESS"}
+                  </span>
+                )}
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
@@ -529,9 +565,18 @@ export default function LearningPageClient({
                   {lesson.content_type} lesson
                 </span>
 
-                <span>
-                  {overview.progress_summary.completion_percentage}% course progress
-                </span>
+                {!isAdminPreview && (
+                  <span>
+                    {overview.progress_summary.completion_percentage}%
+                    {" "}course progress
+                  </span>
+                )}
+
+                {isAdminPreview && (
+                  <span className="font-bold text-indigo-700">
+                    Course status: {overview.course.status}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -580,11 +625,15 @@ export default function LearningPageClient({
               {!lesson.body && lessonData.assets.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
                   <h3 className="font-black text-[#102b4c]">
-                    Lesson content is not available
+                    {isAdminPreview
+                      ? "No lesson content has been added"
+                      : "Lesson content is not available"}
                   </h3>
 
                   <p className="mt-2 text-sm text-slate-500">
-                    Your instructor has not added resources to this lesson yet.
+                    {isAdminPreview
+                      ? "This lesson does not contain text or active media resources yet."
+                      : "Your instructor has not added resources to this lesson yet."}
                   </p>
                 </div>
               )}
@@ -619,64 +668,132 @@ export default function LearningPageClient({
                               {" · "}
                               Passing score: {exercise.passing_score}%
                             </p>
+
+                            {isAdminPreview && (
+                              <span className="mt-2 inline-block rounded-md bg-amber-50 px-2 py-1 text-[9px] font-extrabold uppercase text-amber-700">
+                                {exercise.status}
+                              </span>
+                            )}
                           </div>
 
-                          <span className="rounded-full bg-amber-50 px-3 py-1 text-[10px] font-bold text-amber-700">
-                            Assessment coming next
-                          </span>
+                          {!isAdminPreview && (
+                            <span className="rounded-full bg-amber-50 px-3 py-1 text-[10px] font-bold text-amber-700">
+                              Assessment coming next
+                            </span>
+                          )}
                         </div>
+
+                        {isAdminPreview &&
+                          exercise.questions.length > 0 && (
+                            <div className="mt-5 space-y-4 border-t border-slate-100 pt-4">
+                              {exercise.questions.map(
+                                (question, questionIndex) => (
+                                  <div
+                                    key={question.id}
+                                    className="rounded-xl bg-slate-50 p-4"
+                                  >
+                                    <p className="text-xs font-extrabold text-[#102b4c]">
+                                      Question {questionIndex + 1}
+                                    </p>
+
+                                    <p className="mt-2 text-sm leading-6 text-slate-700">
+                                      {question.prompt}
+                                    </p>
+
+                                    <div className="mt-3 space-y-2">
+                                      {question.options.map(
+                                        (option) => (
+                                          <div
+                                            key={option.id}
+                                            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white p-3"
+                                          >
+                                            <span className="text-xs text-slate-700">
+                                              {option.option_text}
+                                            </span>
+
+                                            {option.is_correct ===
+                                              true && (
+                                                <span className="rounded-md bg-emerald-50 px-2 py-1 text-[9px] font-extrabold text-emerald-700">
+                                                  Correct Answer
+                                                </span>
+                                              )}
+                                          </div>
+                                        )
+                                      )}
+                                    </div>
+
+                                    {question.explanation && (
+                                      <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50 p-3">
+                                        <p className="text-[10px] font-extrabold uppercase text-indigo-700">
+                                          Explanation
+                                        </p>
+
+                                        <p className="mt-1 text-xs leading-6 text-indigo-900">
+                                          {question.explanation}
+                                        </p>
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          )}
                       </article>
                     ))}
                   </div>
                 </section>
               )}
 
-              {/* Progress Feedback */}
-              {progressError && (
-                <div
-                  role="alert"
-                  className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700"
-                >
-                  {progressError}
-                </div>
+              {!isAdminPreview && (
+                <>
+                  {/* Progress Feedback */}
+                  {progressError && (
+                    <div
+                      role="alert"
+                      className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700"
+                    >
+                      {progressError}
+                    </div>
+                  )}
+
+                  {progressMessage && (
+                    <div
+                      role="status"
+                      className="rounded-xl border border-[#bce5df] bg-[#e8f5f3] p-4 text-xs font-bold text-[#087b83]"
+                    >
+                      {progressMessage}
+                    </div>
+                  )}
+
+                  {/* Lesson Actions */}
+                  <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+                    <div>
+                      <p className="text-sm font-black text-[#102b4c]">
+                        Lesson completion
+                      </p>
+
+                      <p className="mt-1 text-xs text-slate-500">
+                        Mark this lesson as completed when you finish studying.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isCompleted || isSavingProgress}
+                      onClick={() =>
+                        void saveProgress({ completed: true })
+                      }
+                      className="min-h-12 rounded-xl bg-[#0e8988] px-6 py-3 text-xs font-extrabold text-white transition hover:bg-[#087b83] disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      {isSavingProgress
+                        ? "Saving..."
+                        : isCompleted
+                          ? "Lesson completed"
+                          : "Complete lesson"}
+                    </button>
+                  </div>
+                </>
               )}
-
-              {progressMessage && (
-                <div
-                  role="status"
-                  className="rounded-xl border border-[#bce5df] bg-[#e8f5f3] p-4 text-xs font-bold text-[#087b83]"
-                >
-                  {progressMessage}
-                </div>
-              )}
-
-              {/* Lesson Actions */}
-              <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
-                <div>
-                  <p className="text-sm font-black text-[#102b4c]">
-                    Lesson completion
-                  </p>
-
-                  <p className="mt-1 text-xs text-slate-500">
-                    Mark this lesson as completed when you finish studying.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={isCompleted || isSavingProgress}
-                  onClick={() =>
-                    void saveProgress({ completed: true })
-                  }
-                  className="min-h-12 rounded-xl bg-[#0e8988] px-6 py-3 text-xs font-extrabold text-white transition hover:bg-[#087b83] disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {isSavingProgress
-                    ? "Saving..."
-                    : isCompleted
-                      ? "Lesson completed"
-                      : "Complete lesson"}
-                </button>
-              </div>
 
               {/* Previous and Next Navigation */}
               <nav
@@ -720,7 +837,9 @@ export default function LearningPageClient({
                 ) : (
                   <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-right">
                     <p className="text-xs text-slate-400">
-                      You have reached the last published lesson.
+                      {isAdminPreview
+                        ? "You have reached the last lesson in this course."
+                        : "You have reached the last published lesson."}
                     </p>
                   </div>
                 )}

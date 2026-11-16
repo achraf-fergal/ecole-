@@ -10,13 +10,14 @@ interface DashboardLayoutProps {
   user: AuthUser;
   activeCenterSlug?: string;
   onCenterChange?: (slug: string) => void;
+  showCenterSwitcher?: boolean;
   children: ReactNode;
 }
-
 export default function DashboardLayout({
   user,
   activeCenterSlug,
   onCenterChange,
+  showCenterSwitcher = true,
   children,
 }: DashboardLayoutProps) {
   const router = useRouter();
@@ -77,6 +78,28 @@ export default function DashboardLayout({
       ),
       active: false,
     },
+    ...(user.is_platform_admin
+      ? [
+          {
+            label: "Learning Centers",
+            href: "/admin/learning",
+            icon: (
+              <svg
+                className="h-5 w-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M9 21V9h6v12" />
+                <path d="M7 7h2M15 7h2M7 12h2M15 12h2" />
+              </svg>
+            ),
+            active: false,
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -108,7 +131,7 @@ export default function DashboardLayout({
         </div>
 
         {/* Center Switcher */}
-        {user.centers.length > 0 && (
+        {showCenterSwitcher && user.centers.length > 0 && (
           <div className="border-b border-slate-100 p-4">
             <label className="mb-1 block text-xs font-bold tracking-wider text-slate-600 uppercase">
               Current Center
@@ -246,6 +269,7 @@ export default function DashboardLayout({
                   {item.label}
                 </Link>
               ))}
+
               <button
                 type="button"
                 onClick={handleLogout}

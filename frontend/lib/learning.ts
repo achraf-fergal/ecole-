@@ -20,6 +20,15 @@ export type LessonProgressStatus =
   | "in_progress"
   | "completed";
 
+export type LearningAccessMode =
+  | "student"
+  | "admin_preview";
+
+export type LearningContentStatus =
+  | "draft"
+  | "published"
+  | "archived";
+
 export type LessonAssetType =
   | "file"
   | "image"
@@ -53,12 +62,16 @@ export interface LearningCourseSummary {
   short_description: string | null;
   duration_hours: number | string | null;
   cover_image_url: string | null;
+  status: LearningContentStatus;
+  published_at: string | null;
 }
 
 export interface LearningLessonCourse {
   id: number;
   title: string;
   slug: string;
+  status: LearningContentStatus;
+  published_at: string | null;
 }
 
 export interface LearningModuleSummary {
@@ -66,6 +79,8 @@ export interface LearningModuleSummary {
   title: string;
   description: string | null;
   sort_order: number;
+  status: LearningContentStatus;
+  published_at: string | null;
 }
 
 /*
@@ -103,6 +118,8 @@ export interface LearningOverviewLesson {
   content_type: LessonContentType;
   duration_minutes: number | null;
   sort_order: number;
+  status: LearningContentStatus;
+  published_at: string | null;
   progress: LessonProgress;
 }
 
@@ -111,15 +128,17 @@ export interface LearningOverviewModule {
   title: string;
   description: string | null;
   sort_order: number;
+  status: LearningContentStatus;
+  published_at: string | null;
   lessons: LearningOverviewLesson[];
 }
 
 export interface LearningOverview {
+  access_mode: LearningAccessMode;
   course: LearningCourseSummary;
   progress_summary: LearningProgressSummary;
   modules: LearningOverviewModule[];
 }
-
 /*
 |--------------------------------------------------------------------------
 | Lesson Content
@@ -135,12 +154,16 @@ export interface LearningLesson {
   content_locale: string | null;
   duration_minutes: number | null;
   sort_order: number;
+  status: LearningContentStatus;
+  published_at: string | null;
 }
 
 export interface LearningLessonModule {
   id: number;
   title: string;
   description: string | null;
+  status: LearningContentStatus;
+  published_at: string | null;
 }
 
 export interface LearningNavigationLesson {
@@ -183,12 +206,14 @@ export interface LearningExerciseOption {
   id: number;
   option_text: string;
   sort_order: number;
+  is_correct?: boolean;
 }
 
 export interface LearningQuestion {
   id: number;
   question_type: QuestionType;
   prompt: string;
+  explanation?: string | null;
   points: number | string;
   sort_order: number;
   options: LearningExerciseOption[];
@@ -201,6 +226,8 @@ export interface LearningExercise {
   max_attempts: number | null;
   passing_score: number | string;
   sort_order: number;
+  status: LearningContentStatus;
+  published_at: string | null;
   questions: LearningQuestion[];
 }
 
@@ -211,6 +238,7 @@ export interface LearningExercise {
 */
 
 export interface LearningLessonData {
+  access_mode: LearningAccessMode;
   course: LearningLessonCourse;
   module: LearningLessonModule;
   lesson: LearningLesson;

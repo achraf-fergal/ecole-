@@ -21,17 +21,25 @@ class LearningLessonResource extends JsonResource
 
         $progress = $this->resource['progress'];
 
+        $isAdminPreview = $this->resource['access_mode'] === 'admin_preview';
+
         return [
+            'access_mode' => $this->resource['access_mode'],
+
             'course' => [
                 'id' => $course->id,
                 'title' => $course->title,
                 'slug' => $course->slug,
+                'status' => $course->status,
+                'published_at' => $course->published_at?->toIso8601String(),
             ],
 
             'module' => [
                 'id' => $lesson->courseModule->id,
                 'title' => $lesson->courseModule->title,
                 'description' => $lesson->courseModule->description,
+                'status' => $lesson->courseModule->status,
+                'published_at' => $lesson->courseModule->published_at?->toIso8601String(),
             ],
 
             'lesson' => [
@@ -43,6 +51,8 @@ class LearningLessonResource extends JsonResource
                 'content_locale' => $lesson->content_locale,
                 'duration_minutes' => $lesson->duration_minutes,
                 'sort_order' => $lesson->sort_order,
+                'status' => $lesson->status,
+                'published_at' => $lesson->published_at?->toIso8601String(),
             ],
 
             'progress' => [
@@ -53,7 +63,7 @@ class LearningLessonResource extends JsonResource
                 'last_accessed_at' => $progress?->last_accessed_at?->toIso8601String(),
             ],
 
-            // Only expose safe asset metadata.
+            // Only safe metadata is returned to the client.
             'assets' => $this->resource['assets']->map(
                 function (LessonAsset $asset): array {
                     return [
@@ -72,9 +82,9 @@ class LearningLessonResource extends JsonResource
                 }
             )->values(),
 
-            // Question answers and explanations are intentionally excluded.
+            // Correct answers and explanations are returned only to administrators.
             'exercises' => $this->resource['exercises']->map(
-                function (Exercise $exercise): array {
+                function (Exercise $exercise) use ($isAdminPreview): array {
                     return [
                         'id' => $exercise->id,
                         'title' => $exercise->title,
@@ -82,10 +92,12 @@ class LearningLessonResource extends JsonResource
                         'max_attempts' => $exercise->max_attempts,
                         'passing_score' => $exercise->passing_score,
                         'sort_order' => $exercise->sort_order,
+                        'status' => $exercise->status,
+                        'published_at' => $exercise->published_at?->toIso8601String(),
 
                         'questions' => $exercise->questions->map(
-                            function ($question): array {
-                                return [
+                            function ($question) use ($isAdminPreview): array {
+                                $questionData = [
                                     'id' => $question->id,
                                     'question_type' => $question->question_type,
                                     'prompt' => $question->prompt,
@@ -93,17 +105,30 @@ class LearningLessonResource extends JsonResource
                                     'sort_order' => $question->sort_order,
 
                                     'options' => $question->options->map(
-                                        function ($option): array {
-                                            return [
+                                        function ($option) use ($isAdminPreview): array {
+                                            $optionData = [
                                                 'id' => $option->id,
                                                 'option_text' => $option->option_text,
                                                 'sort_order' => $option->sort_order,
                                             ];
+
+                                            if ($isAdminPreview) {
+                                                $optionData['is_correct'] = $option->is_correct;
+                                            }
+
+                                            return $optionData;
                                         }
                                     )->values(),
                                 ];
+
+                                if ($isAdminPreview) {
+                                    $questionData['explanation'] = $question->explanation;
+                                }
+
+                                return $questionData;
                             }
                         )->values(),
+
                     ];
                 }
             )->values(),

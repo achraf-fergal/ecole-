@@ -16,6 +16,8 @@ class LearningOverviewResource extends JsonResource
         $progressByLesson = $this->resource['progress_by_lesson'];
 
         return [
+            'access_mode' => $this->resource['access_mode'],
+
             'course' => [
                 'id' => $course->id,
                 'title' => $course->title,
@@ -23,6 +25,8 @@ class LearningOverviewResource extends JsonResource
                 'short_description' => $course->short_description,
                 'duration_hours' => $course->duration_hours,
                 'cover_image_url' => $course->cover_image_url,
+                'status' => $course->status,
+                'published_at' => $course->published_at?->toIso8601String(),
             ],
 
             'progress_summary' => $this->resource['progress_summary'],
@@ -34,6 +38,8 @@ class LearningOverviewResource extends JsonResource
                         'title' => $module->title,
                         'description' => $module->description,
                         'sort_order' => $module->sort_order,
+                        'status' => $module->status,
+                        'published_at' => $module->published_at?->toIso8601String(),
 
                         'lessons' => $module->lessons->map(
                             function (Lesson $lesson) use ($progressByLesson) {
@@ -46,6 +52,8 @@ class LearningOverviewResource extends JsonResource
                                     'content_type' => $lesson->content_type,
                                     'duration_minutes' => $lesson->duration_minutes,
                                     'sort_order' => $lesson->sort_order,
+                                    'status' => $lesson->status,
+                                    'published_at' => $lesson->published_at?->toIso8601String(),
 
                                     'progress' => [
                                         'status' => $progress?->status ?? 'not_started',

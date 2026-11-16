@@ -134,58 +134,91 @@ class MultiTenantAuthTest extends TestCase
             'message' => 'Forbidden. Insufficient role permissions.',
         ]);
     }
-
+    /**
+     * Generate a JWT for the given user.
+     */
+    private function tokenFor(User $user): string
+    {
+        /** @var \PHPOpenSourceSaver\JWTAuth\JWTGuard $guard */
+        $guard = auth('api');
+    
+        return $guard
+            ->claims(['ver' => (int) $user->token_version])
+            ->login($user);
+    }
     public function test_student_cannot_access_course_without_active_enrollment(): void
     {
         $center = Center::factory()->create();
-        $language = Language::factory()->for($center)->create();
-        $level = Level::factory()->for($center)->create();
-
-        $course = Course::factory()->forCenter($center)->create([
-            'language_id' => $language->id,
-            'level_id' => $level->id,
-        ]);
-
+    
+        $language = Language::factory()
+            ->for($center)
+            ->create();
+    
+        $level = Level::factory()
+            ->for($center)
+            ->create();
+    
+        // Use a published course to test enrollment independently.
+        $course = Course::factory()
+            ->forCenter($center)
+            ->published()
+            ->create([
+                'language_id' => $language->id,
+                'level_id' => $level->id,
+            ]);
+    
         $cohort = Cohort::create([
             'center_id' => $center->id,
             'course_id' => $course->id,
             'name' => 'Cohort 1',
             'capacity' => 20,
             'starts_at' => now()->subDay(),
+            'ends_at' => now()->addMonths(3),
             'status' => Cohort::STATUS_OPEN,
         ]);
-
-        $studentUser = User::factory()->create();
-
+    
+        $studentUser = User::factory()->create([
+            'email_verified_at' => now(),
+        ]);
+    
         $membership = CenterUser::create([
             'center_id' => $center->id,
             'user_id' => $studentUser->id,
             'status' => 'active',
         ]);
+    
         $membership->roles()->attach($this->studentRole->id);
-
+    
         $studentProfile = StudentProfile::create([
             'center_id' => $center->id,
             'user_id' => $studentUser->id,
             'student_code' => 'STU1001',
             'status' => StudentProfile::STATUS_ACTIVE,
         ]);
-
-        $token = auth('api')->claims(['ver' => $studentUser->token_version])->login($studentUser);
-
-        // 1. Without enrollment: access is rejected (403).
-        $noEnrollmentResponse = $this->withHeader('Authorization', "Bearer {$token}")
-            ->getJson(route('api.centers.courses.learn.player', [
+    
+        $token = $this->tokenFor($studentUser);
+    
+        $overviewUrl = route(
+            'api.centers.courses.learn.overview',
+            [
                 'center' => $center->slug,
                 'course' => $course->slug,
-            ]));
-
-        $noEnrollmentResponse->assertStatus(403);
+            ]
+        );
+    
+        // Student without enrollment must be rejected.
+        $noEnrollmentResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson($overviewUrl);
+    
+        $noEnrollmentResponse->assertForbidden();
+    
         $noEnrollmentResponse->assertJson([
             'message' => 'Active course enrollment required.',
         ]);
-
-        // 2. With active enrollment: access succeeds.
+    
+        // Grant active enrollment.
         Enrollment::create([
             'center_id' => $center->id,
             'student_profile_id' => $studentProfile->id,
@@ -194,17 +227,24 @@ class MultiTenantAuthTest extends TestCase
             'start_at' => now()->subDay(),
             'end_at' => now()->addMonths(3),
         ]);
-
-        $enrolledResponse = $this->withHeader('Authorization', "Bearer {$token}")
-            ->getJson(route('api.centers.courses.learn.player', [
-                'center' => $center->slug,
-                'course' => $course->slug,
-            ]));
-
+    
+        // The enrolled student can now retrieve the actual learning overview.
+        $enrolledResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson($overviewUrl);
+    
         $enrolledResponse->assertOk();
-        $enrolledResponse->assertJson([
-            'message' => 'Course player access granted.',
-        ]);
+    
+        $enrolledResponse->assertJsonPath(
+            'data.course.slug',
+            $course->slug
+        );
+    
+        $enrolledResponse->assertJsonPath(
+            'data.access_mode',
+            'student'
+        );
     }
 
     public function test_user_with_multiple_center_memberships_operates_correctly(): void

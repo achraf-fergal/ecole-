@@ -237,3 +237,205 @@ export async function apiUpdateGlobalUserStatus(
 
   return data;
 }
+
+
+/*
+|--------------------------------------------------------------------------
+| Platform Learning Center Selection
+|--------------------------------------------------------------------------
+*/
+
+export interface PlatformCenter {
+  id: number;
+  name: string;
+  slug: string;
+  status: string;
+  logo_url: string | null;
+  default_locale: string;
+  courses_count: number;
+  members_count: number;
+}
+
+export interface PlatformLearningCourse {
+  id: number;
+  title: string;
+  slug: string;
+  short_description: string | null;
+  cover_image_url: string | null;
+  duration_hours: number | null;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  modules_count: number;
+}
+
+export interface AdminLearningLesson {
+  id: number;
+  title: string;
+  description: string | null;
+  content_type: string;
+  duration_minutes: number | null;
+  sort_order: number;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+}
+
+export interface AdminLearningModule {
+  id: number;
+  title: string;
+  description: string | null;
+  sort_order: number;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  lessons: AdminLearningLesson[];
+}
+
+export interface AdminLearningOverview {
+  access_mode: "admin_preview";
+  course: {
+    id: number;
+    title: string;
+    slug: string;
+    status: "draft" | "published" | "archived";
+    published_at: string | null;
+  };
+  progress_summary: {
+    total_lessons: number;
+    completed_lessons: number;
+    in_progress_lessons: number;
+    not_started_lessons: number;
+    completion_percentage: number;
+  };
+  modules: AdminLearningModule[];
+}
+
+/**
+ * Fetch all platform centers independently of user memberships.
+ */
+export async function apiGetPlatformCenters(
+  params: {
+    search?: string;
+    status?: string;
+    page?: number;
+    per_page?: number;
+  } = {}
+): Promise<PaginatedResponse<PlatformCenter>> {
+  const query = new URLSearchParams();
+
+  if (params.search?.trim()) {
+    query.set("search", params.search.trim());
+  }
+
+  if (params.status && params.status !== "all") {
+    query.set("status", params.status);
+  }
+
+  if (params.page) {
+    query.set("page", String(params.page));
+  }
+
+  if (params.per_page) {
+    query.set("per_page", String(params.per_page));
+  }
+
+  const suffix = query.toString();
+
+  const response = await authFetch(
+    `/api/platform-admin/centers${suffix ? `?${suffix}` : ""}`
+  );
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message || "Unable to retrieve platform centers."
+    );
+  }
+
+  return data as PaginatedResponse<PlatformCenter>;
+}
+
+/**
+ * Fetch all course states for one selected platform center.
+ */
+export async function apiGetPlatformCenterCourses(
+  centerSlug: string,
+  params: {
+    search?: string;
+    status?: string;
+    page?: number;
+    per_page?: number;
+  } = {}
+): Promise<{
+  center: Omit<PlatformCenter, "courses_count" | "members_count">;
+  courses: PaginatedResponse<PlatformLearningCourse>;
+}> {
+  const query = new URLSearchParams();
+
+  if (params.search?.trim()) {
+    query.set("search", params.search.trim());
+  }
+
+  if (params.status && params.status !== "all") {
+    query.set("status", params.status);
+  }
+
+  if (params.page) {
+    query.set("page", String(params.page));
+  }
+
+  if (params.per_page) {
+    query.set("per_page", String(params.per_page));
+  }
+
+  const suffix = query.toString();
+
+  const response = await authFetch(
+    `/api/platform-admin/centers/${encodeURIComponent(centerSlug)}/courses${suffix ? `?${suffix}` : ""}`
+  );
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message || "Unable to retrieve center courses."
+    );
+  }
+
+  return data;
+}
+
+/**
+ * Retrieve the administrative learning overview for one course.
+ *
+ * Laravel determines admin preview permissions from the authenticated user.
+ */
+export async function apiGetPlatformLearningOverview(
+  centerSlug: string,
+  courseSlug: string
+): Promise<AdminLearningOverview> {
+  const response = await authFetch(
+    `/api/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/learn`,
+    {
+      method: "GET",
+      cache: "no-store",
+    }
+  );
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      data?.message || "Unable to retrieve the course curriculum."
+    );
+  }
+
+  const overview = data?.data as AdminLearningOverview | undefined;
+
+  if (!overview || overview.access_mode !== "admin_preview") {
+    throw new Error(
+      "The server did not authorize administrative preview."
+    );
+  }
+
+  return overview;
+}
