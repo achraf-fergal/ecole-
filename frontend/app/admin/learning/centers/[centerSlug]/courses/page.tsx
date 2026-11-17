@@ -3,8 +3,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
-
+import { Suspense, useEffect, useRef, useState } from "react";
 import DashboardLayout from "@/components/dashboard/dashboard-layout";
 import { apiGetMe, type AuthUser } from "@/lib/auth";
 
@@ -36,8 +35,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export default function PlatformCenterCoursesPage() {
-  const params = useParams<{ centerSlug: string }>();
+function PlatformCenterCoursesContent() {  const params = useParams<{ centerSlug: string }>();
   const centerSlug = params.centerSlug;
 
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -68,7 +66,8 @@ export default function PlatformCenterCoursesPage() {
     useState(false);
 
   const [previewError, setPreviewError] = useState("");
-
+  // Reference to the curriculum preview section.
+  const previewSectionRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     let mounted = true;
 
@@ -179,16 +178,42 @@ export default function PlatformCenterCoursesPage() {
 
       setOverview(result);
     } catch (err: unknown) {
+      console.error(
+        "Administrative curriculum preview failed:",
+        err
+      );
+    
       setPreviewError(
         err instanceof Error
           ? err.message
           : "Unable to inspect this course."
       );
-    } finally {
+    }finally {
       setIsLoadingPreview(false);
     }
   }
-
+  // Automatically bring the curriculum preview into view after loading.
+  useEffect(() => {
+    if (isLoadingPreview || !selectedCourse) {
+      return;
+    }
+  
+    const frame = window.requestAnimationFrame(() => {
+      previewSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [
+    isLoadingPreview,
+    selectedCourse,
+    overview,
+    previewError,
+  ]);
   if (isCheckingAuth) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50">
@@ -412,8 +437,12 @@ export default function PlatformCenterCoursesPage() {
 
         {/* Administrative curriculum preview */}
         {selectedCourse && (
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+  <section
+    ref={previewSectionRef}
+    aria-live="polite"
+    className="scroll-mt-8 rounded-2xl border border-slate-200 bg-white p-5 sm:p-7"
+  >         
+     <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <span className="text-[10px] font-extrabold uppercase tracking-wider text-purple-700">
                   Administrative Preview
@@ -511,5 +540,20 @@ export default function PlatformCenterCoursesPage() {
         )}
       </div>
     </DashboardLayout>
+  );
+}
+export default function PlatformCenterCoursesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-slate-50">
+          <p className="text-sm font-bold text-slate-500">
+            Loading learning center...
+          </p>
+        </div>
+      }
+    >
+      <PlatformCenterCoursesContent />
+    </Suspense>
   );
 }

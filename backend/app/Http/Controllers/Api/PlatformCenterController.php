@@ -85,19 +85,19 @@ class PlatformCenterController extends Controller
 
         // The relationship guarantees center-scoped course queries.
         $query = $center->courses()
-            ->withCount('modules')
-            ->select([
-                'id',
-                'center_id',
-                'title',
-                'slug',
-                'short_description',
-                'cover_image_url',
-                'duration_hours',
-                'status',
-                'published_at',
-                'sort_order',
-            ])->withCount('modules');
+        ->select([
+            'id',
+            'center_id',
+            'title',
+            'slug',
+            'short_description',
+            'cover_image_url',
+            'duration_hours',
+            'status',
+            'published_at',
+            'sort_order',
+        ])
+        ->withCount('modules');
 
         if (! empty($validated['search'])) {
             $search = trim($validated['search']);
