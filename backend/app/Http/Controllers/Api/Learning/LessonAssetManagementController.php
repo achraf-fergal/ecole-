@@ -255,13 +255,15 @@ class LessonAssetManagementController extends Controller
     /**
      * Update an asset's presentation and download metadata.
      */
-    public function update(
-        Request $request,
-        string $asset
-    ): JsonResponse {
-        [, , $lesson] = $this->resolveLessonContext($request);
+    public function update(Request $request): JsonResponse
+    {
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
 
-        $asset = $this->resolveAsset($lesson, $asset);
+        $asset = $this->resolveAsset(
+            $lesson,
+            (string) $request->route('asset')
+        );
 
         $validated = $request->validate([
             'title' => [
@@ -330,13 +332,15 @@ class LessonAssetManagementController extends Controller
     /**
      * Archive an asset without physically deleting its file.
      */
-    public function archive(
-        Request $request,
-        string $asset
-    ): JsonResponse {
-        [, , $lesson] = $this->resolveLessonContext($request);
+    public function archive(Request $request): JsonResponse
+    {
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
 
-        $asset = $this->resolveAsset($lesson, $asset);
+        $asset = $this->resolveAsset(
+            $lesson,
+            (string) $request->route('asset')
+        );
 
         $asset->update([
             'status' => LessonAsset::STATUS_ARCHIVED,
@@ -351,13 +355,15 @@ class LessonAssetManagementController extends Controller
     /**
      * Restore a previously archived resource.
      */
-    public function restore(
-        Request $request,
-        string $asset
-    ): JsonResponse {
-        [, , $lesson] = $this->resolveLessonContext($request);
+    public function restore(Request $request): JsonResponse
+    {
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
 
-        $asset = $this->resolveAsset($lesson, $asset);
+        $asset = $this->resolveAsset(
+            $lesson,
+            (string) $request->route('asset')
+        );
 
         $this->ensureAssetStorageExists($asset);
 

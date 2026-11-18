@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+
 class Lesson extends Model
 {
     use HasFactory;
@@ -95,25 +96,67 @@ class Lesson extends Model
         return $this->status === self::STATUS_PUBLISHED
             && $this->published_at !== null
             && $this->published_at->lte(now());
-    }/**
-    * Files, images, videos and external resources
-    * belonging to this lesson.
-    */
-   public function assets(): HasMany
-   {
-       return $this->hasMany(LessonAsset::class)
-           ->orderBy('sort_order')
-           ->orderBy('id');
-   }
-   /**
-    * Exercises belonging to this lesson.
-    */
-   public function exercises(): HasMany
-   {
-       return $this->hasMany(Exercise::class)
-           ->orderBy('sort_order')
-           ->orderBy('id');
-   }
+    }
+
+    /**
+     * Files, images, videos and external resources
+     * belonging to this lesson.
+     */
+    public function assets(): HasMany
+    {
+        return $this->hasMany(LessonAsset::class)
+            ->orderBy('sort_order')
+            ->orderBy('id');
+    }
+
+    /**
+     * Exercises belonging to this lesson.
+     */
+    public function exercises(): HasMany
+    {
+        return $this->hasMany(Exercise::class)
+            ->orderBy('sort_order')
+            ->orderBy('id');
+    }
+
+    /**
+     * All historical and current revisions.
+     */
+    public function revisions(): HasMany
+    {
+        return $this->hasMany(LessonRevision::class)
+            ->orderByDesc('version_number')
+            ->orderByDesc('id');
+    }
+
+    /**
+     * Current editable draft revision.
+     */
+    public function draftRevision(): BelongsTo
+    {
+        return $this->belongsTo(
+            LessonRevision::class,
+            'draft_revision_id'
+        )->where(
+            'status',
+            LessonRevision::STATUS_DRAFT
+        );
+    }
+
+    /**
+     * Current published revision.
+     */
+    public function publishedRevision(): BelongsTo
+    {
+        return $this->belongsTo(
+            LessonRevision::class,
+            'published_revision_id'
+        )->where(
+            'status',
+            LessonRevision::STATUS_PUBLISHED
+        );
+    }
+
     public function isArchived(): bool
     {
         return $this->status === self::STATUS_ARCHIVED;

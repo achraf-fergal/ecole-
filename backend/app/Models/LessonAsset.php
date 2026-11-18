@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LessonAsset extends Model
 {
@@ -83,6 +84,18 @@ class LessonAsset extends Model
     public function lesson(): BelongsTo
     {
         return $this->belongsTo(Lesson::class);
+    }
+
+    /**
+     * Content blocks referencing this asset
+     * across lesson revisions.
+     */
+    public function blocks(): HasMany
+    {
+        return $this->hasMany(
+            LessonBlock::class,
+            'lesson_asset_id'
+        );
     }
 
     /**

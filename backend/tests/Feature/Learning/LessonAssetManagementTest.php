@@ -133,6 +133,35 @@ class LessonAssetManagementTest extends TestCase
         ]);
     }
 
+    private function fakePng(
+        string $name = 'learning.png'
+    ): UploadedFile {
+        $chunk = static function (
+            string $type,
+            string $data
+        ): string {
+            $payload = $type.$data;
+
+            return pack('N', strlen($data))
+                .$payload
+                .pack('N', crc32($payload));
+        };
+
+        $header = pack('NNCCCCC', 1, 1, 8, 6, 0, 0, 0);
+
+        $pixels = gzcompress("\x00\x22\x66\xAA\xFF");
+
+        $png = "\x89PNG\r\n\x1A\n"
+            .$chunk('IHDR', $header)
+            .$chunk('IDAT', $pixels)
+            .$chunk('IEND', '');
+
+        return UploadedFile::fake()->createWithContent(
+            $name,
+            $png
+        );
+    }
+
     public function test_center_admin_can_upload_private_image(): void
     {
         $this->configurePrivateStorage();
@@ -152,11 +181,7 @@ class LessonAssetManagementTest extends TestCase
                 'title' => 'English Greetings',
                 'alt_text' => 'Two people greeting each other',
                 'caption' => 'A simple greeting illustration.',
-                'file' => UploadedFile::fake()->image(
-                    'greetings.jpg',
-                    800,
-                    600
-                ),
+                'file' => $this->fakePng('greetings.png'),
             ]
         );
 
@@ -251,9 +276,7 @@ class LessonAssetManagementTest extends TestCase
             [
                 'asset_type' => 'image',
                 'alt_text' => 'Learning illustration',
-                'file' => UploadedFile::fake()->image(
-                    'learning.png'
-                ),
+                'file' => $this->fakePng('learning.png'),
             ]
         );
 

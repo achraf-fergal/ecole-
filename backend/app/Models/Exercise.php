@@ -69,6 +69,17 @@ class Exercise extends Model
     }
 
     /**
+     * Content blocks referencing this exercise.
+     */
+    public function blocks(): HasMany
+    {
+        return $this->hasMany(
+            LessonBlock::class,
+            'exercise_id'
+        );
+    }
+
+    /**
      * Restrict exercises to one tenant.
      */
     public function scopeForCenter(
