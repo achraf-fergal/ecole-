@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\Learning\LearningLessonController;
 use App\Http\Controllers\Api\Learning\LearningOverviewController;
 use App\Http\Controllers\Api\Learning\LessonAssetAccessController;
 use App\Http\Controllers\Api\Learning\LessonAssetManagementController;
+use App\Http\Controllers\Api\Learning\LessonContentController;
 use App\Http\Controllers\Api\PlatformCenterController;
 use App\Http\Controllers\Api\PlatformUserController;
 use App\Http\Controllers\Api\PublicCourseController;
@@ -177,6 +178,86 @@ Route::prefix('centers/{center}')
                 ])
                     ->middleware('csrf.api')
                     ->name('api.tenant.users.destroy');
+
+                /*
+                |--------------------------------------------------------------------------
+                | Lesson Content Management
+                |--------------------------------------------------------------------------
+                */
+
+                Route::prefix('courses/{course}/lessons/{lesson}/content')
+                    ->group(function () {
+
+                        // Retrieve draft and published revisions.
+                        Route::get('/', [
+                            LessonContentController::class,
+                            'show',
+                        ])->name('api.centers.admin.learning.content.show');
+
+                        // Create or retrieve the current draft.
+                        Route::post('/revisions', [
+                            LessonContentController::class,
+                            'createDraft',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.revisions.store');
+
+                        // Update current draft metadata.
+                        Route::patch('/revisions/{revision}', [
+                            LessonContentController::class,
+                            'updateDraftMetadata',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.revisions.update');
+
+                        // Add text.
+                        Route::post('/revisions/{revision}/blocks/text', [
+                            LessonContentController::class,
+                            'storeTextBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.text.store');
+
+                        // Add media.
+                        Route::post('/revisions/{revision}/blocks/media', [
+                            LessonContentController::class,
+                            'storeMediaBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.media.store');
+
+                        // Add exercise.
+                        Route::post('/revisions/{revision}/blocks/exercise', [
+                            LessonContentController::class,
+                            'storeExerciseBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.exercise.store');
+
+                        // Reorder every block.
+                        Route::put('/revisions/{revision}/blocks/order', [
+                            LessonContentController::class,
+                            'reorderBlocks',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.reorder');
+
+                        // Update block content/settings.
+                        Route::patch('/revisions/{revision}/blocks/{block}', [
+                            LessonContentController::class,
+                            'updateBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.update');
+
+                        // Delete block.
+                        Route::delete('/revisions/{revision}/blocks/{block}', [
+                            LessonContentController::class,
+                            'deleteBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.destroy');
+                    });
 
                 /*
                 |--------------------------------------------------------------------------

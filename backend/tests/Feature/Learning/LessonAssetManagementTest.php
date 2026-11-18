@@ -16,6 +16,7 @@ use App\Models\PlatformAdmin;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\Learning\LessonRevisionService;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -453,6 +454,80 @@ class LessonAssetManagementTest extends TestCase
             'data.status',
             'active'
         );
+    }
+
+    public function test_admin_cannot_modify_or_archive_asset_used_by_published_revision(): void
+    {
+        $context = $this->createContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($context['lesson'])
+            ->privateFile()
+            ->create();
+
+        $revisionService = app(LessonRevisionService::class);
+
+        // Create a draft revision.
+        $revision = $revisionService->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+
+        // Attach the asset to the draft.
+        $revisionService->addMediaBlock(
+            $revision,
+            $asset->id
+        );
+
+        // Publish the revision.
+        $revisionService->publish(
+            $context['lesson'],
+            $context['user']
+        );
+
+        $token = $this->tokenFor($context['user']);
+
+        // Updating a published asset must be rejected.
+        $updateResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->patchJson(
+            route(
+                'api.centers.admin.learning.assets.update',
+                [
+                    ...$this->assetRouteParameters($context),
+                    'asset' => $asset->id,
+                ]
+            ),
+            [
+                'title' => 'Modified published asset',
+            ]
+        );
+
+        $updateResponse->assertUnprocessable();
+
+        // Archiving a published asset must also be rejected.
+        $archiveResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->patchJson(
+            route(
+                'api.centers.admin.learning.assets.archive',
+                [
+                    ...$this->assetRouteParameters($context),
+                    'asset' => $asset->id,
+                ]
+            )
+        );
+
+        $archiveResponse->assertUnprocessable();
+
+        // Verify that the original asset remains unchanged.
+        $this->assertDatabaseHas('lesson_assets', [
+            'id' => $asset->id,
+            'title' => $asset->title,
+            'status' => LessonAsset::STATUS_ACTIVE,
+        ]);
     }
 
     public function test_regular_user_cannot_manage_lesson_assets(): void

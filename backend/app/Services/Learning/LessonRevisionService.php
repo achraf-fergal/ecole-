@@ -7,7 +7,6 @@ use App\Models\Lesson;
 use App\Models\LessonAsset;
 use App\Models\LessonBlock;
 use App\Models\LessonRevision;
-use App\Models\Question;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
@@ -158,6 +157,61 @@ class LessonRevisionService
             ])->save();
 
             return $revision->load('blocks');
+        }, 3);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Update Draft Metadata
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Update metadata on the current editable draft only.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    public function updateDraftMetadata(
+        LessonRevision $revision,
+        array $attributes
+    ): LessonRevision {
+        return DB::transaction(function () use (
+            $revision,
+            $attributes
+        ): LessonRevision {
+            [, $draft] = $this->lockDraftContext($revision);
+
+            $allowed = [
+                'title',
+                'description',
+                'content_locale',
+                'duration_minutes',
+            ];
+
+            $unexpected = array_diff(
+                array_keys($attributes),
+                $allowed
+            );
+
+            if ($unexpected !== []) {
+                $this->fail(
+                    'attributes',
+                    'Unsupported revision attributes: '
+                        .implode(', ', $unexpected)
+                );
+            }
+
+            if ($attributes === []) {
+                $this->fail(
+                    'attributes',
+                    'At least one revision attribute is required.'
+                );
+            }
+
+            $draft->fill($attributes);
+            $draft->save();
+
+            return $draft->refresh();
         }, 3);
     }
 

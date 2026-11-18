@@ -8,6 +8,7 @@ use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
 use App\Services\Learning\LearningAccessService;
+use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -21,7 +22,8 @@ use Throwable;
 class LessonAssetManagementController extends Controller
 {
     public function __construct(
-        protected LearningAccessService $learningAccess
+        protected LearningAccessService $learningAccess,
+        protected LessonRevisionService $lessonRevisionService
     ) {}
 
     /**
@@ -265,6 +267,9 @@ class LessonAssetManagementController extends Controller
             (string) $request->route('asset')
         );
 
+        $this->lessonRevisionService
+            ->assertAssetCanBeModified($asset);
+
         $validated = $request->validate([
             'title' => [
                 'sometimes',
@@ -341,6 +346,9 @@ class LessonAssetManagementController extends Controller
             $lesson,
             (string) $request->route('asset')
         );
+
+        $this->lessonRevisionService
+            ->assertAssetCanBeModified($asset);
 
         $asset->update([
             'status' => LessonAsset::STATUS_ARCHIVED,
