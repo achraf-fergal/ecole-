@@ -31,6 +31,8 @@ interface LearningPageClientProps {
   centerSlug: string;
   courseSlug: string;
   lessonId: number;
+  adminPreviewBasePath?: string;
+  adminPreviewReturnHref?: string;
 }
 
 type PageError =
@@ -42,9 +44,11 @@ type PageError =
 function ErrorState({
   type,
   onRetry,
+  backHref = "/courses",
 }: {
   type: PageError;
   onRetry: () => void;
+  backHref?: string;
 }) {
   const content = {
     forbidden: {
@@ -103,7 +107,7 @@ function ErrorState({
         </button>
 
         <Link
-          href="/courses"
+          href={backHref}
           className="mt-5 inline-block text-xs font-bold text-[#0e8988] hover:underline"
         >
           Back to courses
@@ -166,8 +170,18 @@ export default function LearningPageClient({
   centerSlug,
   courseSlug,
   lessonId,
+  adminPreviewBasePath,
+  adminPreviewReturnHref,
 }: LearningPageClientProps) {
   const router = useRouter();
+
+  const courseReturnHref =
+    adminPreviewReturnHref ??
+    `/courses/${encodeURIComponent(courseSlug)}`;
+
+  const lessonHrefPrefix = adminPreviewBasePath
+    ? `${adminPreviewBasePath}/lessons`
+    : `${courseReturnHref}/learn/lessons`;
 
   const routeParams = useMemo<LearningRouteParams>(
     () => ({
@@ -178,9 +192,7 @@ export default function LearningPageClient({
     [centerSlug, courseSlug, lessonId]
   );
 
-  const currentPath =
-    `/courses/${encodeURIComponent(courseSlug)}` +
-    `/learn/lessons/${lessonId}`;
+  const currentPath = `${lessonHrefPrefix}/${lessonId}`;
 
   const [overview, setOverview] =
     useState<LearningOverview | null>(null);
@@ -399,6 +411,7 @@ export default function LearningPageClient({
       <ErrorState
         type={pageError}
         onRetry={() => void loadLearningPage()}
+        backHref={courseReturnHref}
       />
     );
   }
@@ -408,6 +421,7 @@ export default function LearningPageClient({
       <ErrorState
         type="server"
         onRetry={() => void loadLearningPage()}
+        backHref={courseReturnHref}
       />
     );
   }
@@ -424,14 +438,11 @@ export default function LearningPageClient({
     !isAdminPreview && progress.status === "completed";
 
   const previousHref = navigation.previous_lesson
-    ? `${currentPath.replace(
-        /\/[^/]+$/,
-        `/${navigation.previous_lesson.id}`
-      )}`
+    ? `${lessonHrefPrefix}/${navigation.previous_lesson.id}`
     : null;
 
   const nextHref = navigation.next_lesson
-    ? `/courses/${encodeURIComponent(courseSlug)}/learn/lessons/${navigation.next_lesson.id}`
+    ? `${lessonHrefPrefix}/${navigation.next_lesson.id}`
     : null;
 
   return (
@@ -441,8 +452,12 @@ export default function LearningPageClient({
         <div className="mx-auto flex min-h-[72px] max-w-[1600px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <Link
-              href={`/courses/${encodeURIComponent(courseSlug)}`}
-              aria-label="Back to course details"
+              href={courseReturnHref}
+              aria-label={
+                isAdminPreview
+                  ? "Back to curriculum"
+                  : "Back to course details"
+              }
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-[#102b4c] transition hover:bg-slate-50"
             >
               <span aria-hidden="true">←</span>
@@ -489,7 +504,8 @@ export default function LearningPageClient({
         {/* Curriculum Sidebar */}
         <LearningSidebar
           overview={overview}
-          courseSlug={courseSlug}
+          lessonHrefPrefix={lessonHrefPrefix}
+          courseOverviewHref={courseReturnHref}
           currentLessonId={lesson.id}
           isMobileOpen={isSidebarOpen}
           onClose={() => setIsSidebarOpen(false)}

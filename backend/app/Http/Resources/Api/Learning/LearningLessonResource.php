@@ -78,6 +78,7 @@ class LearningLessonResource extends JsonResource
                         'caption' => $asset->caption,
                         'is_downloadable' => $asset->is_downloadable,
                         'sort_order' => $asset->sort_order,
+                        'status' => $asset->status,
                     ];
                 }
             )->values(),

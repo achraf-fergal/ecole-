@@ -68,9 +68,10 @@ export default function LessonAssetViewer({
   const isVideo = asset.asset_type === "video";
   const isImage = asset.asset_type === "image";
   const isPdf = asset.mime_type === "application/pdf";
+  const isArchived = asset.status === "archived";
 
   async function handleOpen() {
-    if (isLoading || access) return;
+    if (isArchived || isLoading || access) return;
 
     setError("");
     setIsLoading(true);
@@ -101,7 +102,7 @@ export default function LessonAssetViewer({
   }
 
   async function handleDownload() {
-    if (!asset.is_downloadable || isDownloading) return;
+    if (isArchived || !asset.is_downloadable || isDownloading) return;
 
     setError("");
     setIsDownloading(true);
@@ -162,7 +163,11 @@ export default function LessonAssetViewer({
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {!access && (
+          {isArchived ? (
+            <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
+              Archived — restore to preview
+            </span>
+          ) : !access ? (
             <button
               type="button"
               onClick={handleOpen}
@@ -177,9 +182,9 @@ export default function LessonAssetViewer({
                     ? "View image"
                     : "Open resource"}
             </button>
-          )}
+          ) : null}
 
-          {asset.is_downloadable && (
+          {asset.is_downloadable && !isArchived && (
             <button
               type="button"
               onClick={handleDownload}
@@ -211,7 +216,7 @@ export default function LessonAssetViewer({
         </div>
       )}
 
-      {access && (
+      {access && !isArchived && (
         <div className="border-t border-slate-100 p-4 sm:p-5">
           {isStoredAsset(access) && isImage && (
             <div className="overflow-hidden rounded-xl bg-slate-100">

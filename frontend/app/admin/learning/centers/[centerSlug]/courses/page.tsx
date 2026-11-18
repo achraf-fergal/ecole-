@@ -504,27 +504,47 @@ function PlatformCenterCoursesContent() {  const params = useParams<{ centerSlug
                     )}
 
                     <div className="mt-4 divide-y divide-slate-100">
-                      {module.lessons.map((lesson) => (
-                        <div
-                          key={lesson.id}
-                          className="flex flex-wrap items-center justify-between gap-3 py-3"
-                        >
-                          <div>
-                            <p className="text-xs font-bold text-slate-700">
-                              {lesson.title}
-                            </p>
+                      {module.lessons.map((lesson) => {
+                        const lessonPreviewHref =
+                          `/admin/learning/centers/${encodeURIComponent(centerSlug)}` +
+                          `/courses/${encodeURIComponent(selectedCourse.slug)}` +
+                          `/lessons/${lesson.id}`;
 
-                            <p className="mt-1 text-[10px] capitalize text-slate-500">
-                              {lesson.content_type}
-                              {lesson.duration_minutes
-                                ? ` · ${lesson.duration_minutes} min`
-                                : ""}
-                            </p>
+                        return (
+                          <div
+                            key={lesson.id}
+                            className="flex flex-wrap items-center justify-between gap-3 py-3"
+                          >
+                            <div className="min-w-0">
+                              <Link
+                                href={lessonPreviewHref}
+                                className="text-xs font-bold text-slate-700 transition hover:text-[#0e8988] hover:underline"
+                              >
+                                {lesson.title}
+                              </Link>
+
+                              <p className="mt-1 text-[10px] capitalize text-slate-500">
+                                {lesson.content_type}
+                                {lesson.duration_minutes
+                                  ? ` · ${lesson.duration_minutes} min`
+                                  : ""}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                              <StatusBadge status={lesson.status} />
+
+                              <Link
+                                href={lessonPreviewHref}
+                                aria-label={`Preview ${lesson.title}`}
+                                className="text-[10px] font-extrabold text-[#0e8988] hover:underline"
+                              >
+                                Open lesson →
+                              </Link>
+                            </div>
                           </div>
-
-                          <StatusBadge status={lesson.status} />
-                        </div>
-                      ))}
+                        );
+                      })}
 
                       {module.lessons.length === 0 && (
                         <p className="py-4 text-xs text-slate-400">

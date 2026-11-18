@@ -7,6 +7,8 @@ use App\Http\Controllers\Api\Auth\PasswordResetController;
 use App\Http\Controllers\Api\Learning\LearningLessonController;
 use App\Http\Controllers\Api\Learning\LearningOverviewController;
 use App\Http\Controllers\Api\Learning\LessonAssetAccessController;
+use App\Http\Controllers\Api\Learning\LessonAssetManagementController;
+use App\Http\Controllers\Api\PlatformCenterController;
 use App\Http\Controllers\Api\PlatformUserController;
 use App\Http\Controllers\Api\PublicCourseController;
 use App\Http\Controllers\Api\PublicCourseDetailsController;
@@ -14,7 +16,7 @@ use App\Http\Controllers\Api\PublicLeadController;
 use App\Http\Controllers\Api\TenantUserController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\PlatformCenterController;
+
 /*
 |--------------------------------------------------------------------------
 | Public Routes
@@ -175,6 +177,51 @@ Route::prefix('centers/{center}')
                 ])
                     ->middleware('csrf.api')
                     ->name('api.tenant.users.destroy');
+
+                /*
+                |--------------------------------------------------------------------------
+                | Learning Asset Management
+                |--------------------------------------------------------------------------
+                |
+                | These endpoints use the center tenant context and do not require
+                | student enrollment.
+                |
+                */
+                Route::prefix('courses/{course}/lessons/{lesson}/assets')
+                    ->group(function () {
+                        Route::get('/', [
+                            LessonAssetManagementController::class,
+                            'index',
+                        ])->name('api.centers.admin.learning.assets.index');
+
+                        Route::post('/', [
+                            LessonAssetManagementController::class,
+                            'store',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.store');
+
+                        Route::patch('/{asset}', [
+                            LessonAssetManagementController::class,
+                            'update',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.update');
+
+                        Route::patch('/{asset}/archive', [
+                            LessonAssetManagementController::class,
+                            'archive',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.archive');
+
+                        Route::patch('/{asset}/restore', [
+                            LessonAssetManagementController::class,
+                            'restore',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.restore');
+                    });
             });
 
         // Teacher area.
@@ -217,24 +264,24 @@ Route::prefix('centers/{center}')
         | - Can preview content across all centers.
         |
         */
-        
+
         Route::prefix('courses/{course}/learn')->group(function () {
-        
+
             // Read-only learning access.
             Route::middleware([
                 'role:student,center_admin',
                 'enrollment',
             ])->group(function () {
-        
+
                 Route::get('/', LearningOverviewController::class)
                     ->name('api.centers.courses.learn.overview');
-        
+
                 // Retrieve one authorized lesson.
                 Route::get('/lessons/{lesson}', [
                     LearningLessonController::class,
                     'show',
                 ])->name('api.centers.courses.learn.lessons.show');
-        
+
                 // Retrieve protected asset preview access.
                 Route::get('/lessons/{lesson}/assets/{asset}/access', [
                     LessonAssetAccessController::class,
@@ -242,7 +289,7 @@ Route::prefix('centers/{center}')
                 ])
                     ->middleware('throttle:30,1')
                     ->name('api.centers.courses.learn.lessons.assets.access');
-        
+
                 // Download authorized assets.
                 Route::get('/lessons/{lesson}/assets/{asset}/download', [
                     LessonAssetAccessController::class,
@@ -251,7 +298,7 @@ Route::prefix('centers/{center}')
                     ->middleware('throttle:30,1')
                     ->name('api.centers.courses.learn.lessons.assets.download');
             });
-        
+
             // Student-only progress updates.
             Route::patch('/lessons/{lesson}/progress', [
                 LearningLessonController::class,
@@ -265,16 +312,16 @@ Route::prefix('centers/{center}')
                 ->name('api.centers.courses.learn.lessons.progress.update');
         });
         // Backward-compatible route used by the existing authentication test.
-Route::get('/player', function (Request $request) {
-    return response()->json([
-        'message' => 'Course player access granted.',
-    ]);
-})
-    ->middleware([
-        'role:student',
-        'enrollment',
-    ])
-    ->name('api.centers.courses.learn.player');
+        Route::get('/player', function (Request $request) {
+            return response()->json([
+                'message' => 'Course player access granted.',
+            ]);
+        })
+            ->middleware([
+                'role:student',
+                'enrollment',
+            ])
+            ->name('api.centers.courses.learn.player');
     });
 
 /*
@@ -316,15 +363,15 @@ Route::prefix('platform-admin')
             ->middleware('csrf.api')
             ->name('api.platform.users.assign-center');
 
-            // Global institute directory for Super Admin.
-            Route::get('/centers', [
-                PlatformCenterController::class,
-                'index',
-            ])->name('api.platform.centers.index');
-    
-            // All course states inside one selected institute.
-            Route::get('/centers/{center:slug}/courses', [
-                PlatformCenterController::class,
-                'courses',
-            ])->name('api.platform.centers.courses.index');
+        // Global institute directory for Super Admin.
+        Route::get('/centers', [
+            PlatformCenterController::class,
+            'index',
+        ])->name('api.platform.centers.index');
+
+        // All course states inside one selected institute.
+        Route::get('/centers/{center:slug}/courses', [
+            PlatformCenterController::class,
+            'courses',
+        ])->name('api.platform.centers.courses.index');
     });

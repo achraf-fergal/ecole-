@@ -9,13 +9,14 @@ use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Language;
-use App\Models\Level;
 use App\Models\Lesson;
+use App\Models\Level;
 use App\Models\PlatformAdmin;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPOpenSourceSaver\JWTAuth\JWTGuard;
 use Tests\TestCase;
 
 class LearningAdminAccessTest extends TestCase
@@ -48,7 +49,7 @@ class LearningAdminAccessTest extends TestCase
      */
     private function tokenFor(User $user): string
     {
-        /** @var \PHPOpenSourceSaver\JWTAuth\JWTGuard $guard */
+        /** @var JWTGuard $guard */
         $guard = auth('api');
 
         return $guard
@@ -403,6 +404,78 @@ class LearningAdminAccessTest extends TestCase
         $response->assertJsonPath(
             'data.modules.0.lessons.0.id',
             $lesson->id
+        );
+    }
+
+    /**
+     * Platform administrators can inspect archived lessons.
+     */
+    public function test_platform_admin_can_retrieve_archived_lesson_for_preview(): void
+    {
+        $user = User::factory()->create([
+            'email_verified_at' => now(),
+        ]);
+
+        PlatformAdmin::create([
+            'user_id' => $user->id,
+        ]);
+
+        $center = Center::factory()->create();
+
+        $course = $this->createCourse($center);
+
+        $course->update([
+            'status' => 'archived',
+            'published_at' => null,
+        ]);
+
+        $module = CourseModule::factory()
+            ->forCourse($course)
+            ->create([
+                'status' => CourseModule::STATUS_ARCHIVED,
+                'published_at' => null,
+            ]);
+
+        $lesson = Lesson::factory()
+            ->forModule($module)
+            ->create([
+                'status' => Lesson::STATUS_ARCHIVED,
+                'published_at' => null,
+            ]);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+
+        $response->assertJsonPath(
+            'data.access_mode',
+            'admin_preview'
+        );
+
+        $response->assertJsonPath(
+            'data.course.status',
+            'archived'
+        );
+
+        $response->assertJsonPath(
+            'data.module.status',
+            'archived'
+        );
+
+        $response->assertJsonPath(
+            'data.lesson.status',
+            'archived'
         );
     }
 

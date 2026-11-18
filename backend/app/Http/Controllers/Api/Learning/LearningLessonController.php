@@ -70,24 +70,31 @@ class LearningLessonController extends Controller
                 ->first()
             : null;
 
+        // Students receive active assets only.
+        // Administrators can also inspect archived asset metadata.
+        $assetsQuery = $lesson->assets()
+            ->forCenter($center->id);
+
+        if (! $isAdminPreview) {
+            $assetsQuery->active();
+        }
+
         // Never expose storage keys or private media paths.
-        $assets = $lesson->assets()
-            ->forCenter($center->id)
-            ->active()
-            ->get([
-                'id',
-                'lesson_id',
-                'title',
-                'asset_type',
-                'original_filename',
-                'mime_type',
-                'size_bytes',
-                'duration_seconds',
-                'alt_text',
-                'caption',
-                'is_downloadable',
-                'sort_order',
-            ]);
+        $assets = $assetsQuery->get([
+            'id',
+            'lesson_id',
+            'title',
+            'asset_type',
+            'original_filename',
+            'mime_type',
+            'size_bytes',
+            'duration_seconds',
+            'alt_text',
+            'caption',
+            'is_downloadable',
+            'sort_order',
+            'status',
+        ]);
 
         // Students receive published exercises only.
         // Administrators can inspect draft and archived exercises.

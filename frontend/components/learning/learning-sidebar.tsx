@@ -9,7 +9,8 @@ import type {
 
 interface LearningSidebarProps {
   overview: LearningOverview;
-  courseSlug: string;
+  lessonHrefPrefix: string;
+  courseOverviewHref: string;
   currentLessonId: number;
   isMobileOpen: boolean;
   onClose: () => void;
@@ -84,7 +85,8 @@ function formatDuration(minutes: number | null): string {
 
 export default function LearningSidebar({
   overview,
-  courseSlug,
+  lessonHrefPrefix,
+  courseOverviewHref,
   currentLessonId,
   isMobileOpen,
   onClose,
@@ -252,9 +254,7 @@ export default function LearningSidebar({
                         const isActive =
                           lesson.id === currentLessonId;
 
-                        const href =
-                          `/courses/${encodeURIComponent(courseSlug)}` +
-                          `/learn/lessons/${lesson.id}`;
+                        const href = `${lessonHrefPrefix}/${lesson.id}`;
 
                         return (
                           <Link
@@ -331,12 +331,14 @@ export default function LearningSidebar({
         {/* Sidebar Footer */}
         <div className="border-t border-slate-100 p-4">
           <Link
-            href={`/courses/${encodeURIComponent(courseSlug)}`}
+            href={courseOverviewHref}
             onClick={onClose}
             className="flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 transition hover:border-[#0e8988] hover:text-[#0e8988]"
           >
             <span aria-hidden="true">←</span>
-            Back to course details
+            {isAdminPreview
+              ? "Back to curriculum"
+              : "Back to course details"}
           </Link>
         </div>
       </aside>
