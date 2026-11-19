@@ -286,15 +286,7 @@ class LessonRevisionServiceTest extends TestCase
             ->map(fn ($id) => (int) $id)
             ->all();
 
-        dump([
-            'revision_id' => $revision->id,
-            'actual_block_ids' => $actualBlockIds,
-            'submitted_block_ids' => [
-                $third->id,
-                $first->id,
-                $second->id,
-            ],
-        ]);
+
 
         $reordered = $this->service->reorderBlocks(
             $revision,

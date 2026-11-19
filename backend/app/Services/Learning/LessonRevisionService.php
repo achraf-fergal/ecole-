@@ -167,7 +167,9 @@ class LessonRevisionService
     */
 
     /**
-     * Update metadata on the current editable draft only.
+     * Update metadata of the current draft revision.
+     *
+     * Published and superseded revisions cannot be modified.
      *
      * @param  array<string, mixed>  $attributes
      */
@@ -175,38 +177,37 @@ class LessonRevisionService
         LessonRevision $revision,
         array $attributes
     ): LessonRevision {
+        $allowed = [
+            'title',
+            'description',
+            'content_locale',
+            'duration_minutes',
+        ];
+
+        $unexpected = array_diff(
+            array_keys($attributes),
+            $allowed
+        );
+
+        if ($unexpected !== []) {
+            $this->fail(
+                'attributes',
+                'Unsupported revision metadata attributes.'
+            );
+        }
+
+        if ($attributes === []) {
+            $this->fail(
+                'attributes',
+                'At least one metadata attribute is required.'
+            );
+        }
+
         return DB::transaction(function () use (
             $revision,
             $attributes
         ): LessonRevision {
             [, $draft] = $this->lockDraftContext($revision);
-
-            $allowed = [
-                'title',
-                'description',
-                'content_locale',
-                'duration_minutes',
-            ];
-
-            $unexpected = array_diff(
-                array_keys($attributes),
-                $allowed
-            );
-
-            if ($unexpected !== []) {
-                $this->fail(
-                    'attributes',
-                    'Unsupported revision attributes: '
-                        .implode(', ', $unexpected)
-                );
-            }
-
-            if ($attributes === []) {
-                $this->fail(
-                    'attributes',
-                    'At least one revision attribute is required.'
-                );
-            }
 
             $draft->fill($attributes);
             $draft->save();

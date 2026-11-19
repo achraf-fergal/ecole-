@@ -135,14 +135,14 @@ class LessonContentController extends Controller
                 'sometimes',
                 'nullable',
                 'integer',
-                'min:0',
+                'min:1',
                 'max:65535',
             ],
         ]);
 
         if ($validated === []) {
             throw ValidationException::withMessages([
-                'attributes' => 'At least one attribute is required.',
+                'attributes' => 'At least one metadata attribute is required.',
             ]);
         }
 
@@ -151,14 +151,14 @@ class LessonContentController extends Controller
             $validated
         );
 
-        $revision->load([
-            'blocks.asset',
-            'blocks.exercise.questions.options',
-        ]);
-
         return response()->json([
             'message' => 'Draft metadata updated successfully.',
-            'data' => $this->revisionPayload($revision),
+            'data' => $this->revisionPayload(
+                $revision->load([
+                    'blocks.asset',
+                    'blocks.exercise.questions.options',
+                ])
+            ),
         ]);
     }
 
