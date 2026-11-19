@@ -314,6 +314,12 @@ class LearningLessonController extends Controller
                             ->where('course_id', $course->id)
                             ->published();
                     }
+                )
+                ->whereHas(
+                    'publishedRevision',
+                    function (Builder $query): void {
+                        $query->published();
+                    }
                 );
         } else {
             // Administrative previews include unpublished module and lesson records.
@@ -390,7 +396,14 @@ class LearningLessonController extends Controller
                     $lessonQuery->forCenter($center->id);
 
                     if (! $isAdminPreview) {
-                        $lessonQuery->published();
+                        $lessonQuery
+                            ->published()
+                            ->whereHas(
+                                'publishedRevision',
+                                function (Builder $query): void {
+                                    $query->published();
+                                }
+                            );
                     }
                 },
             ])

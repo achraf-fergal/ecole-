@@ -10,6 +10,8 @@ use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Models\LessonBlock;
+use App\Models\LessonRevision;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
@@ -96,6 +98,49 @@ class LessonAssetAccessTest extends TestCase
             ->published()
             ->create();
 
+        $revision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 1,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+            'title' => $lesson->title,
+            'description' => $lesson->description,
+            'content_locale' => $lesson->content_locale,
+            'duration_minutes' => $lesson->duration_minutes,
+            'created_by_user_id' => null,
+            'published_by_user_id' => null,
+            'published_at' => $lesson->published_at,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Published lesson content.',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'published_revision_id' => $revision->id,
+        ])->save();
+
         return compact(
             'center',
             'user',
@@ -134,6 +179,30 @@ class LessonAssetAccessTest extends TestCase
         );
     }
 
+    private function linkAssetToPublishedRevision(
+        Lesson $lesson,
+        LessonAsset $asset
+    ): void {
+        $revision = LessonRevision::query()
+            ->where('center_id', $lesson->center_id)
+            ->where('lesson_id', $lesson->id)
+            ->whereKey($lesson->published_revision_id)
+            ->where('status', LessonRevision::STATUS_PUBLISHED)
+            ->firstOrFail();
+
+        LessonBlock::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $asset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+    }
+
     public function test_enrolled_student_can_get_private_asset_preview_url(): void
     {
         Storage::fake('private');
@@ -149,6 +218,8 @@ class LessonAssetAccessTest extends TestCase
             ->forLesson($lesson)
             ->privateFile()
             ->create();
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
 
         Storage::disk('private')->put(
             $asset->storage_key,
@@ -197,6 +268,8 @@ class LessonAssetAccessTest extends TestCase
                 'original_filename' => 'worksheet.pdf',
             ]);
 
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
         Storage::disk('private')->put(
             $asset->storage_key,
             'Test download content.'
@@ -238,6 +311,8 @@ class LessonAssetAccessTest extends TestCase
             ->create([
                 'is_downloadable' => false,
             ]);
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
 
         $token = $this->tokenFor($user);
 
@@ -309,6 +384,8 @@ class LessonAssetAccessTest extends TestCase
                 'storage_key' => '\\..\\outside.pdf',
             ]);
 
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
         $token = $this->tokenFor($user);
 
         $response = $this->withHeader(
@@ -339,6 +416,8 @@ class LessonAssetAccessTest extends TestCase
             ->forLesson($lesson)
             ->externalLink()
             ->create();
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
 
         $token = $this->tokenFor($user);
 
@@ -376,6 +455,8 @@ class LessonAssetAccessTest extends TestCase
             ->create([
                 'external_url' => 'http://example.com/learning-resource',
             ]);
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
 
         $token = $this->tokenFor($user);
 
@@ -458,6 +539,8 @@ class LessonAssetAccessTest extends TestCase
             ->video()
             ->create();
 
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
         $token = $this->tokenFor($user);
 
         $response = $this->withHeader(
@@ -486,6 +569,120 @@ class LessonAssetAccessTest extends TestCase
         $response->assertJsonMissing([
             'provider_asset_id' => $asset->provider_asset_id,
         ]);
+    }
+
+    public function test_student_cannot_access_active_asset_not_referenced_by_current_published_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            $this->assetAccessUrl(
+                $center,
+                $course,
+                $lesson,
+                $asset
+            )
+        );
+
+        $response->assertNotFound();
+    }
+
+    public function test_student_cannot_access_asset_referenced_only_by_superseded_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create();
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
+        $oldRevision = LessonRevision::query()
+            ->findOrFail($lesson->published_revision_id);
+
+        $oldRevision->update([
+            'status' => LessonRevision::STATUS_SUPERSEDED,
+        ]);
+
+        $currentRevision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 2,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+            'title' => $lesson->title,
+            'description' => $lesson->description,
+            'content_locale' => $lesson->content_locale,
+            'duration_minutes' => $lesson->duration_minutes,
+            'created_by_user_id' => null,
+            'published_by_user_id' => null,
+            'published_at' => now(),
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $currentRevision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Updated published content.',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'published_revision_id' => $currentRevision->id,
+        ])->save();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            $this->assetAccessUrl(
+                $center,
+                $course,
+                $lesson,
+                $asset
+            )
+        );
+
+        $response->assertNotFound();
     }
 
     public function test_unauthenticated_user_cannot_access_lesson_asset(): void

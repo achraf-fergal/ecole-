@@ -9,8 +9,8 @@ use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\LessonProgress;
 use App\Models\StudentProfile;
-use App\Models\User;
 use App\Services\Learning\LearningAccessService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
 
@@ -60,7 +60,14 @@ class LearningOverviewController extends Controller
                     $query->forCenter($center->id);
 
                     if (! $isAdminPreview) {
-                        $query->published();
+                        $query
+                            ->published()
+                            ->whereHas(
+                                'publishedRevision',
+                                function (Builder $revisionQuery): void {
+                                    $revisionQuery->published();
+                                }
+                            );
                     }
                 },
             ])

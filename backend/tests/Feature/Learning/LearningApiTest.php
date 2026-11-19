@@ -10,7 +10,9 @@ use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Exercise;
 use App\Models\Lesson;
+use App\Models\LessonBlock;
 use App\Models\LessonProgress;
+use App\Models\LessonRevision;
 use App\Models\Question;
 use App\Models\QuestionOption;
 use App\Models\Role;
@@ -18,7 +20,9 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PHPOpenSourceSaver\JWTAuth\JWTGuard;
 use Tests\TestCase;
+
 class LearningApiTest extends TestCase
 {
     use RefreshDatabase;
@@ -28,6 +32,61 @@ class LearningApiTest extends TestCase
         parent::setUp();
 
         $this->seed(RoleSeeder::class);
+    }
+
+    private function createPublishedRevision(
+        Lesson $lesson
+    ): LessonRevision {
+        $revision = LessonRevision::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+
+            'version_number' => 1,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+
+            'title' => $lesson->title,
+            'description' => $lesson->description,
+            'content_locale' => $lesson->content_locale,
+            'duration_minutes' => $lesson->duration_minutes,
+
+            'created_by_user_id' => null,
+            'published_by_user_id' => null,
+            'published_at' => $lesson->published_at,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Published lesson content.',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'published_revision_id' => $revision->id,
+        ])->save();
+
+        return $revision;
     }
 
     /**
@@ -95,6 +154,8 @@ class LearningApiTest extends TestCase
             ->published()
             ->create();
 
+        $this->createPublishedRevision($lesson);
+
         return compact(
             'center',
             'user',
@@ -113,7 +174,7 @@ class LearningApiTest extends TestCase
      */
     private function tokenFor(User $user): string
     {
-        /** @var \PHPOpenSourceSaver\JWTAuth\JWTGuard $guard */
+        /** @var JWTGuard $guard */
         $guard = auth('api');
 
         return $guard->login($user);
@@ -178,6 +239,23 @@ class LearningApiTest extends TestCase
             'sort_order' => 1,
             'status' => Exercise::STATUS_PUBLISHED,
             'published_at' => now(),
+        ]);
+
+        $revision = LessonRevision::query()
+            ->findOrFail($lesson->published_revision_id);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+
+            'block_type' => LessonBlock::TYPE_EXERCISE,
+            'sort_order' => 1,
+
+            'content_json' => null,
+            'lesson_asset_id' => null,
+            'exercise_id' => $exercise->id,
+            'settings' => null,
         ]);
 
         $question = Question::query()->create([
@@ -393,5 +471,35 @@ class LearningApiTest extends TestCase
         );
 
         $response->assertUnauthorized();
+    }
+
+    public function test_student_cannot_retrieve_published_lesson_without_published_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $unversionedLesson = Lesson::factory()
+            ->forModule($lesson->courseModule)
+            ->published()
+            ->create();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $unversionedLesson->id,
+            ])
+        );
+
+        $response->assertNotFound();
     }
 }

@@ -7,6 +7,7 @@ use App\Models\Center;
 use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Models\LessonBlock;
 use App\Services\Learning\LearningAccessService;
 use App\Services\Learning\LessonAssetAccessService;
 use Illuminate\Database\Eloquent\Builder;
@@ -104,6 +105,12 @@ class LessonAssetAccessController extends Controller
                             ->where('course_id', $course->id)
                             ->published();
                     }
+                )
+                ->whereHas(
+                    'publishedRevision',
+                    function (Builder $query): void {
+                        $query->published();
+                    }
                 );
         } else {
             // Administrators may preview assets in unpublished lessons.
@@ -133,11 +140,31 @@ class LessonAssetAccessController extends Controller
         );
 
         // Archived assets remain unavailable until explicitly restored.
-        return LessonAsset::query()
+        $assetQuery = LessonAsset::query()
             ->forCenter($center->id)
             ->where('lesson_id', $lesson->id)
             ->active()
-            ->whereKey((int) $assetParam)
-            ->firstOrFail();
+            ->whereKey((int) $assetParam);
+
+        if (! $isAdminPreview) {
+            $assetQuery->whereHas(
+                'blocks',
+                function (Builder $query) use ($lesson): void {
+                    $query
+                        ->forCenter($lesson->center_id)
+                        ->where('lesson_id', $lesson->id)
+                        ->where(
+                            'lesson_revision_id',
+                            $lesson->published_revision_id
+                        )
+                        ->where(
+                            'block_type',
+                            LessonBlock::TYPE_MEDIA
+                        );
+                }
+            );
+        }
+
+        return $assetQuery->firstOrFail();
     }
 }

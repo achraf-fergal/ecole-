@@ -11,6 +11,8 @@ use App\Models\Enrollment;
 use App\Models\Language;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Models\LessonBlock;
+use App\Models\LessonRevision;
 use App\Models\Level;
 use App\Models\PlatformAdmin;
 use App\Models\Role;
@@ -708,6 +710,49 @@ class LessonAssetManagementTest extends TestCase
             ->forModule($module)
             ->published()
             ->create();
+
+        $revision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 1,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+            'title' => $lesson->title,
+            'description' => $lesson->description,
+            'content_locale' => $lesson->content_locale,
+            'duration_minutes' => $lesson->duration_minutes,
+            'created_by_user_id' => null,
+            'published_by_user_id' => null,
+            'published_at' => $lesson->published_at,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Published lesson content.',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'published_revision_id' => $revision->id,
+        ])->save();
 
         $activeAsset = LessonAsset::factory()
             ->forLesson($lesson)
