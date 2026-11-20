@@ -1158,4 +1158,262 @@ class LearningApiTest extends TestCase
         $res->assertJsonPath('data.progress.status', LessonProgress::STATUS_COMPLETED);
         $res->assertJsonPath('data.progress.last_position_seconds', 145);
     }
+
+    /**
+     * Test A: Legacy body is never exposed to students when a published revision exists.
+     */
+    public function test_student_does_not_receive_legacy_lesson_body_when_published_revision_exists(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $lesson->update(['body' => 'OLD LEGACY SECRET']);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.lesson.body', null);
+        $this->assertStringNotContainsString('OLD LEGACY SECRET', $response->getContent());
+        $response->assertJsonPath('data.blocks.0.content_json.content.0.content.0.text', 'Published lesson content.');
+    }
+
+    /**
+     * Test B: Fail closed when published revision has no usable blocks.
+     */
+    public function test_student_fails_closed_when_published_revision_has_no_usable_blocks(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $lesson->update(['body' => 'OLD LEGACY SECRET']);
+
+        // Create an independent legacy asset on the lesson (not in revision)
+        LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create(['title' => 'LEGACY INDEPENDENT ASSET']);
+
+        // Simulate invalid/corrupted empty revision
+        $revision = LessonRevision::query()->findOrFail($lesson->published_revision_id);
+        $revision->blocks()->delete();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        // Fail closed with 404, no legacy body or asset disclosure
+        $response->assertNotFound();
+        $this->assertStringNotContainsString('OLD LEGACY SECRET', $response->getContent());
+        $this->assertStringNotContainsString('LEGACY INDEPENDENT ASSET', $response->getContent());
+    }
+
+    /**
+     * Test B2: Fail closed when a published block references an unavailable resource.
+     */
+    public function test_student_fails_closed_when_published_revision_references_unavailable_resource(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $lesson->update(['body' => 'OLD LEGACY SECRET']);
+
+        // Create an archived asset and link it to a media block in the published revision
+        $archivedAsset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->archived()
+            ->create();
+
+        $revision = LessonRevision::query()->findOrFail($lesson->published_revision_id);
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $archivedAsset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertNotFound();
+        $this->assertStringNotContainsString('OLD LEGACY SECRET', $response->getContent());
+    }
+
+    /**
+     * Test C: Administrative preview of a legacy lesson without revisions continues working.
+     */
+    public function test_administrative_preview_of_legacy_lesson_without_revisions_preserves_compatibility(): void
+    {
+        $center = Center::factory()->create();
+        $adminUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::create([
+            'center_id' => $center->id,
+            'user_id' => $adminUser->id,
+            'status' => 'active',
+        ]);
+        $role = Role::query()->where('key', 'center_admin')->firstOrFail();
+        $membership->roles()->attach($role->id);
+
+        $course = Course::factory()->forCenter($center)->published()->create();
+        $module = CourseModule::factory()->forCourse($course)->published()->create();
+        $lesson = Lesson::factory()->forModule($module)->create([
+            'body' => 'Legacy Administrative Content Body',
+            'status' => Lesson::STATUS_DRAFT,
+            'draft_revision_id' => null,
+            'published_revision_id' => null,
+        ]);
+
+        LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create(['title' => 'Legacy Admin Asset']);
+
+        $token = $this->tokenFor($adminUser);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.access_mode', 'admin_preview');
+        $response->assertJsonPath('data.revision', null);
+        $response->assertJsonPath('data.lesson.body', 'Legacy Administrative Content Body');
+        $this->assertCount(1, $response->json('data.assets'));
+        $response->assertJsonPath('data.assets.0.title', 'Legacy Admin Asset');
+    }
+
+    /**
+     * Test D: Student with valid published revision sees correct ordered sequence ignoring legacy body.
+     */
+    public function test_student_with_published_revision_sees_correct_ordered_sequence_ignoring_legacy_body(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $lesson->update(['body' => 'COMPLETELY DIFFERENT STALE LEGACY TEXT']);
+
+        $revision = LessonRevision::query()->findOrFail($lesson->published_revision_id);
+
+        $activeAsset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create(['title' => 'Sequence Asset']);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $activeAsset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 2,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [['type' => 'text', 'text' => 'Follow up text block.']],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.lesson.body', null);
+        $this->assertStringNotContainsString('COMPLETELY DIFFERENT STALE LEGACY TEXT', $response->getContent());
+
+        $blocks = $response->json('data.blocks');
+        $this->assertCount(3, $blocks);
+        $this->assertSame(LessonBlock::TYPE_TEXT, $blocks[0]['block_type']);
+        $this->assertSame(0, $blocks[0]['sort_order']);
+        $this->assertSame(LessonBlock::TYPE_MEDIA, $blocks[1]['block_type']);
+        $this->assertSame(1, $blocks[1]['sort_order']);
+        $this->assertSame('Sequence Asset', $blocks[1]['asset']['title']);
+        $this->assertSame(LessonBlock::TYPE_TEXT, $blocks[2]['block_type']);
+        $this->assertSame(2, $blocks[2]['sort_order']);
+    }
 }

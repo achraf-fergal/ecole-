@@ -20,6 +20,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 
 class LearningLessonController extends Controller
 {
@@ -100,6 +101,53 @@ class LearningLessonController extends Controller
                 404,
                 'Published lesson content not found.'
             );
+
+            // Fail closed: a published lesson must have usable blocks without invalid or missing resources.
+            $rawBlocks = $revision->blocks;
+
+            if ($rawBlocks->isEmpty()) {
+                Log::warning('Published lesson revision contains no blocks.', [
+                    'center_id' => $center->id,
+                    'course_id' => $course->id,
+                    'lesson_id' => $lesson->id,
+                    'revision_id' => $revision->id,
+                ]);
+
+                abort(404, 'Published lesson content not found.');
+            }
+
+            foreach ($rawBlocks as $block) {
+                $isValid = match ($block->block_type) {
+                    LessonBlock::TYPE_TEXT => is_array($block->content_json),
+
+                    LessonBlock::TYPE_MEDIA => $block->asset instanceof LessonAsset
+                        && $block->asset->status === LessonAsset::STATUS_ACTIVE
+                        && $block->asset->center_id === $center->id
+                        && $block->asset->lesson_id === $lesson->id,
+
+                    LessonBlock::TYPE_EXERCISE => $block->exercise instanceof Exercise
+                        && $block->exercise->isPublished()
+                        && $block->exercise->center_id === $center->id
+                        && $block->exercise->lesson_id === $lesson->id,
+
+                    default => false,
+                };
+
+                if (! $isValid) {
+                    Log::warning('Published lesson block references invalid or unavailable resource.', [
+                        'center_id' => $center->id,
+                        'course_id' => $course->id,
+                        'lesson_id' => $lesson->id,
+                        'revision_id' => $revision->id,
+                        'block_id' => $block->id,
+                        'block_type' => $block->block_type,
+                    ]);
+
+                    abort(404, 'Published lesson content not found.');
+                }
+            }
+
+            $blocks = $rawBlocks->values();
         } else {
             abort_unless(
                 $revision === null
@@ -110,30 +158,30 @@ class LearningLessonController extends Controller
                 404,
                 'Lesson revision not found.'
             );
+
+            // Blocks are ordered by sort_order and id through the revision relation.
+            $blocks = ($revision?->blocks ?? collect())
+                ->filter(function (LessonBlock $block) use ($isAdminPreview): bool {
+                    return match ($block->block_type) {
+                        LessonBlock::TYPE_TEXT => is_array($block->content_json),
+
+                        LessonBlock::TYPE_MEDIA => $block->asset instanceof LessonAsset
+                            && (
+                                $isAdminPreview
+                                || $block->asset->status === LessonAsset::STATUS_ACTIVE
+                            ),
+
+                        LessonBlock::TYPE_EXERCISE => $block->exercise instanceof Exercise
+                            && (
+                                $isAdminPreview
+                                || $block->exercise->isPublished()
+                            ),
+
+                        default => false,
+                    };
+                })
+                ->values();
         }
-
-        // Blocks are ordered by sort_order and id through the revision relation.
-        $blocks = ($revision?->blocks ?? collect())
-            ->filter(function (LessonBlock $block) use ($isAdminPreview): bool {
-                return match ($block->block_type) {
-                    LessonBlock::TYPE_TEXT => is_array($block->content_json),
-
-                    LessonBlock::TYPE_MEDIA => $block->asset instanceof LessonAsset
-                        && (
-                            $isAdminPreview
-                            || $block->asset->status === LessonAsset::STATUS_ACTIVE
-                        ),
-
-                    LessonBlock::TYPE_EXERCISE => $block->exercise instanceof Exercise
-                        && (
-                            $isAdminPreview
-                            || $block->exercise->isPublished()
-                        ),
-
-                    default => false,
-                };
-            })
-            ->values();
 
         // Administrative previews remain compatible with legacy lessons.
         if ($revision === null && $isAdminPreview) {

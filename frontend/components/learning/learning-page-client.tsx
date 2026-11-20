@@ -437,6 +437,8 @@ export default function LearningPageClient({
     overview.access_mode === "admin_preview" ||
     lessonData.access_mode === "admin_preview";
 
+  const isLegacyAdminFallback = isAdminPreview && !lessonData.revision;
+
   const isCompleted =
     !isAdminPreview && progress.status === "completed";
 
@@ -637,8 +639,8 @@ export default function LearningPageClient({
                       return null;
                   }
                 })
-              ) : (
-                /* Legacy Fallback Content */
+              ) : isLegacyAdminFallback ? (
+                /* Legacy Fallback Content - Only for Administrative Preview when revision is null */
                 <>
                   {lesson.body && (
                     <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-xs">
@@ -703,19 +705,30 @@ export default function LearningPageClient({
                     lessonData.exercises.length === 0 && (
                       <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
                         <h3 className="font-black text-[#102b4c]">
-                          {isAdminPreview
-                            ? "No lesson content has been added"
-                            : "Lesson content is not available"}
+                          No lesson content has been added
                         </h3>
 
                         <p className="mt-2 text-sm text-slate-500">
-                          {isAdminPreview
-                            ? "This lesson does not contain text or active media resources yet."
-                            : "Your instructor has not added resources to this lesson yet."}
+                          This lesson does not contain text or active media resources yet.
                         </p>
                       </div>
                     )}
                 </>
+              ) : (
+                /* Explicit Unavailable Content State for Students (or Revisions with no usable blocks) */
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                  <h3 className="font-black text-[#102b4c]">
+                    {isAdminPreview
+                      ? "No lesson content has been added"
+                      : "Lesson content is not available"}
+                  </h3>
+
+                  <p className="mt-2 text-sm text-slate-500">
+                    {isAdminPreview
+                      ? "This lesson revision does not contain usable content blocks."
+                      : "Your instructor has not added resources to this lesson yet."}
+                  </p>
+                </div>
               )}
             </section>
 

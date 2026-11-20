@@ -57,8 +57,8 @@ class LearningLessonResource extends JsonResource
                 'description' => $revision?->description ?? $lesson->description,
                 'content_type' => $lesson->content_type,
 
-                // Temporary backwards compatibility. The player should use blocks.
-                'body' => $lesson->body,
+                // Legacy content is only exposed for administrative preview when no revision exists.
+                'body' => ($isAdminPreview && $revision === null) ? $lesson->body : null,
 
                 'content_locale' => $revision?->content_locale
                     ?? $lesson->content_locale,
