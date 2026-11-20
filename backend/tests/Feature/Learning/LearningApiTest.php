@@ -19,6 +19,7 @@ use App\Models\QuestionOption;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\Learning\LessonRevisionService;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use PHPOpenSourceSaver\JWTAuth\JWTGuard;
@@ -815,5 +816,346 @@ class LearningApiTest extends TestCase
         );
 
         $response2->assertNotFound();
+    }
+
+    public function test_student_media_block_does_not_expose_storage_references(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create([
+                'storage_disk' => 'private_s3_bucket',
+                'storage_key' => 'tenants/secret/path/video.mp4',
+                'video_provider' => 'cloudflare',
+                'provider_asset_id' => 'cf-secret-stream-id-999',
+            ]);
+
+        $revision = LessonRevision::query()->findOrFail($lesson->published_revision_id);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $asset->id,
+            'exercise_id' => null,
+            'settings' => ['caption' => 'Video block'],
+        ]);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+
+        $rawBody = $response->getContent();
+        $this->assertStringNotContainsString('private_s3_bucket', $rawBody);
+        $this->assertStringNotContainsString('tenants/secret/path/video.mp4', $rawBody);
+        $this->assertStringNotContainsString('cf-secret-stream-id-999', $rawBody);
+
+        $mediaBlock = collect($response->json('data.blocks'))
+            ->firstWhere('block_type', LessonBlock::TYPE_MEDIA);
+
+        $this->assertNotNull($mediaBlock);
+        $this->assertArrayNotHasKey('storage_disk', $mediaBlock['asset']);
+        $this->assertArrayNotHasKey('storage_key', $mediaBlock['asset']);
+        $this->assertArrayNotHasKey('provider_asset_id', $mediaBlock['asset']);
+    }
+
+    public function test_draft_only_media_is_inaccessible_to_students(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $draftRevision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 2,
+            'status' => LessonRevision::STATUS_DRAFT,
+            'title' => 'Draft V2',
+            'description' => null,
+            'content_locale' => 'en',
+            'duration_minutes' => 10,
+            'created_by_user_id' => null,
+            'published_by_user_id' => null,
+            'published_at' => null,
+        ]);
+
+        $draftAsset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create([
+                'title' => 'Draft Only Asset',
+            ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $draftRevision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 0,
+            'content_json' => null,
+            'lesson_asset_id' => $draftAsset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill(['draft_revision_id' => $draftRevision->id])->save();
+
+        $token = $this->tokenFor($user);
+
+        // Student viewing lesson does NOT receive the draft asset in blocks or assets
+        $lessonResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $lessonResponse->assertOk();
+        $this->assertStringNotContainsString('Draft Only Asset', $lessonResponse->getContent());
+
+        // Student attempting to access draft asset directly gets 404
+        $assetAccessResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.assets.access', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+                'asset' => $draftAsset->id,
+            ])
+        );
+
+        $assetAccessResponse->assertNotFound();
+    }
+
+    public function test_cross_tenant_access_is_rejected(): void
+    {
+        [
+            'user' => $userA,
+        ] = $this->createLearningContext();
+
+        // Create Center B with its own learning content
+        [
+            'center' => $centerB,
+            'course' => $courseB,
+            'lesson' => $lessonB,
+        ] = $this->createLearningContext();
+
+        $tokenA = $this->tokenFor($userA);
+
+        // Student A tries to access Center B's lesson
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$tokenA}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $centerB->slug,
+                'course' => $courseB->slug,
+                'lesson' => $lessonB->id,
+            ])
+        );
+
+        $response->assertForbidden();
+    }
+
+    public function test_invalid_published_revision_pointer_does_not_expose_legacy_content(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        // Put legacy private content in lesson body
+        $lesson->update(['body' => 'LEGACY SECRET CONTENT']);
+
+        // Case: published_revision_id is null (e.g. unmigrated legacy lesson or pre-publish)
+        $lesson->forceFill(['published_revision_id' => null])->save();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertNotFound();
+        $this->assertStringNotContainsString('LEGACY SECRET CONTENT', $response->getContent());
+    }
+
+    public function test_student_sees_new_published_revision_only_after_publication(): void
+    {
+        [
+            'center' => $center,
+            'user' => $student,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $adminUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::create([
+            'center_id' => $center->id,
+            'user_id' => $adminUser->id,
+            'status' => 'active',
+        ]);
+        $role = Role::query()->where('key', 'center_admin')->firstOrFail();
+        $membership->roles()->attach($role->id);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        // Student checks initial lesson (v1)
+        $studentToken = $this->tokenFor($student);
+        $res1 = $this->withHeader('Authorization', "Bearer {$studentToken}")->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+        $res1->assertOk();
+        $res1->assertJsonPath('data.revision.version_number', 1);
+
+        // Admin creates draft v2 with new block
+        $draft2 = $service->createDraft($lesson->fresh(), $adminUser);
+        $service->addTextBlock($draft2, [
+            'type' => 'doc',
+            'content' => [
+                [
+                    'type' => 'paragraph',
+                    'content' => [
+                        ['type' => 'text', 'text' => 'Brand New V2 Content'],
+                    ],
+                ],
+            ],
+        ]);
+
+        // Student checks lesson BEFORE publish: must STILL see v1, NOT v2
+        $res2 = $this->withHeader('Authorization', "Bearer {$studentToken}")->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+        $res2->assertOk();
+        $res2->assertJsonPath('data.revision.version_number', 1);
+        $this->assertStringNotContainsString('Brand New V2 Content', $res2->getContent());
+
+        // Admin publishes draft v2
+        $service->publish($lesson->fresh(), $adminUser);
+
+        // Student checks lesson AFTER publish: must see v2
+        $res3 = $this->withHeader('Authorization', "Bearer {$studentToken}")->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+        $res3->assertOk();
+        $res3->assertJsonPath('data.revision.version_number', 2);
+        $this->assertStringContainsString('Brand New V2 Content', $res3->getContent());
+    }
+
+    public function test_student_progress_is_preserved_through_publication(): void
+    {
+        [
+            'center' => $center,
+            'user' => $student,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $studentToken = $this->tokenFor($student);
+
+        // Student updates progress on v1
+        $progressRes = $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.progress.update', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ]),
+            [
+                'last_position_seconds' => 145,
+                'completed' => true,
+            ]
+        );
+        $progressRes->assertOk();
+        $progressRes->assertJsonPath('data.status', LessonProgress::STATUS_COMPLETED);
+        $progressRes->assertJsonPath('data.last_position_seconds', 145);
+
+        // Admin publishes a new revision v2
+        $adminUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::create([
+            'center_id' => $center->id,
+            'user_id' => $adminUser->id,
+            'status' => 'active',
+        ]);
+        $role = Role::query()->where('key', 'center_admin')->firstOrFail();
+        $membership->roles()->attach($role->id);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+        $draft2 = $service->createDraft($lesson->fresh(), $adminUser);
+        $service->addTextBlock($draft2, [
+            'type' => 'doc',
+            'content' => [
+                [
+                    'type' => 'paragraph',
+                    'content' => [['type' => 'text', 'text' => 'Updated content']],
+                ],
+            ],
+        ]);
+        $service->publish($lesson->fresh(), $adminUser);
+
+        // Student views lesson again: progress is intact
+        $res = $this->withHeader('Authorization', "Bearer {$studentToken}")->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+        $res->assertOk();
+        $res->assertJsonPath('data.revision.version_number', 2);
+        $res->assertJsonPath('data.progress.status', LessonProgress::STATUS_COMPLETED);
+        $res->assertJsonPath('data.progress.last_position_seconds', 145);
     }
 }

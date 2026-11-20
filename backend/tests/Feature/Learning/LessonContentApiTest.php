@@ -904,4 +904,45 @@ class LessonContentApiTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('data.status', LessonRevision::STATUS_PUBLISHED);
     }
+
+    public function test_center_admin_cannot_access_or_publish_another_center_content(): void
+    {
+        $contextA = $this->createContext();
+        $contextB = $this->createContext();
+
+        $tokenA = $this->tokenFor($contextA['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+        $draftB = $service->createDraft($contextB['lesson'], $contextB['user']);
+        $service->addTextBlock($draftB, $this->document('Center B Content'));
+
+        // Admin A attempts to publish Center B's lesson
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$tokenA}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $contextB['center']->slug,
+                'course' => $contextB['course']->slug,
+                'lesson' => $contextB['lesson']->id,
+            ])
+        );
+
+        $response->assertForbidden();
+
+        // Admin A attempts to view Center B's lesson content
+        $showResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$tokenA}"
+        )->getJson(
+            route('api.centers.admin.learning.content.show', [
+                'center' => $contextB['center']->slug,
+                'course' => $contextB['course']->slug,
+                'lesson' => $contextB['lesson']->id,
+            ])
+        );
+
+        $showResponse->assertForbidden();
+    }
 }
