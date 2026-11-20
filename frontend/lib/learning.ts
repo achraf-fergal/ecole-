@@ -234,6 +234,54 @@ export interface LearningExercise {
 
 /*
 |--------------------------------------------------------------------------
+| Revision & Block Content Types
+|--------------------------------------------------------------------------
+*/
+
+export interface LessonRevisionSummary {
+  id: number;
+  version_number: number;
+  status: "draft" | "published" | "superseded";
+  title: string;
+  description: string | null;
+  content_locale: string;
+  duration_minutes: number | null;
+  created_at: string | null;
+  published_at: string | null;
+}
+
+export interface TipTapMark {
+  type: string;
+  attrs?: Record<string, unknown>;
+}
+
+export interface TipTapNode {
+  type: string;
+  attrs?: Record<string, unknown>;
+  content?: TipTapNode[];
+  marks?: TipTapMark[];
+  text?: string;
+}
+
+export interface TipTapDocument {
+  type: "doc";
+  content?: TipTapNode[];
+}
+
+export type LessonBlockType = "text" | "media" | "exercise";
+
+export interface LessonBlock {
+  id: number;
+  block_type: LessonBlockType;
+  sort_order: number;
+  content_json: TipTapDocument | null;
+  settings?: Record<string, unknown> | null;
+  asset: LearningLessonAsset | null;
+  exercise: LearningExercise | null;
+}
+
+/*
+|--------------------------------------------------------------------------
 | Complete Lesson Response
 |--------------------------------------------------------------------------
 */
@@ -243,6 +291,8 @@ export interface LearningLessonData {
   course: LearningLessonCourse;
   module: LearningLessonModule;
   lesson: LearningLesson;
+  revision?: LessonRevisionSummary | null;
+  blocks?: LessonBlock[];
   progress: LessonProgress;
   assets: LearningLessonAsset[];
   exercises: LearningExercise[];

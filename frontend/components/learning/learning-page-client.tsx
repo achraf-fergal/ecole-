@@ -14,6 +14,9 @@ import { apiGetMe, type AuthUser } from "@/lib/auth";
 
 import LearningSidebar from "./learning-sidebar";
 import LessonAssetViewer from "./lesson-asset-viewer";
+import LessonTextBlock from "./lesson-text-block";
+import LessonMediaBlock from "./lesson-media-block";
+import LessonExerciseBlock from "./lesson-exercise-block";
 import LearningPageSkeleton from "./learning-page-skeleton";
 
 import {
@@ -581,6 +584,12 @@ export default function LearningPageClient({
                   {lesson.content_type} lesson
                 </span>
 
+                {lessonData.revision && (
+                  <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600">
+                    Version {lessonData.revision.version_number}
+                  </span>
+                )}
+
                 {!isAdminPreview && (
                   <span>
                     {overview.progress_summary.completion_percentage}%
@@ -596,171 +605,121 @@ export default function LearningPageClient({
               </div>
             </div>
 
-            {/* Lesson Content */}
+            {/* Lesson Content Blocks */}
             <section className="space-y-6">
-              {lesson.body && (
-                <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7">
-                  <h3 className="text-sm font-black text-[#102b4c]">
-                    Lesson content
-                  </h3>
+              {lessonData.blocks && lessonData.blocks.length > 0 ? (
+                lessonData.blocks.map((block) => {
+                  switch (block.block_type) {
+                    case "text":
+                      return (
+                        <LessonTextBlock
+                          key={`block-${block.id}`}
+                          block={block}
+                        />
+                      );
+                    case "media":
+                      return (
+                        <LessonMediaBlock
+                          key={`block-${block.id}`}
+                          block={block}
+                          params={routeParams}
+                        />
+                      );
+                    case "exercise":
+                      return (
+                        <LessonExerciseBlock
+                          key={`block-${block.id}`}
+                          block={block}
+                          isAdminPreview={isAdminPreview}
+                        />
+                      );
+                    default:
+                      return null;
+                  }
+                })
+              ) : (
+                /* Legacy Fallback Content */
+                <>
+                  {lesson.body && (
+                    <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-xs">
+                      <h3 className="text-sm font-black text-[#102b4c]">
+                        Lesson content
+                      </h3>
 
-                  <div className="mt-4 whitespace-pre-wrap text-sm leading-8 text-slate-700">
-                    {lesson.body}
-                  </div>
-                </article>
+                      <div className="mt-4 whitespace-pre-wrap text-sm leading-8 text-slate-700">
+                        {lesson.body}
+                      </div>
+                    </article>
+                  )}
+
+                  {lessonData.assets.length > 0 && (
+                    <section aria-labelledby="lesson-resources-heading">
+                      <div className="mb-4">
+                        <h3
+                          id="lesson-resources-heading"
+                          className="text-lg font-black text-[#102b4c]"
+                        >
+                          Lesson resources
+                        </h3>
+
+                        <p className="mt-1 text-xs text-slate-500">
+                          Videos, images, documents and additional learning resources.
+                        </p>
+                      </div>
+
+                      <div className="space-y-4">
+                        {lessonData.assets.map((asset) => (
+                          <LessonAssetViewer
+                            key={asset.id}
+                            asset={asset}
+                            params={routeParams}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  {lessonData.exercises.length > 0 && (
+                    <section className="space-y-4">
+                      {lessonData.exercises.map((exercise) => (
+                        <LessonExerciseBlock
+                          key={`exercise-${exercise.id}`}
+                          block={{
+                            id: exercise.id,
+                            block_type: "exercise",
+                            sort_order: exercise.sort_order,
+                            content_json: null,
+                            asset: null,
+                            exercise,
+                          }}
+                          isAdminPreview={isAdminPreview}
+                        />
+                      ))}
+                    </section>
+                  )}
+
+                  {!lesson.body &&
+                    lessonData.assets.length === 0 &&
+                    lessonData.exercises.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                        <h3 className="font-black text-[#102b4c]">
+                          {isAdminPreview
+                            ? "No lesson content has been added"
+                            : "Lesson content is not available"}
+                        </h3>
+
+                        <p className="mt-2 text-sm text-slate-500">
+                          {isAdminPreview
+                            ? "This lesson does not contain text or active media resources yet."
+                            : "Your instructor has not added resources to this lesson yet."}
+                        </p>
+                      </div>
+                    )}
+                </>
               )}
+            </section>
 
-              {/* Lesson Assets */}
-              {lessonData.assets.length > 0 && (
-                <section aria-labelledby="lesson-resources-heading">
-                  <div className="mb-4">
-                    <h3
-                      id="lesson-resources-heading"
-                      className="text-lg font-black text-[#102b4c]"
-                    >
-                      Lesson resources
-                    </h3>
-
-                    <p className="mt-1 text-xs text-slate-500">
-                      Videos, images, documents and additional learning resources.
-                    </p>
-                  </div>
-
-                  <div className="space-y-4">
-                    {lessonData.assets.map((asset) => (
-                      <LessonAssetViewer
-                        key={asset.id}
-                        asset={asset}
-                        params={routeParams}
-                      />
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {!lesson.body && lessonData.assets.length === 0 && (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
-                  <h3 className="font-black text-[#102b4c]">
-                    {isAdminPreview
-                      ? "No lesson content has been added"
-                      : "Lesson content is not available"}
-                  </h3>
-
-                  <p className="mt-2 text-sm text-slate-500">
-                    {isAdminPreview
-                      ? "This lesson does not contain text or active media resources yet."
-                      : "Your instructor has not added resources to this lesson yet."}
-                  </p>
-                </div>
-              )}
-
-              {/* Exercises Preview */}
-              {lessonData.exercises.length > 0 && (
-                <section>
-                  <h3 className="mb-4 text-lg font-black text-[#102b4c]">
-                    Exercises
-                  </h3>
-
-                  <div className="space-y-3">
-                    {lessonData.exercises.map((exercise) => (
-                      <article
-                        key={exercise.id}
-                        className="rounded-2xl border border-slate-200 bg-white p-5"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <h4 className="font-extrabold text-[#102b4c]">
-                              {exercise.title}
-                            </h4>
-
-                            {exercise.instructions && (
-                              <p className="mt-2 text-xs leading-6 text-slate-600">
-                                {exercise.instructions}
-                              </p>
-                            )}
-
-                            <p className="mt-3 text-[11px] text-slate-500">
-                              {exercise.questions.length} questions
-                              {" · "}
-                              Passing score: {exercise.passing_score}%
-                            </p>
-
-                            {isAdminPreview && (
-                              <span className="mt-2 inline-block rounded-md bg-amber-50 px-2 py-1 text-[9px] font-extrabold uppercase text-amber-700">
-                                {exercise.status}
-                              </span>
-                            )}
-                          </div>
-
-                          {!isAdminPreview && (
-                            <span className="rounded-full bg-amber-50 px-3 py-1 text-[10px] font-bold text-amber-700">
-                              Assessment coming next
-                            </span>
-                          )}
-                        </div>
-
-                        {isAdminPreview &&
-                          exercise.questions.length > 0 && (
-                            <div className="mt-5 space-y-4 border-t border-slate-100 pt-4">
-                              {exercise.questions.map(
-                                (question, questionIndex) => (
-                                  <div
-                                    key={question.id}
-                                    className="rounded-xl bg-slate-50 p-4"
-                                  >
-                                    <p className="text-xs font-extrabold text-[#102b4c]">
-                                      Question {questionIndex + 1}
-                                    </p>
-
-                                    <p className="mt-2 text-sm leading-6 text-slate-700">
-                                      {question.prompt}
-                                    </p>
-
-                                    <div className="mt-3 space-y-2">
-                                      {question.options.map(
-                                        (option) => (
-                                          <div
-                                            key={option.id}
-                                            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white p-3"
-                                          >
-                                            <span className="text-xs text-slate-700">
-                                              {option.option_text}
-                                            </span>
-
-                                            {option.is_correct ===
-                                              true && (
-                                                <span className="rounded-md bg-emerald-50 px-2 py-1 text-[9px] font-extrabold text-emerald-700">
-                                                  Correct Answer
-                                                </span>
-                                              )}
-                                          </div>
-                                        )
-                                      )}
-                                    </div>
-
-                                    {question.explanation && (
-                                      <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50 p-3">
-                                        <p className="text-[10px] font-extrabold uppercase text-indigo-700">
-                                          Explanation
-                                        </p>
-
-                                        <p className="mt-1 text-xs leading-6 text-indigo-900">
-                                          {question.explanation}
-                                        </p>
-                                      </div>
-                                    )}
-                                  </div>
-                                )
-                              )}
-                            </div>
-                          )}
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {!isAdminPreview && (
+            {!isAdminPreview && (
                 <>
                   {/* Progress Feedback */}
                   {progressError && (
@@ -860,7 +819,6 @@ export default function LearningPageClient({
                   </div>
                 )}
               </nav>
-            </section>
           </div>
         </main>
       </div>

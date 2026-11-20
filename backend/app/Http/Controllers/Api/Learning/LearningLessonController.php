@@ -9,6 +9,8 @@ use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\Exercise;
 use App\Models\Lesson;
+use App\Models\LessonAsset;
+use App\Models\LessonBlock;
 use App\Models\LessonProgress;
 use App\Models\StudentProfile;
 use App\Services\Learning\LearningAccessService;
@@ -70,61 +72,128 @@ class LearningLessonController extends Controller
                 ->first()
             : null;
 
-        // Students receive active assets only.
-        // Administrators can also inspect archived asset metadata.
-        $assetsQuery = $lesson->assets()
-            ->forCenter($center->id);
+        // Load content from the correct revision.
+        $revisionRelations = [
+            'publishedRevision.blocks.asset',
+            'publishedRevision.blocks.exercise.questions.options',
+        ];
 
-        if (! $isAdminPreview) {
-            $assetsQuery->active();
+        if ($isAdminPreview) {
+            $revisionRelations[] = 'draftRevision.blocks.asset';
+            $revisionRelations[] = 'draftRevision.blocks.exercise.questions.options';
         }
 
-        // Never expose storage keys or private media paths.
-        $assets = $assetsQuery->get([
-            'id',
-            'lesson_id',
-            'title',
-            'asset_type',
-            'original_filename',
-            'mime_type',
-            'size_bytes',
-            'duration_seconds',
-            'alt_text',
-            'caption',
-            'is_downloadable',
-            'sort_order',
-            'status',
-        ]);
+        $lesson->load($revisionRelations);
 
-        // Students receive published exercises only.
-        // Administrators can inspect draft and archived exercises.
-        $exerciseQuery = Exercise::query()
-            ->forCenter($center->id)
-            ->where('lesson_id', $lesson->id);
+        // Students always read the current published revision.
+        // Administrators preview the current draft when available.
+        $revision = $isAdminPreview
+            ? ($lesson->draftRevision ?? $lesson->publishedRevision)
+            : $lesson->publishedRevision;
 
         if (! $isAdminPreview) {
-            $exerciseQuery->published();
+            abort_unless(
+                $revision !== null
+                    && $revision->isPublished()
+                    && $revision->center_id === $center->id
+                    && $revision->lesson_id === $lesson->id,
+                404,
+                'Published lesson content not found.'
+            );
+        } else {
+            abort_unless(
+                $revision === null
+                    || (
+                        $revision->center_id === $center->id
+                        && $revision->lesson_id === $lesson->id
+                    ),
+                404,
+                'Lesson revision not found.'
+            );
         }
 
-        $exercises = $exerciseQuery
-            ->with([
-                'questions' => function ($query) use ($center): void {
-                    $query
-                        ->forCenter($center->id)
-                        ->with([
-                            'options' => function ($optionQuery) use ($center): void {
-                                $optionQuery->forCenter($center->id);
-                            },
-                        ]);
-                },
-            ])
-            ->orderBy('sort_order')
-            ->orderBy('id')
-            ->get();
+        // Blocks are ordered by sort_order and id through the revision relation.
+        $blocks = ($revision?->blocks ?? collect())
+            ->filter(function (LessonBlock $block) use ($isAdminPreview): bool {
+                return match ($block->block_type) {
+                    LessonBlock::TYPE_TEXT => is_array($block->content_json),
+
+                    LessonBlock::TYPE_MEDIA => $block->asset instanceof LessonAsset
+                        && (
+                            $isAdminPreview
+                            || $block->asset->status === LessonAsset::STATUS_ACTIVE
+                        ),
+
+                    LessonBlock::TYPE_EXERCISE => $block->exercise instanceof Exercise
+                        && (
+                            $isAdminPreview
+                            || $block->exercise->isPublished()
+                        ),
+
+                    default => false,
+                };
+            })
+            ->values();
+
+        // Administrative previews remain compatible with legacy lessons.
+        if ($revision === null && $isAdminPreview) {
+            $assets = $lesson->assets()
+                ->forCenter($center->id)
+                ->get([
+                    'id',
+                    'lesson_id',
+                    'title',
+                    'asset_type',
+                    'original_filename',
+                    'mime_type',
+                    'size_bytes',
+                    'duration_seconds',
+                    'alt_text',
+                    'caption',
+                    'is_downloadable',
+                    'sort_order',
+                    'status',
+                ]);
+
+            $exercises = Exercise::query()
+                ->forCenter($center->id)
+                ->where('lesson_id', $lesson->id)
+                ->with([
+                    'questions' => function ($query) use ($center): void {
+                        $query
+                            ->forCenter($center->id)
+                            ->with([
+                                'options' => function ($optionQuery) use ($center): void {
+                                    $optionQuery->forCenter($center->id);
+                                },
+                            ]);
+                    },
+                ])
+                ->orderBy('sort_order')
+                ->orderBy('id')
+                ->get();
+        } else {
+            // Compatibility arrays are derived only from the selected revision.
+            $assets = $blocks
+                ->filter(fn (LessonBlock $block): bool => $block->isMedia())
+                ->map(fn (LessonBlock $block) => $block->asset)
+                ->filter()
+                ->unique('id')
+                ->values();
+
+            $exercises = $blocks
+                ->filter(fn (LessonBlock $block): bool => $block->isExercise())
+                ->map(fn (LessonBlock $block) => $block->exercise)
+                ->filter()
+                ->unique('id')
+                ->values();
+        }
 
         return new LearningLessonResource([
             'course' => $course,
             'lesson' => $lesson,
+            'revision' => $revision,
+            'blocks' => $blocks,
             'progress' => $progress,
             'assets' => $assets,
             'exercises' => $exercises,

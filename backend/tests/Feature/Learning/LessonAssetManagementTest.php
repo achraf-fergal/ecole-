@@ -759,6 +759,18 @@ class LessonAssetManagementTest extends TestCase
             ->privateFile()
             ->create();
 
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $activeAsset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
         LessonAsset::factory()
             ->forLesson($lesson)
             ->privateFile()

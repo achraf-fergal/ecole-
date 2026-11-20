@@ -6,8 +6,11 @@ use App\Models\Course;
 use App\Models\Exercise;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Models\LessonBlock;
+use App\Models\LessonRevision;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Support\Collection;
 
 class LearningLessonResource extends JsonResource
 {
@@ -18,6 +21,12 @@ class LearningLessonResource extends JsonResource
 
         /** @var Lesson $lesson */
         $lesson = $this->resource['lesson'];
+
+        /** @var LessonRevision|null $revision */
+        $revision = $this->resource['revision'];
+
+        /** @var Collection<int, LessonBlock> $blocks */
+        $blocks = $this->resource['blocks'];
 
         $progress = $this->resource['progress'];
 
@@ -44,16 +53,37 @@ class LearningLessonResource extends JsonResource
 
             'lesson' => [
                 'id' => $lesson->id,
-                'title' => $lesson->title,
-                'description' => $lesson->description,
+                'title' => $revision?->title ?? $lesson->title,
+                'description' => $revision?->description ?? $lesson->description,
                 'content_type' => $lesson->content_type,
+
+                // Temporary backwards compatibility. The player should use blocks.
                 'body' => $lesson->body,
-                'content_locale' => $lesson->content_locale,
-                'duration_minutes' => $lesson->duration_minutes,
+
+                'content_locale' => $revision?->content_locale
+                    ?? $lesson->content_locale,
+                'duration_minutes' => $revision?->duration_minutes
+                    ?? $lesson->duration_minutes,
                 'sort_order' => $lesson->sort_order,
                 'status' => $lesson->status,
                 'published_at' => $lesson->published_at?->toIso8601String(),
             ],
+
+            'revision' => $revision ? [
+                'id' => $revision->id,
+                'version_number' => $revision->version_number,
+                'status' => $revision->status,
+                'title' => $revision->title,
+                'description' => $revision->description,
+                'content_locale' => $revision->content_locale,
+                'duration_minutes' => $revision->duration_minutes,
+                'created_at' => $revision->created_at?->toIso8601String(),
+                'published_at' => $revision->published_at?->toIso8601String(),
+            ] : null,
+
+            'blocks' => $blocks->map(
+                fn (LessonBlock $block): array => $this->blockPayload($block, $isAdminPreview)
+            )->values(),
 
             'progress' => [
                 'status' => $progress?->status ?? 'not_started',
@@ -63,75 +93,13 @@ class LearningLessonResource extends JsonResource
                 'last_accessed_at' => $progress?->last_accessed_at?->toIso8601String(),
             ],
 
-            // Only safe metadata is returned to the client.
+            // Deprecated compatibility fields for the current frontend.
             'assets' => $this->resource['assets']->map(
-                function (LessonAsset $asset): array {
-                    return [
-                        'id' => $asset->id,
-                        'title' => $asset->title,
-                        'asset_type' => $asset->asset_type,
-                        'original_filename' => $asset->original_filename,
-                        'mime_type' => $asset->mime_type,
-                        'size_bytes' => $asset->size_bytes,
-                        'duration_seconds' => $asset->duration_seconds,
-                        'alt_text' => $asset->alt_text,
-                        'caption' => $asset->caption,
-                        'is_downloadable' => $asset->is_downloadable,
-                        'sort_order' => $asset->sort_order,
-                        'status' => $asset->status,
-                    ];
-                }
+                fn (LessonAsset $asset): array => $this->assetPayload($asset)
             )->values(),
 
-            // Correct answers and explanations are returned only to administrators.
             'exercises' => $this->resource['exercises']->map(
-                function (Exercise $exercise) use ($isAdminPreview): array {
-                    return [
-                        'id' => $exercise->id,
-                        'title' => $exercise->title,
-                        'instructions' => $exercise->instructions,
-                        'max_attempts' => $exercise->max_attempts,
-                        'passing_score' => $exercise->passing_score,
-                        'sort_order' => $exercise->sort_order,
-                        'status' => $exercise->status,
-                        'published_at' => $exercise->published_at?->toIso8601String(),
-
-                        'questions' => $exercise->questions->map(
-                            function ($question) use ($isAdminPreview): array {
-                                $questionData = [
-                                    'id' => $question->id,
-                                    'question_type' => $question->question_type,
-                                    'prompt' => $question->prompt,
-                                    'points' => $question->points,
-                                    'sort_order' => $question->sort_order,
-
-                                    'options' => $question->options->map(
-                                        function ($option) use ($isAdminPreview): array {
-                                            $optionData = [
-                                                'id' => $option->id,
-                                                'option_text' => $option->option_text,
-                                                'sort_order' => $option->sort_order,
-                                            ];
-
-                                            if ($isAdminPreview) {
-                                                $optionData['is_correct'] = $option->is_correct;
-                                            }
-
-                                            return $optionData;
-                                        }
-                                    )->values(),
-                                ];
-
-                                if ($isAdminPreview) {
-                                    $questionData['explanation'] = $question->explanation;
-                                }
-
-                                return $questionData;
-                            }
-                        )->values(),
-
-                    ];
-                }
+                fn (Exercise $exercise): array => $this->exercisePayload($exercise, $isAdminPreview)
             )->values(),
 
             'navigation' => [
@@ -142,6 +110,98 @@ class LearningLessonResource extends JsonResource
                     $this->resource['next_lesson']
                 ),
             ],
+        ];
+    }
+
+    private function blockPayload(
+        LessonBlock $block,
+        bool $isAdminPreview
+    ): array {
+        return [
+            'id' => $block->id,
+            'block_type' => $block->block_type,
+            'sort_order' => $block->sort_order,
+            'content_json' => $block->isText()
+                ? $block->content_json
+                : null,
+            'settings' => $isAdminPreview
+                ? $block->settings
+                : null,
+            'asset' => $block->asset instanceof LessonAsset
+                ? $this->assetPayload($block->asset)
+                : null,
+            'exercise' => $block->exercise instanceof Exercise
+                ? $this->exercisePayload(
+                    $block->exercise,
+                    $isAdminPreview
+                )
+                : null,
+        ];
+    }
+
+    private function assetPayload(LessonAsset $asset): array
+    {
+        return [
+            'id' => $asset->id,
+            'title' => $asset->title,
+            'asset_type' => $asset->asset_type,
+            'original_filename' => $asset->original_filename,
+            'mime_type' => $asset->mime_type,
+            'size_bytes' => $asset->size_bytes,
+            'duration_seconds' => $asset->duration_seconds,
+            'alt_text' => $asset->alt_text,
+            'caption' => $asset->caption,
+            'is_downloadable' => $asset->is_downloadable,
+            'sort_order' => $asset->sort_order,
+            'status' => $asset->status,
+        ];
+    }
+
+    private function exercisePayload(
+        Exercise $exercise,
+        bool $isAdminPreview
+    ): array {
+        return [
+            'id' => $exercise->id,
+            'title' => $exercise->title,
+            'instructions' => $exercise->instructions,
+            'max_attempts' => $exercise->max_attempts,
+            'passing_score' => $exercise->passing_score,
+            'sort_order' => $exercise->sort_order,
+            'status' => $exercise->status,
+            'published_at' => $exercise->published_at?->toIso8601String(),
+            'questions' => $exercise->questions->map(
+                function ($question) use ($isAdminPreview): array {
+                    $questionData = [
+                        'id' => $question->id,
+                        'question_type' => $question->question_type,
+                        'prompt' => $question->prompt,
+                        'points' => $question->points,
+                        'sort_order' => $question->sort_order,
+                        'options' => $question->options->map(
+                            function ($option) use ($isAdminPreview): array {
+                                $optionData = [
+                                    'id' => $option->id,
+                                    'option_text' => $option->option_text,
+                                    'sort_order' => $option->sort_order,
+                                ];
+
+                                if ($isAdminPreview) {
+                                    $optionData['is_correct'] = $option->is_correct;
+                                }
+
+                                return $optionData;
+                            }
+                        )->values(),
+                    ];
+
+                    if ($isAdminPreview) {
+                        $questionData['explanation'] = $question->explanation;
+                    }
+
+                    return $questionData;
+                }
+            )->values(),
         ];
     }
 

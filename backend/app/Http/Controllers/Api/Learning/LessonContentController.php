@@ -61,6 +61,19 @@ class LessonContentController extends Controller
                 'published_revision' => $this->revisionPayload(
                     $lesson->publishedRevision
                 ),
+
+                'available_exercises' => Exercise::query()
+                    ->forCenter($center->id)
+                    ->where('lesson_id', $lesson->id)
+                    ->orderBy('sort_order')
+                    ->orderBy('id')
+                    ->get()
+                    ->map(fn (Exercise $e): array => [
+                        'id' => $e->id,
+                        'title' => $e->title,
+                        'instructions' => $e->instructions,
+                        'status' => $e->status,
+                    ])->values(),
             ],
         ]);
     }
@@ -94,6 +107,51 @@ class LessonContentController extends Controller
         return response()->json([
             'message' => 'Draft revision is ready.',
             'data' => $this->revisionPayload($revision),
+        ]);
+    }
+
+    /**
+     * Publish the current draft revision.
+     */
+    public function publish(Request $request): JsonResponse
+    {
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
+
+        $actor = $request->user();
+
+        abort_unless(
+            $actor instanceof User,
+            401,
+            'Unauthenticated.'
+        );
+
+        if ($request->route('revision') !== null) {
+            $revision = $this->resolveRevision(
+                $lesson,
+                (string) $request->route('revision')
+            );
+
+            if ($lesson->draft_revision_id !== $revision->id) {
+                throw ValidationException::withMessages([
+                    'revision' => ['Only the current draft revision can be published.'],
+                ]);
+            }
+        }
+
+        $publishedRevision = $this->revisionService->publish(
+            $lesson,
+            $actor
+        );
+
+        $publishedRevision->load([
+            'blocks.asset',
+            'blocks.exercise.questions.options',
+        ]);
+
+        return response()->json([
+            'message' => 'Lesson published successfully.',
+            'data' => $this->revisionPayload($publishedRevision),
         ]);
     }
 

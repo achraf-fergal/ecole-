@@ -10,6 +10,8 @@ use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Language;
 use App\Models\Lesson;
+use App\Models\LessonBlock;
+use App\Models\LessonRevision;
 use App\Models\Level;
 use App\Models\PlatformAdmin;
 use App\Models\Role;
@@ -310,6 +312,99 @@ class LearningAdminAccessTest extends TestCase
         $lessonResponse->assertJsonPath(
             'data.lesson.status',
             'draft'
+        );
+    }
+
+    public function test_center_admin_preview_uses_current_draft_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createAdminContext();
+
+        $revision = LessonRevision::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 1,
+            'status' => LessonRevision::STATUS_DRAFT,
+            'title' => 'Draft Preview Title',
+            'description' => null,
+            'content_locale' => 'en',
+            'duration_minutes' => 5,
+            'created_by_user_id' => $user->id,
+            'published_by_user_id' => null,
+            'published_at' => null,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'Draft Preview Body',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'draft_revision_id' => $revision->id,
+        ])->save();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+
+        $response->assertJsonPath(
+            'data.access_mode',
+            'admin_preview'
+        );
+
+        $response->assertJsonPath(
+            'data.revision.id',
+            $revision->id
+        );
+
+        $response->assertJsonPath(
+            'data.revision.status',
+            LessonRevision::STATUS_DRAFT
+        );
+
+        $response->assertJsonPath(
+            'data.lesson.title',
+            'Draft Preview Title'
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.0.block_type',
+            LessonBlock::TYPE_TEXT
         );
     }
 

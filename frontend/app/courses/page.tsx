@@ -2,6 +2,7 @@
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
+import { connection } from "next/server";
 
 import CourseCard from "@/components/courses/course-card";
 import CourseFilters from "@/components/courses/course-filters";
@@ -477,6 +478,7 @@ function Footer({
 export default async function CoursesPage({
   searchParams,
 }: PageProps) {
+  await connection();
   const params = await searchParams;
   const query = parseQuery(params);
   const t = translations[query.locale];

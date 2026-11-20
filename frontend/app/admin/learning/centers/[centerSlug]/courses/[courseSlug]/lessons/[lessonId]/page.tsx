@@ -2,10 +2,10 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import LearningPageClient from "@/components/learning/learning-page-client";
+import AdminLessonPageClient from "@/components/admin/lesson-editor/admin-lesson-page-client";
 
 export const metadata: Metadata = {
-  title: "Administrative Lesson Preview",
+  title: "Administrative Lesson Workspace",
   robots: {
     index: false,
     follow: false,
@@ -65,7 +65,7 @@ export default async function AdminLearningLessonPreviewPage({
     `/courses`;
 
   return (
-    <LearningPageClient
+    <AdminLessonPageClient
       centerSlug={centerSlug}
       courseSlug={courseSlug}
       lessonId={Number(lessonId)}

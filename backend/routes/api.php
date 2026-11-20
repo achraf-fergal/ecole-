@@ -202,6 +202,21 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.content.revisions.store');
 
+                        // Publish current draft.
+                        Route::post('/publish', [
+                            LessonContentController::class,
+                            'publish',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.publish');
+
+                        Route::post('/revisions/{revision}/publish', [
+                            LessonContentController::class,
+                            'publish',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.revisions.publish');
+
                         // Update current draft metadata.
                         Route::patch('/revisions/{revision}', [
                             LessonContentController::class,

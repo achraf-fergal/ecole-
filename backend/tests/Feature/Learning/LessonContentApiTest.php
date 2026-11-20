@@ -694,4 +694,214 @@ class LessonContentApiTest extends TestCase
             'status' => LessonRevision::STATUS_PUBLISHED,
         ]);
     }
+
+    public function test_center_admin_can_publish_draft_revision(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        $draft = $service->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+
+        $service->addTextBlock(
+            $draft,
+            $this->document('Ready to publish')
+        );
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.status', LessonRevision::STATUS_PUBLISHED);
+        $response->assertJsonPath('data.id', $draft->id);
+
+        $freshLesson = $context['lesson']->fresh();
+        $this->assertNull($freshLesson->draft_revision_id);
+        $this->assertSame($draft->id, $freshLesson->published_revision_id);
+    }
+
+    public function test_publishing_empty_draft_revision_fails(): void
+    {
+        $context = $this->createContext();
+        $context['lesson']->update(['body' => null]);
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        $service->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+            ])
+        );
+
+        $response->assertUnprocessable();
+        $response->assertJsonValidationErrors(['blocks']);
+    }
+
+    public function test_publishing_without_current_draft_fails(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+            ])
+        );
+
+        $response->assertUnprocessable();
+        $response->assertJsonValidationErrors(['revision']);
+    }
+
+    public function test_previous_published_revision_becomes_superseded_on_new_publication(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        $draft1 = $service->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+        $service->addTextBlock($draft1, $this->document('First edition'));
+
+        $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+            ])
+        )->assertOk();
+
+        // Now create revision 2 draft.
+        $draft2 = $service->createDraft(
+            $context['lesson']->fresh(),
+            $context['user']
+        );
+        $service->addTextBlock($draft2, $this->document('Second edition'));
+
+        // Publish via revision specific route.
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.revisions.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+                'revision' => $draft2->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.id', $draft2->id);
+
+        $draft1->refresh();
+        $draft2->refresh();
+
+        $this->assertSame(LessonRevision::STATUS_SUPERSEDED, $draft1->status);
+        $this->assertSame(LessonRevision::STATUS_PUBLISHED, $draft2->status);
+    }
+
+    public function test_publishing_with_mismatched_revision_route_param_fails(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        $draft1 = $service->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+        $service->addTextBlock($draft1, $this->document('First edition'));
+        $service->publish($context['lesson'], $context['user']);
+
+        // Create draft 2.
+        $draft2 = $service->createDraft(
+            $context['lesson']->fresh(),
+            $context['user']
+        );
+        $service->addTextBlock($draft2, $this->document('Second edition'));
+
+        // Attempt to publish using draft1 id (which is superseded/published, not current draft).
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.revisions.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+                'revision' => $draft1->id,
+            ])
+        );
+
+        $response->assertUnprocessable();
+        $response->assertJsonValidationErrors(['revision']);
+    }
+
+    public function test_platform_admin_can_publish_lesson(): void
+    {
+        $context = $this->createContext(true);
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $service */
+        $service = app(LessonRevisionService::class);
+
+        $draft = $service->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+        $service->addTextBlock($draft, $this->document('Platform Admin Content'));
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route('api.centers.admin.learning.content.publish', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+            ])
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.status', LessonRevision::STATUS_PUBLISHED);
+    }
 }

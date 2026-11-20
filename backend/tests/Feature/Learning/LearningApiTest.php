@@ -10,6 +10,7 @@ use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Exercise;
 use App\Models\Lesson;
+use App\Models\LessonAsset;
 use App\Models\LessonBlock;
 use App\Models\LessonProgress;
 use App\Models\LessonRevision;
@@ -244,18 +245,53 @@ class LearningApiTest extends TestCase
         $revision = LessonRevision::query()
             ->findOrFail($lesson->published_revision_id);
 
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create();
+
+        $unlinkedAsset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->privateFile()
+            ->create();
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $revision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 1,
+            'content_json' => null,
+            'lesson_asset_id' => $asset->id,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
         LessonBlock::query()->create([
             'center_id' => $center->id,
             'lesson_id' => $lesson->id,
             'lesson_revision_id' => $revision->id,
 
             'block_type' => LessonBlock::TYPE_EXERCISE,
-            'sort_order' => 1,
+            'sort_order' => 2,
 
             'content_json' => null,
             'lesson_asset_id' => null,
             'exercise_id' => $exercise->id,
             'settings' => null,
+        ]);
+
+        Exercise::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'title' => 'Unlinked Exercise',
+            'instructions' => 'Not part of this revision.',
+            'max_attempts' => 3,
+            'passing_score' => 60,
+            'show_correct_answers_after_submission' => false,
+            'sort_order' => 3,
+            'status' => Exercise::STATUS_PUBLISHED,
+            'published_at' => now(),
         ]);
 
         $question = Question::query()->create([
@@ -298,6 +334,82 @@ class LearningApiTest extends TestCase
         );
 
         $response->assertOk();
+
+        $response->assertJsonPath(
+            'data.revision.id',
+            $revision->id
+        );
+
+        $response->assertJsonCount(
+            3,
+            'data.blocks'
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.0.block_type',
+            LessonBlock::TYPE_TEXT
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.1.block_type',
+            LessonBlock::TYPE_MEDIA
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.1.asset.id',
+            $asset->id
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.2.block_type',
+            LessonBlock::TYPE_EXERCISE
+        );
+
+        $response->assertJsonPath(
+            'data.blocks.2.exercise.id',
+            $exercise->id
+        );
+
+        $response->assertJsonMissingPath(
+            'data.blocks.1.asset.storage_key'
+        );
+
+        $response->assertJsonMissingPath(
+            'data.blocks.1.asset.storage_disk'
+        );
+
+        $response->assertJsonMissingPath(
+            'data.blocks.1.asset.provider_asset_id'
+        );
+
+        $response->assertJsonMissingPath(
+            'data.blocks.2.exercise.questions.0.explanation'
+        );
+
+        $response->assertJsonMissingPath(
+            'data.blocks.2.exercise.questions.0.options.0.is_correct'
+        );
+
+        $this->assertSame(
+            [$asset->id],
+            collect($response->json('data.assets'))
+                ->pluck('id')
+                ->all()
+        );
+
+        $this->assertSame(
+            [$exercise->id],
+            collect($response->json('data.exercises'))
+                ->pluck('id')
+                ->all()
+        );
+
+        $this->assertNotContains(
+            $unlinkedAsset->id,
+            collect($response->json('data.assets'))
+                ->pluck('id')
+                ->all()
+        );
 
         $response->assertJsonPath(
             'data.lesson.id',
@@ -501,5 +613,207 @@ class LearningApiTest extends TestCase
         );
 
         $response->assertNotFound();
+    }
+
+    public function test_student_receives_only_current_published_revision_blocks(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $publishedRevision = LessonRevision::query()
+            ->findOrFail($lesson->published_revision_id);
+
+        $draft = LessonRevision::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 2,
+            'status' => LessonRevision::STATUS_DRAFT,
+            'title' => 'Unpublished Draft',
+            'description' => null,
+            'content_locale' => 'en',
+            'duration_minutes' => 5,
+            'created_by_user_id' => $user->id,
+            'published_by_user_id' => null,
+            'published_at' => null,
+        ]);
+
+        LessonBlock::query()->create([
+            'center_id' => $lesson->center_id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $draft->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [
+                            [
+                                'type' => 'text',
+                                'text' => 'PRIVATE DRAFT CONTENT',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'lesson_asset_id' => null,
+            'exercise_id' => null,
+            'settings' => null,
+        ]);
+
+        $lesson->forceFill([
+            'draft_revision_id' => $draft->id,
+        ])->save();
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertOk();
+
+        $response->assertJsonPath(
+            'data.revision.id',
+            $publishedRevision->id
+        );
+
+        $response->assertJsonPath(
+            'data.revision.status',
+            LessonRevision::STATUS_PUBLISHED
+        );
+
+        $response->assertJsonCount(
+            1,
+            'data.blocks'
+        );
+
+        $this->assertStringNotContainsString(
+            'PRIVATE DRAFT CONTENT',
+            $response->getContent()
+        );
+    }
+
+    public function test_navigation_excludes_lessons_without_published_revisions(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'module' => $module,
+            'lesson' => $lesson1,
+        ] = $this->createLearningContext();
+
+        // Lesson 2 is published but has NO published revision.
+        $lesson2 = Lesson::factory()
+            ->forModule($module)
+            ->published()
+            ->create([
+                'sort_order' => 2,
+            ]);
+
+        // Lesson 3 is published AND has a published revision.
+        $lesson3 = Lesson::factory()
+            ->forModule($module)
+            ->published()
+            ->create([
+                'sort_order' => 3,
+            ]);
+        $this->createPublishedRevision($lesson3);
+
+        $token = $this->tokenFor($user);
+
+        // When student views lesson 1, next lesson should skip lesson 2 and be lesson 3.
+        $response1 = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson1->id,
+            ])
+        );
+
+        $response1->assertOk();
+        $response1->assertJsonPath('data.navigation.previous_lesson', null);
+        $response1->assertJsonPath('data.navigation.next_lesson.id', $lesson3->id);
+
+        // When student views lesson 3, previous lesson should be lesson 1, skipping lesson 2.
+        $response3 = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson3->id,
+            ])
+        );
+
+        $response3->assertOk();
+        $response3->assertJsonPath('data.navigation.previous_lesson.id', $lesson1->id);
+        $response3->assertJsonPath('data.navigation.next_lesson', null);
+    }
+
+    public function test_student_cannot_retrieve_lesson_with_future_published_at_or_superseded_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $revision = LessonRevision::query()->findOrFail($lesson->published_revision_id);
+        $revision->update([
+            'published_at' => now()->addDay(),
+        ]);
+
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response->assertNotFound();
+
+        // Now test superseded revision.
+        $revision->update([
+            'published_at' => now()->subDay(),
+            'status' => LessonRevision::STATUS_SUPERSEDED,
+        ]);
+
+        $response2 = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.centers.courses.learn.lessons.show', [
+                'center' => $center->slug,
+                'course' => $course->slug,
+                'lesson' => $lesson->id,
+            ])
+        );
+
+        $response2->assertNotFound();
     }
 }
