@@ -4,6 +4,8 @@ use App\Http\Controllers\Api\Auth\AuthController;
 use App\Http\Controllers\Api\Auth\EmailVerificationController;
 use App\Http\Controllers\Api\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\Auth\PasswordResetController;
+use App\Http\Controllers\Api\Learning\AdminExerciseController;
+use App\Http\Controllers\Api\Learning\ExerciseAttemptController;
 use App\Http\Controllers\Api\Learning\LearningLessonController;
 use App\Http\Controllers\Api\Learning\LearningOverviewController;
 use App\Http\Controllers\Api\Learning\LessonAssetAccessController;
@@ -318,6 +320,37 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.assets.restore');
                     });
+
+                /*
+                |--------------------------------------------------------------------------
+                | Exercise Authoring Management
+                |--------------------------------------------------------------------------
+                */
+
+                Route::prefix('courses/{course}/lessons/{lesson}/exercises')
+                    ->group(function () {
+                        Route::get('/', [AdminExerciseController::class, 'index'])
+                            ->name('api.centers.admin.learning.exercises.index');
+
+                        Route::post('/', [AdminExerciseController::class, 'store'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.exercises.store');
+
+                        Route::get('/{exercise}', [AdminExerciseController::class, 'show'])
+                            ->name('api.centers.admin.learning.exercises.show');
+
+                        Route::match(['put', 'patch'], '/{exercise}', [AdminExerciseController::class, 'update'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.exercises.update');
+
+                        Route::delete('/{exercise}', [AdminExerciseController::class, 'destroy'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.exercises.destroy');
+
+                        Route::post('/{exercise}/publish', [AdminExerciseController::class, 'publish'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.exercises.publish');
+                    });
             });
 
         // Teacher area.
@@ -406,6 +439,32 @@ Route::prefix('centers/{center}')
                     'csrf.api',
                 ])
                 ->name('api.centers.courses.learn.lessons.progress.update');
+
+            // Student exercise assessment lifecycle.
+            Route::prefix('lessons/{lesson}/exercises/{exercise}/attempts')
+                ->middleware([
+                    'role:student',
+                    'enrollment',
+                ])
+                ->group(function () {
+                    Route::get('/current', [ExerciseAttemptController::class, 'current'])
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.current');
+
+                    Route::post('/', [ExerciseAttemptController::class, 'start'])
+                        ->middleware('csrf.api')
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.start');
+
+                    Route::patch('/current', [ExerciseAttemptController::class, 'save'])
+                        ->middleware('csrf.api')
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.save');
+
+                    Route::post('/current/submit', [ExerciseAttemptController::class, 'submit'])
+                        ->middleware('csrf.api')
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.submit');
+
+                    Route::get('/history', [ExerciseAttemptController::class, 'history'])
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.history');
+                });
         });
         // Backward-compatible route used by the existing authentication test.
         Route::get('/player', function (Request $request) {

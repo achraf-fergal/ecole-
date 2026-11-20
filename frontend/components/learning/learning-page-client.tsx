@@ -633,6 +633,7 @@ export default function LearningPageClient({
                           key={`block-${block.id}`}
                           block={block}
                           isAdminPreview={isAdminPreview}
+                          params={routeParams}
                         />
                       );
                     default:
@@ -695,6 +696,7 @@ export default function LearningPageClient({
                             exercise,
                           }}
                           isAdminPreview={isAdminPreview}
+                          params={routeParams}
                         />
                       ))}
                     </section>

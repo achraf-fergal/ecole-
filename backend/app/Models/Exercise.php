@@ -80,6 +80,17 @@ class Exercise extends Model
     }
 
     /**
+     * Student attempts on this exercise.
+     */
+    public function attempts(): HasMany
+    {
+        return $this->hasMany(
+            ExerciseAttempt::class,
+            'exercise_id'
+        )->orderByDesc('attempt_number');
+    }
+
+    /**
      * Restrict exercises to one tenant.
      */
     public function scopeForCenter(

@@ -9,6 +9,8 @@ import {
   addAdminTextBlock,
   addAdminMediaBlock,
   addAdminExerciseBlock,
+  createAdminExercise,
+  publishAdminExercise,
   updateAdminBlock,
   deleteAdminBlock,
   reorderAdminBlocks,
@@ -71,8 +73,37 @@ export default function UnifiedLessonEditor({
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadType, setUploadType] = useState<"image" | "file">("image");
 
-  // Exercise selection
+  // Exercise selection & creation
   const [selectedExerciseId, setSelectedExerciseId] = useState<number | "">("");
+  const [isCreatingExercise, setIsCreatingExercise] = useState(false);
+  const [newExerciseTitle, setNewExerciseTitle] = useState("");
+  const [newExerciseInstructions, setNewExerciseInstructions] = useState("");
+  const [newExercisePassingScore, setNewExercisePassingScore] = useState<number>(70);
+  const [newExerciseMaxAttempts, setNewExerciseMaxAttempts] = useState<number | "">("");
+  const [newExerciseShowAnswers, setNewExerciseShowAnswers] = useState<boolean>(true);
+  const [newExerciseQuestions, setNewExerciseQuestions] = useState<
+    Array<{
+      prompt: string;
+      points: number;
+      question_type: "single_choice" | "true_false";
+      explanation: string;
+      options: Array<{
+        option_text: string;
+        is_correct: boolean;
+      }>;
+    }>
+  >([
+    {
+      prompt: "",
+      points: 1,
+      question_type: "single_choice",
+      explanation: "",
+      options: [
+        { option_text: "", is_correct: true },
+        { option_text: "", is_correct: false },
+      ],
+    },
+  ]);
 
   const routeParams = { centerSlug, courseSlug, lessonId };
 
@@ -342,6 +373,170 @@ export default function UnifiedLessonEditor({
       showSuccess("Exercise block added.");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to add exercise block.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Question manipulation helpers for Exercise Creator
+  const handleAddQuestion = () => {
+    setNewExerciseQuestions((prev) => [
+      ...prev,
+      {
+        prompt: "",
+        points: 1,
+        question_type: "single_choice",
+        explanation: "",
+        options: [
+          { option_text: "", is_correct: true },
+          { option_text: "", is_correct: false },
+        ],
+      },
+    ]);
+  };
+
+  const handleRemoveQuestion = (index: number) => {
+    if (newExerciseQuestions.length <= 1) return;
+    setNewExerciseQuestions((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleUpdateQuestion = (index: number, field: string, value: unknown) => {
+    setNewExerciseQuestions((prev) =>
+      prev.map((q, i) => (i === index ? { ...q, [field]: value } : q))
+    );
+  };
+
+  const handleAddOption = (questionIndex: number) => {
+    setNewExerciseQuestions((prev) =>
+      prev.map((q, i) => {
+        if (i !== questionIndex) return q;
+        return {
+          ...q,
+          options: [...q.options, { option_text: "", is_correct: false }],
+        };
+      })
+    );
+  };
+
+  const handleRemoveOption = (questionIndex: number, optionIndex: number) => {
+    setNewExerciseQuestions((prev) =>
+      prev.map((q, i) => {
+        if (i !== questionIndex) return q;
+        if (q.options.length <= 2) return q;
+        return {
+          ...q,
+          options: q.options.filter((_, optIdx) => optIdx !== optionIndex),
+        };
+      })
+    );
+  };
+
+  const handleUpdateOption = (
+    questionIndex: number,
+    optionIndex: number,
+    field: "option_text" | "is_correct",
+    value: string | boolean
+  ) => {
+    setNewExerciseQuestions((prev) =>
+      prev.map((q, i) => {
+        if (i !== questionIndex) return q;
+        return {
+          ...q,
+          options: q.options.map((opt, optIdx) => {
+            if (field === "is_correct") {
+              return {
+                ...opt,
+                is_correct: optIdx === optionIndex ? Boolean(value) : false,
+              };
+            }
+            if (optIdx === optionIndex) {
+              return { ...opt, option_text: String(value) };
+            }
+            return opt;
+          }),
+        };
+      })
+    );
+  };
+
+  const handleCreateAndInsertExercise = async () => {
+    if (!newExerciseTitle.trim()) {
+      setError("Please provide an exercise title.");
+      return;
+    }
+
+    for (let i = 0; i < newExerciseQuestions.length; i++) {
+      const q = newExerciseQuestions[i];
+      if (!q.prompt.trim()) {
+        setError(`Question ${i + 1} prompt cannot be empty.`);
+        return;
+      }
+      if (q.options.length < 2) {
+        setError(`Question ${i + 1} must have at least 2 options.`);
+        return;
+      }
+      const hasCorrect = q.options.some((opt) => opt.is_correct && opt.option_text.trim());
+      if (!hasCorrect) {
+        setError(`Question ${i + 1} must have at least one marked correct option with text.`);
+        return;
+      }
+      for (let j = 0; j < q.options.length; j++) {
+        if (!q.options[j].option_text.trim()) {
+          setError(`Option ${j + 1} of Question ${i + 1} cannot be empty.`);
+          return;
+        }
+      }
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const draft = await getOrCreateDraft();
+
+      const createdEx = await createAdminExercise(centerSlug, courseSlug, lessonId, {
+        title: newExerciseTitle.trim(),
+        instructions: newExerciseInstructions.trim() || null,
+        passing_score: newExercisePassingScore,
+        max_attempts: newExerciseMaxAttempts === "" ? null : Number(newExerciseMaxAttempts),
+        show_correct_answers_after_submission: newExerciseShowAnswers,
+        questions: newExerciseQuestions.map((q, qIdx) => ({
+          prompt: q.prompt.trim(),
+          points: Number(q.points) || 1,
+          question_type: q.question_type,
+          explanation: q.explanation.trim() || null,
+          sort_order: qIdx + 1,
+          options: q.options.map((opt, optIdx) => ({
+            option_text: opt.option_text.trim(),
+            is_correct: opt.is_correct,
+            sort_order: optIdx + 1,
+          })),
+        })),
+      });
+
+      await publishAdminExercise(centerSlug, courseSlug, lessonId, createdEx.id);
+      await addAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, createdEx.id);
+
+      setIsCreatingExercise(false);
+      setNewExerciseTitle("");
+      setNewExerciseInstructions("");
+      setNewExerciseQuestions([
+        {
+          prompt: "",
+          points: 1,
+          question_type: "single_choice",
+          explanation: "",
+          options: [
+            { option_text: "", is_correct: true },
+            { option_text: "", is_correct: false },
+          ],
+        },
+      ]);
+      setComposerMode("none");
+      await loadData();
+      showSuccess("New exercise created, published, and added to the revision timeline!");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create exercise.");
     } finally {
       setIsSubmitting(false);
     }
@@ -833,46 +1028,294 @@ export default function UnifiedLessonEditor({
         {/* Composer: Exercise Form */}
         {composerMode === "exercise" && (
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4">
-            <h4 className="text-xs font-black text-[#102b4c]">Add Assessment Exercise</h4>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Select an exercise belonging to this lesson to insert into the revision timeline.
-            </p>
-            <div className="mt-3">
-              <select
-                value={selectedExerciseId}
-                onChange={(e) => setSelectedExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
-                className="w-full rounded-xl border border-slate-200 bg-white p-2.5 text-xs text-slate-800"
-              >
-                <option value="">-- Choose an exercise --</option>
-                {content.available_exercises.map((ex) => (
-                  <option key={ex.id} value={ex.id}>
-                    #{ex.id} - {ex.title} ({ex.status})
-                  </option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-teal-100/60 pb-3">
+              <div>
+                <h4 className="text-xs font-black text-[#102b4c]">Add Assessment Exercise</h4>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  Select an existing exercise or create and author a new one directly in this lesson.
+                </p>
+              </div>
+              <div className="flex rounded-lg border border-teal-200 bg-white p-0.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingExercise(false)}
+                  className={`rounded-md px-2.5 py-1 font-bold transition ${
+                    !isCreatingExercise
+                      ? "bg-[#0e8988] text-white"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  Choose Existing
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingExercise(true)}
+                  className={`rounded-md px-2.5 py-1 font-bold transition ${
+                    isCreatingExercise
+                      ? "bg-[#0e8988] text-white"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  + Author New Exercise
+                </button>
+              </div>
             </div>
-            {content.available_exercises.length === 0 && (
-              <p className="mt-2 text-xs italic text-slate-500">
-                No exercises are currently assigned to this lesson. Create exercises in the course curriculum first.
-              </p>
+
+            {!isCreatingExercise ? (
+              <div className="mt-3">
+                <select
+                  value={selectedExerciseId}
+                  onChange={(e) => setSelectedExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
+                  className="w-full rounded-xl border border-slate-200 bg-white p-2.5 text-xs text-slate-800"
+                >
+                  <option value="">-- Choose an exercise --</option>
+                  {content.available_exercises.map((ex) => (
+                    <option key={ex.id} value={ex.id}>
+                      #{ex.id} - {ex.title} ({ex.status})
+                    </option>
+                  ))}
+                </select>
+
+                {content.available_exercises.length === 0 && (
+                  <p className="mt-2 text-xs italic text-slate-500">
+                    No exercises are currently assigned to this lesson. Use &quot;+ Author New Exercise&quot; above to create one.
+                  </p>
+                )}
+
+                <div className="mt-3 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setComposerMode("none")}
+                    className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting || !selectedExerciseId}
+                    onClick={() => void handleAddExercise()}
+                    className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
+                  >
+                    Insert Exercise Block
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-3 space-y-4">
+                {/* Exercise Details */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-600">Exercise Title *</label>
+                    <input
+                      type="text"
+                      value={newExerciseTitle}
+                      onChange={(e) => setNewExerciseTitle(e.target.value)}
+                      placeholder="e.g. Vocabulary Quiz: Unit 1"
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-600">Instructions (Optional)</label>
+                    <textarea
+                      rows={2}
+                      value={newExerciseInstructions}
+                      onChange={(e) => setNewExerciseInstructions(e.target.value)}
+                      placeholder="e.g. Choose the single best answer for each question."
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600">Passing Score (%)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={newExercisePassingScore}
+                      onChange={(e) => setNewExercisePassingScore(Number(e.target.value))}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600">Max Attempts (Blank = Unlimited)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={newExerciseMaxAttempts}
+                      onChange={(e) => setNewExerciseMaxAttempts(e.target.value === "" ? "" : Number(e.target.value))}
+                      placeholder="Unlimited"
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={newExerciseShowAnswers}
+                        onChange={(e) => setNewExerciseShowAnswers(e.target.checked)}
+                        className="rounded border-slate-300 text-[#0e8988]"
+                      />
+                      Release correct answers and explanations to students after submission
+                    </label>
+                  </div>
+                </div>
+
+                {/* Questions Builder */}
+                <div className="space-y-4 pt-2">
+                  <div className="flex items-center justify-between">
+                    <h5 className="text-xs font-black uppercase tracking-wider text-slate-700">
+                      Questions ({newExerciseQuestions.length})
+                    </h5>
+                    <button
+                      type="button"
+                      onClick={handleAddQuestion}
+                      className="rounded-lg bg-teal-100/70 px-2.5 py-1 text-[11px] font-extrabold text-teal-800 hover:bg-teal-200"
+                    >
+                      + Add Question
+                    </button>
+                  </div>
+
+                  {newExerciseQuestions.map((q, qIdx) => (
+                    <div
+                      key={qIdx}
+                      className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-2xs"
+                    >
+                      <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                        <span className="text-[11px] font-black text-slate-700">
+                          Question {qIdx + 1}
+                        </span>
+                        {newExerciseQuestions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveQuestion(qIdx)}
+                            className="text-[11px] font-bold text-rose-600 hover:text-rose-800"
+                          >
+                            Remove Question
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                        <div className="sm:col-span-2">
+                          <label className="block text-[10px] font-bold uppercase text-slate-500">
+                            Prompt *
+                          </label>
+                          <input
+                            type="text"
+                            value={q.prompt}
+                            onChange={(e) => handleUpdateQuestion(qIdx, "prompt", e.target.value)}
+                            placeholder="Enter question text"
+                            className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-xs"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase text-slate-500">
+                            Points
+                          </label>
+                          <input
+                            type="number"
+                            min={0.5}
+                            step={0.5}
+                            value={q.points}
+                            onChange={(e) => handleUpdateQuestion(qIdx, "points", Number(e.target.value))}
+                            className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-xs"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Options */}
+                      <div className="mt-3">
+                        <label className="block text-[10px] font-bold uppercase text-slate-500">
+                          Answer Options (Select correct answer)
+                        </label>
+                        <div className="mt-1.5 space-y-2">
+                          {q.options.map((opt, optIdx) => (
+                            <div key={optIdx} className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name={`correct_option_${qIdx}`}
+                                checked={opt.is_correct}
+                                onChange={(e) =>
+                                  handleUpdateOption(qIdx, optIdx, "is_correct", e.target.checked)
+                                }
+                                className="h-4 w-4 text-[#0e8988]"
+                                title="Mark as correct answer"
+                              />
+                              <input
+                                type="text"
+                                value={opt.option_text}
+                                onChange={(e) =>
+                                  handleUpdateOption(qIdx, optIdx, "option_text", e.target.value)
+                                }
+                                placeholder={`Option ${optIdx + 1}`}
+                                className="flex-1 rounded-lg border border-slate-200 p-1.5 text-xs"
+                              />
+                              {q.options.length > 2 && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveOption(qIdx, optIdx)}
+                                  className="text-xs text-slate-400 hover:text-rose-600"
+                                  title="Delete option"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleAddOption(qIdx)}
+                          className="mt-2 text-[11px] font-bold text-teal-700 hover:underline"
+                        >
+                          + Add Option
+                        </button>
+                      </div>
+
+                      {/* Explanation */}
+                      <div className="mt-3">
+                        <label className="block text-[10px] font-bold uppercase text-slate-500">
+                          Explanation (Optional feedback shown after grading)
+                        </label>
+                        <input
+                          type="text"
+                          value={q.explanation}
+                          onChange={(e) => handleUpdateQuestion(qIdx, "explanation", e.target.value)}
+                          placeholder="Why this answer is correct"
+                          className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-xs"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-4 flex justify-end gap-2 border-t border-teal-100 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsCreatingExercise(false);
+                      setComposerMode("none");
+                    }}
+                    className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={() => void handleCreateAndInsertExercise()}
+                    className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
+                  >
+                    {isSubmitting ? "Creating & Publishing..." : "Save, Publish & Insert Exercise"}
+                  </button>
+                </div>
+              </div>
             )}
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setComposerMode("none")}
-                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting || !selectedExerciseId}
-                onClick={() => void handleAddExercise()}
-                className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
-              >
-                Insert Exercise Block
-              </button>
-            </div>
           </div>
         )}
       </section>

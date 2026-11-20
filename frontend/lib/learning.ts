@@ -771,3 +771,142 @@ export async function downloadLessonAsset(
     filename,
   };
 }
+
+/*
+|--------------------------------------------------------------------------
+| Exercise Assessment API
+|--------------------------------------------------------------------------
+*/
+
+export interface AttemptQuestionOption {
+  id: number;
+  option_text: string;
+  sort_order: number;
+  is_correct?: boolean;
+}
+
+export interface AttemptQuestion {
+  id: number;
+  question_type: QuestionType;
+  prompt: string;
+  points_possible: number;
+  selected_option_id: number | null;
+  options: AttemptQuestionOption[];
+  is_correct?: boolean;
+  points_awarded?: number;
+  correct_option_id?: number;
+  explanation?: string | null;
+}
+
+export interface ExerciseAttemptData {
+  id: number;
+  exercise_id: number;
+  attempt_number: number;
+  status: "in_progress" | "submitted" | "graded";
+  passing_score: number;
+  max_score: number;
+  score: number | null;
+  percentage: number | null;
+  passed: boolean | null;
+  started_at: string;
+  submitted_at: string | null;
+  graded_at: string | null;
+  show_correct_answers: boolean;
+  questions: AttemptQuestion[];
+}
+
+export interface ExerciseCurrentAttemptState {
+  exercise: {
+    id: number;
+    title: string;
+    instructions: string | null;
+    passing_score: number;
+    max_attempts: number | null;
+    attempts_count: number;
+    attempts_remaining: number | null;
+    can_start_new_attempt: boolean;
+    has_active_attempt: boolean;
+  };
+  active_attempt: ExerciseAttemptData | null;
+  latest_completed_attempt: ExerciseAttemptData | null;
+}
+
+export interface SaveAttemptAnswerPayload {
+  question_id: number;
+  selected_option_id: number | null;
+}
+
+/**
+ * Retrieve the current attempt state and attempt counts for an exercise.
+ */
+export async function getExerciseCurrentAttempt(
+  params: LearningRouteParams,
+  exerciseId: number
+): Promise<ExerciseCurrentAttemptState> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/current`;
+
+  return requestLearningData<ExerciseCurrentAttemptState>(endpoint, {
+    method: "GET",
+  });
+}
+
+/**
+ * Start a new attempt or resume an active one.
+ */
+export async function startExerciseAttempt(
+  params: LearningRouteParams,
+  exerciseId: number
+): Promise<ExerciseAttemptData> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts`;
+
+  return requestLearningData<ExerciseAttemptData>(endpoint, {
+    method: "POST",
+  });
+}
+
+/**
+ * Save draft answer selections for an in-progress attempt.
+ */
+export async function saveExerciseAttemptAnswers(
+  params: LearningRouteParams,
+  exerciseId: number,
+  answers: SaveAttemptAnswerPayload[]
+): Promise<ExerciseAttemptData> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/current`;
+
+  return requestLearningData<ExerciseAttemptData>(endpoint, {
+    method: "PATCH",
+    body: JSON.stringify({ answers }),
+  });
+}
+
+/**
+ * Submit an in-progress attempt for server-side grading.
+ */
+export async function submitExerciseAttempt(
+  params: LearningRouteParams,
+  exerciseId: number,
+  answers?: SaveAttemptAnswerPayload[]
+): Promise<ExerciseAttemptData> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/current/submit`;
+
+  return requestLearningData<ExerciseAttemptData>(endpoint, {
+    method: "POST",
+    body: JSON.stringify(answers ? { answers } : {}),
+  });
+}
+
+/**
+ * Retrieve completed attempt history.
+ */
+export async function getExerciseAttemptHistory(
+  params: LearningRouteParams,
+  exerciseId: number
+): Promise<ExerciseAttemptData[]> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/history`;
+
+  return requestLearningData<ExerciseAttemptData[]>(endpoint, {
+    method: "GET",
+  });
+}
+

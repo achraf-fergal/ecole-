@@ -291,3 +291,151 @@ export async function uploadAdminLessonAsset(
 
   return handleResponse<LearningLessonAsset>(response, "Failed to upload asset.");
 }
+
+/*
+|--------------------------------------------------------------------------
+| Exercise Authoring API
+|--------------------------------------------------------------------------
+*/
+
+export interface CreateExerciseOptionPayload {
+  id?: number;
+  option_text: string;
+  is_correct: boolean;
+  sort_order?: number;
+}
+
+export interface CreateQuestionPayload {
+  id?: number;
+  prompt: string;
+  question_type: "single_choice" | "true_false";
+  explanation?: string | null;
+  points?: number;
+  sort_order?: number;
+  options: CreateExerciseOptionPayload[];
+}
+
+export interface CreateExercisePayload {
+  title: string;
+  instructions?: string | null;
+  max_attempts?: number | null;
+  passing_score?: number;
+  show_correct_answers_after_submission?: boolean;
+  sort_order?: number;
+  questions?: CreateQuestionPayload[];
+}
+
+export interface AdminFullExercise {
+  id: number;
+  title: string;
+  instructions: string | null;
+  max_attempts: number | null;
+  passing_score: number;
+  show_correct_answers_after_submission: boolean;
+  sort_order: number;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  questions: {
+    id: number;
+    question_type: "single_choice" | "true_false";
+    prompt: string;
+    explanation: string | null;
+    points: number;
+    sort_order: number;
+    options: {
+      id: number;
+      option_text: string;
+      is_correct: boolean;
+      sort_order: number;
+    }[];
+  }[];
+}
+
+export function buildExerciseBasePath(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string
+): string {
+  return `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/../exercises`.replace("/content/..", "");
+}
+
+/**
+ * List all exercises for a lesson.
+ */
+export async function getAdminExercises(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string
+): Promise<AdminFullExercise[]> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises`;
+
+  const response = await authFetch(endpoint, { method: "GET" });
+  return handleResponse<AdminFullExercise[]>(response, "Failed to load exercises.");
+}
+
+/**
+ * Create a new exercise.
+ */
+export async function createAdminExercise(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  payload: CreateExercisePayload
+): Promise<AdminFullExercise> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises`;
+
+  const response = await authFetch(endpoint, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  return handleResponse<AdminFullExercise>(response, "Failed to create exercise.");
+}
+
+/**
+ * Update an existing exercise.
+ */
+export async function updateAdminExercise(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  exerciseId: number,
+  payload: Partial<CreateExercisePayload>
+): Promise<AdminFullExercise> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises/${exerciseId}`;
+
+  const response = await authFetch(endpoint, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+
+  return handleResponse<AdminFullExercise>(response, "Failed to update exercise.");
+}
+
+/**
+ * Publish an exercise.
+ */
+export async function publishAdminExercise(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  exerciseId: number
+): Promise<AdminFullExercise> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises/${exerciseId}/publish`;
+
+  const response = await authFetch(endpoint, { method: "POST" });
+  return handleResponse<AdminFullExercise>(response, "Failed to publish exercise.");
+}
+

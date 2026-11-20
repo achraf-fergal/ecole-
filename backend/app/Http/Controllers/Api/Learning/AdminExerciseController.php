@@ -1,0 +1,266 @@
+<?php
+
+namespace App\Http\Controllers\Api\Learning;
+
+use App\Http\Controllers\Controller;
+use App\Models\Center;
+use App\Models\Course;
+use App\Models\Exercise;
+use App\Models\Lesson;
+use App\Models\User;
+use App\Services\Learning\AdminExerciseService;
+use App\Services\Learning\LessonRevisionService;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
+
+class AdminExerciseController extends Controller
+{
+    public function __construct(
+        protected AdminExerciseService $exerciseService,
+        protected LessonRevisionService $revisionService
+    ) {}
+
+    /**
+     * List all exercises for a lesson.
+     */
+    public function index(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+
+        $exercises = Exercise::query()
+            ->forCenter($center->id)
+            ->where('lesson_id', $lesson->id)
+            ->with(['questions.options'])
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get();
+
+        return response()->json([
+            'data' => $exercises->map(fn (Exercise $e) => $this->exercisePayload($e))->values(),
+        ]);
+    }
+
+    /**
+     * Show a single exercise.
+     */
+    public function show(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
+        $exercise->load(['questions.options']);
+
+        return response()->json([
+            'data' => $this->exercisePayload($exercise),
+        ]);
+    }
+
+    /**
+     * Store a new exercise with optional questions & options.
+     */
+    public function store(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $actor = $request->user();
+
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'instructions' => ['nullable', 'string'],
+            'max_attempts' => ['nullable', 'integer', 'min:1'],
+            'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+            'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
+            'sort_order' => ['sometimes', 'integer', 'min:0'],
+            'questions' => ['sometimes', 'array'],
+            'questions.*.prompt' => ['required', 'string'],
+            'questions.*.question_type' => ['sometimes', 'string', 'in:single_choice,true_false'],
+            'questions.*.explanation' => ['nullable', 'string'],
+            'questions.*.points' => ['sometimes', 'numeric', 'min:0.01'],
+            'questions.*.sort_order' => ['sometimes', 'integer', 'min:0'],
+            'questions.*.options' => ['required', 'array', 'min:2'],
+            'questions.*.options.*.option_text' => ['required', 'string'],
+            'questions.*.options.*.is_correct' => ['required', 'boolean'],
+            'questions.*.options.*.sort_order' => ['sometimes', 'integer', 'min:0'],
+        ]);
+
+        $exercise = $this->exerciseService->saveAggregateExercise(
+            $lesson,
+            $validated,
+            $actor
+        );
+
+        return response()->json([
+            'message' => 'Exercise created successfully.',
+            'data' => $this->exercisePayload($exercise),
+        ], 201);
+    }
+
+    /**
+     * Update an existing exercise.
+     */
+    public function update(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
+        $actor = $request->user();
+
+        $validated = $request->validate([
+            'title' => ['sometimes', 'required', 'string', 'max:255'],
+            'instructions' => ['sometimes', 'nullable', 'string'],
+            'max_attempts' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+            'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
+            'sort_order' => ['sometimes', 'integer', 'min:0'],
+            'questions' => ['sometimes', 'array'],
+            'questions.*.id' => ['sometimes', 'nullable', 'integer'],
+            'questions.*.prompt' => ['required', 'string'],
+            'questions.*.question_type' => ['sometimes', 'string', 'in:single_choice,true_false'],
+            'questions.*.explanation' => ['nullable', 'string'],
+            'questions.*.points' => ['sometimes', 'numeric', 'min:0.01'],
+            'questions.*.sort_order' => ['sometimes', 'integer', 'min:0'],
+            'questions.*.options' => ['required', 'array', 'min:2'],
+            'questions.*.options.*.id' => ['sometimes', 'nullable', 'integer'],
+            'questions.*.options.*.option_text' => ['required', 'string'],
+            'questions.*.options.*.is_correct' => ['required', 'boolean'],
+            'questions.*.options.*.sort_order' => ['sometimes', 'integer', 'min:0'],
+        ]);
+
+        $exercise = $this->exerciseService->saveAggregateExercise(
+            $lesson,
+            $validated,
+            $actor,
+            $exercise
+        );
+
+        return response()->json([
+            'message' => 'Exercise updated successfully.',
+            'data' => $this->exercisePayload($exercise),
+        ]);
+    }
+
+    /**
+     * Publish an exercise.
+     */
+    public function publish(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
+        $actor = $request->user();
+
+        $published = $this->exerciseService->publishExercise(
+            $exercise,
+            $actor
+        );
+
+        return response()->json([
+            'message' => 'Exercise published successfully.',
+            'data' => $this->exercisePayload($published),
+        ]);
+    }
+
+    /**
+     * Delete an exercise.
+     */
+    public function destroy(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
+
+        $this->exerciseService->deleteExercise($exercise);
+
+        return response()->json([
+            'message' => 'Exercise deleted successfully.',
+        ]);
+    }
+
+    /**
+     * Resolve the authorized administrative lesson context.
+     *
+     * @return array{0: Center, 1: Course, 2: Lesson}
+     */
+    private function resolveLessonContext(Request $request): array
+    {
+        $center = $request->attributes->get('current_center');
+        abort_unless($center instanceof Center, 404, 'Center not found.');
+
+        $user = $request->user();
+        abort_unless($user instanceof User, 401, 'Unauthenticated.');
+
+        $hasAdminAccess = $user->isPlatformAdmin()
+            || $user->hasAnyRoleInCenter($center, ['center_admin']);
+
+        abort_unless($hasAdminAccess, 403, 'Administrative learning access is required.');
+
+        $courseParam = (string) $request->route('course');
+        $courseQuery = Course::query()->forCenter($center->id);
+        if (ctype_digit($courseParam)) {
+            $courseQuery->whereKey((int) $courseParam);
+        } else {
+            $courseQuery->where('slug', $courseParam);
+        }
+        $course = $courseQuery->firstOrFail();
+
+        $lessonParam = (string) $request->route('lesson');
+        abort_unless(ctype_digit($lessonParam), 404, 'Lesson not found.');
+
+        $lesson = Lesson::query()
+            ->forCenter($center->id)
+            ->whereKey((int) $lessonParam)
+            ->whereHas('courseModule', function (Builder $query) use ($center, $course): void {
+                $query->forCenter($center->id)->where('course_id', $course->id);
+            })
+            ->firstOrFail();
+
+        return [$center, $course, $lesson];
+    }
+
+    /**
+     * Resolve exercise strictly within the lesson and center.
+     */
+    private function resolveExercise(Lesson $lesson, string $exerciseParam): Exercise
+    {
+        abort_unless(ctype_digit($exerciseParam), 404, 'Exercise not found.');
+
+        return Exercise::query()
+            ->forCenter($lesson->center_id)
+            ->where('lesson_id', $lesson->id)
+            ->whereKey((int) $exerciseParam)
+            ->firstOrFail();
+    }
+
+    /**
+     * Format exercise for administration.
+     */
+    private function exercisePayload(Exercise $exercise): array
+    {
+        return [
+            'id' => $exercise->id,
+            'title' => $exercise->title,
+            'instructions' => $exercise->instructions,
+            'max_attempts' => $exercise->max_attempts,
+            'passing_score' => (float) $exercise->passing_score,
+            'show_correct_answers_after_submission' => (bool) $exercise->show_correct_answers_after_submission,
+            'sort_order' => $exercise->sort_order,
+            'status' => $exercise->status,
+            'published_at' => $exercise->published_at?->toIso8601String(),
+            'questions' => $exercise->questions->map(function ($q): array {
+                return [
+                    'id' => $q->id,
+                    'question_type' => $q->question_type,
+                    'prompt' => $q->prompt,
+                    'explanation' => $q->explanation,
+                    'points' => (float) $q->points,
+                    'sort_order' => $q->sort_order,
+                    'options' => $q->options->map(function ($o): array {
+                        return [
+                            'id' => $o->id,
+                            'option_text' => $o->option_text,
+                            'is_correct' => (bool) $o->is_correct,
+                            'sort_order' => $o->sort_order,
+                        ];
+                    })->values(),
+                ];
+            })->values(),
+        ];
+    }
+}

@@ -50,6 +50,14 @@ class StudentProfile extends Model
     }
 
     /**
+     * Assessment attempts belonging to this student.
+     */
+    public function exerciseAttempts(): HasMany
+    {
+        return $this->hasMany(ExerciseAttempt::class, 'student_profile_id');
+    }
+
+    /**
      * Restrict profiles to a specific tenant.
      */
     public function scopeForCenter(Builder $query, int $centerId): Builder
