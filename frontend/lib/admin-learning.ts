@@ -190,6 +190,25 @@ export async function addAdminExerciseBlock(
 }
 
 /**
+ * Atomically create, validate, publish, and insert a new exercise block into a draft revision.
+ */
+export async function createAndInsertAdminExerciseBlock(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  revisionId: number,
+  payload: CreateExercisePayload
+): Promise<LessonBlock> {
+  const endpoint = `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/revisions/${revisionId}/blocks/exercise/author-and-insert`;
+  const response = await authFetch(endpoint, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  return handleResponse<LessonBlock>(response, "Failed to create and insert exercise block.");
+}
+
+/**
  * Update an existing block's content or settings.
  */
 export async function updateAdminBlock(

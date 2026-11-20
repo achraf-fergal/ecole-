@@ -10,16 +10,19 @@ use App\Models\Lesson;
 use App\Models\LessonBlock;
 use App\Models\LessonRevision;
 use App\Models\User;
+use App\Services\Learning\AdminExerciseService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LessonContentController extends Controller
 {
     public function __construct(
-        protected LessonRevisionService $revisionService
+        protected LessonRevisionService $revisionService,
+        protected AdminExerciseService $adminExerciseService
     ) {}
 
     /**
@@ -332,6 +335,67 @@ class LessonContentController extends Controller
 
         return response()->json([
             'message' => 'Exercise block added successfully.',
+            'data' => $this->loadBlockPayload($block),
+        ], 201);
+    }
+
+    /**
+     * Atomically create, validate, publish, and insert a new exercise block into the revision.
+     */
+    public function storeAuthorAndInsertExerciseBlock(Request $request): JsonResponse
+    {
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
+
+        $revision = $this->resolveRevision(
+            $lesson,
+            (string) $request->route('revision')
+        );
+
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'instructions' => ['nullable', 'string'],
+            'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+            'max_attempts' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
+            'sort_order' => ['sometimes', 'integer', 'min:0'],
+            'settings' => ['sometimes', 'nullable', 'array'],
+            'questions' => ['required', 'array', 'min:1'],
+            'questions.*.prompt' => ['required', 'string'],
+            'questions.*.question_type' => ['sometimes', 'string', 'in:single_choice,true_false'],
+            'questions.*.points' => ['sometimes', 'numeric', 'min:0.1'],
+            'questions.*.explanation' => ['sometimes', 'nullable', 'string'],
+            'questions.*.options' => ['required', 'array', 'min:2'],
+            'questions.*.options.*.option_text' => ['required', 'string'],
+            'questions.*.options.*.is_correct' => ['required', 'boolean'],
+        ]);
+
+        $block = DB::transaction(function () use ($lesson, $revision, $validated, $request): LessonBlock {
+            $actor = $request->user();
+
+            // 1. Create exercise aggregate with questions and options
+            $exercise = $this->adminExerciseService->saveAggregateExercise(
+                $lesson,
+                $validated,
+                $actor
+            );
+
+            // 2. Validate and publish the exercise
+            $publishedExercise = $this->adminExerciseService->publishExercise(
+                $exercise,
+                $actor
+            );
+
+            // 3. Insert exercise block into the draft revision
+            return $this->revisionService->addExerciseBlock(
+                $revision,
+                $publishedExercise->id,
+                $validated['settings'] ?? null
+            );
+        });
+
+        return response()->json([
+            'message' => 'Exercise created, published, and added to lesson revision successfully.',
             'data' => $this->loadBlockPayload($block),
         ], 201);
     }

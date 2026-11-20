@@ -3,7 +3,9 @@
 namespace App\Services\Learning;
 
 use App\Models\Center;
+use App\Models\Cohort;
 use App\Models\Course;
+use App\Models\Enrollment;
 use App\Models\Exercise;
 use App\Models\ExerciseAttempt;
 use App\Models\ExerciseAttemptAnswer;
@@ -23,6 +25,7 @@ class ExerciseAttemptService
 
     /**
      * Resolve and strictly authorize student access to an exercise.
+     * Enforces active student role, active student profile, and actual course enrollment.
      *
      * @return array{0: Exercise, 1: StudentProfile}
      */
@@ -39,10 +42,44 @@ class ExerciseAttemptService
             'User or center is inactive.'
         );
 
-        $studentProfile = $this->learningAccess->findActiveStudentProfile(
-            $user,
-            $center
+        abort_unless(
+            (int) $course->center_id === (int) $center->id
+                && (int) $lesson->center_id === (int) $center->id,
+            404,
+            'Resource not found for this center.'
         );
+
+        abort_unless(
+            $course->isPublished() && $lesson->isPublished(),
+            404,
+            'Course or lesson is not published.'
+        );
+
+        $module = $lesson->courseModule()
+            ->where('center_id', $center->id)
+            ->where('course_id', $course->id)
+            ->published()
+            ->first();
+
+        abort_unless(
+            $module !== null,
+            404,
+            'Published lesson module not found.'
+        );
+
+        // Every assessment attempt requires a student role in this center.
+        abort_unless(
+            $user->hasRoleInCenter($center, 'student'),
+            403,
+            'Student assessment requires a student role in this center.'
+        );
+
+        // Active student profile is mandatory.
+        $studentProfile = StudentProfile::query()
+            ->where('center_id', $center->id)
+            ->where('user_id', $user->id)
+            ->where('status', StudentProfile::STATUS_ACTIVE)
+            ->first();
 
         abort_unless(
             $studentProfile instanceof StudentProfile,
@@ -50,10 +87,30 @@ class ExerciseAttemptService
             'Active student profile required.'
         );
 
+        // Active course enrollment is mandatory, even for dual-role users or super admins.
+        $hasActiveEnrollment = Enrollment::query()
+            ->forCenter($center->id)
+            ->forStudentProfile($studentProfile->id)
+            ->activeAt()
+            ->whereHas(
+                'cohort',
+                static function (Builder $query) use ($center, $course): void {
+                    $query
+                        ->where('center_id', $center->id)
+                        ->where('course_id', $course->id)
+                        ->whereIn('status', [
+                            Cohort::STATUS_OPEN,
+                            Cohort::STATUS_IN_PROGRESS,
+                            Cohort::STATUS_COMPLETED,
+                        ]);
+                }
+            )
+            ->exists();
+
         abort_unless(
-            $this->learningAccess->canAccessLesson($user, $lesson, $course, $center),
+            $hasActiveEnrollment,
             403,
-            'Unauthorized lesson access.'
+            'Active course enrollment required.'
         );
 
         // Lesson must have a valid current published revision.
@@ -101,6 +158,7 @@ class ExerciseAttemptService
 
     /**
      * Start a new attempt or resume an active in-progress attempt.
+     * Uses parent-row locking (student profile) for safe concurrent attempt creation.
      */
     public function startOrResumeAttempt(
         Exercise $exercise,
@@ -112,10 +170,17 @@ class ExerciseAttemptService
             $studentProfile,
             $center
         ): ExerciseAttempt {
+            // Lock parent row (student profile) inside transaction in consistent order
+            // to serialize concurrent requests when no attempt exists yet.
+            $lockedStudentProfile = StudentProfile::query()
+                ->whereKey($studentProfile->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             // Lock active in-progress attempt if present.
             $activeAttempt = ExerciseAttempt::query()
                 ->where('center_id', $center->id)
-                ->where('student_profile_id', $studentProfile->id)
+                ->where('student_profile_id', $lockedStudentProfile->id)
                 ->where('exercise_id', $exercise->id)
                 ->where('status', ExerciseAttempt::STATUS_IN_PROGRESS)
                 ->lockForUpdate()
@@ -129,7 +194,7 @@ class ExerciseAttemptService
             if ($exercise->max_attempts !== null) {
                 $completedCount = ExerciseAttempt::query()
                     ->where('center_id', $center->id)
-                    ->where('student_profile_id', $studentProfile->id)
+                    ->where('student_profile_id', $lockedStudentProfile->id)
                     ->where('exercise_id', $exercise->id)
                     ->whereIn('status', [
                         ExerciseAttempt::STATUS_SUBMITTED,
@@ -144,10 +209,10 @@ class ExerciseAttemptService
                 }
             }
 
-            // Calculate next sequential attempt number.
+            // Calculate next sequential attempt number with lock.
             $maxAttemptNumber = ExerciseAttempt::query()
                 ->where('center_id', $center->id)
-                ->where('student_profile_id', $studentProfile->id)
+                ->where('student_profile_id', $lockedStudentProfile->id)
                 ->where('exercise_id', $exercise->id)
                 ->lockForUpdate()
                 ->max('attempt_number');
@@ -169,7 +234,7 @@ class ExerciseAttemptService
             $attempt = ExerciseAttempt::query()->create([
                 'center_id' => $center->id,
                 'exercise_id' => $exercise->id,
-                'student_profile_id' => $studentProfile->id,
+                'student_profile_id' => $lockedStudentProfile->id,
                 'attempt_number' => $nextAttemptNumber,
                 'status' => ExerciseAttempt::STATUS_IN_PROGRESS,
                 'passing_score_snapshot' => $exercise->passing_score,

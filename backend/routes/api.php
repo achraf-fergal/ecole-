@@ -251,6 +251,14 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.content.blocks.exercise.store');
 
+                        // Atomically author, publish, and insert exercise block.
+                        Route::post('/revisions/{revision}/blocks/exercise/author-and-insert', [
+                            LessonContentController::class,
+                            'storeAuthorAndInsertExerciseBlock',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.blocks.exercise.author-and-insert');
+
                         // Reorder every block.
                         Route::put('/revisions/{revision}/blocks/order', [
                             LessonContentController::class,

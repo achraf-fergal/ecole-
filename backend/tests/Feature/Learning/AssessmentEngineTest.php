@@ -522,4 +522,530 @@ class AssessmentEngineTest extends TestCase
 
         $res->assertForbidden();
     }
+
+    public function test_unenrolled_student_is_denied_assessment(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Sample Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Q1',
+                        'options' => [
+                            ['option_text' => 'A', 'is_correct' => true],
+                            ['option_text' => 'B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        // Student with profile in center but NOT enrolled in course
+        $unenrolledUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::query()->create([
+            'center_id' => $ctx['center']->id,
+            'user_id' => $unenrolledUser->id,
+            'status' => 'active',
+        ]);
+        $studentRole = Role::query()->where('key', 'student')->firstOrFail();
+        $membership->roles()->attach($studentRole->id);
+        StudentProfile::factory()->forMembership($membership)->create();
+
+        $token = $this->tokenFor($unenrolledUser);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertForbidden();
+    }
+
+    public function test_dual_role_admin_without_course_enrollment_is_denied_assessment(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Sample Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Q1',
+                        'options' => [
+                            ['option_text' => 'A', 'is_correct' => true],
+                            ['option_text' => 'B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        // Dual-role user: center_admin + student with active student profile, but NO course enrollment
+        $dualUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::query()->create([
+            'center_id' => $ctx['center']->id,
+            'user_id' => $dualUser->id,
+            'status' => 'active',
+        ]);
+        $adminRole = Role::query()->where('key', 'center_admin')->firstOrFail();
+        $studentRole = Role::query()->where('key', 'student')->firstOrFail();
+        $membership->roles()->attach([$adminRole->id, $studentRole->id]);
+        StudentProfile::factory()->forMembership($membership)->create();
+
+        $token = $this->tokenFor($dualUser);
+
+        // Accessing assessment endpoint must be denied because no enrollment exists
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertForbidden();
+    }
+
+    public function test_dual_role_admin_with_valid_enrollment_can_take_assessment(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Sample Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Q1',
+                        'options' => [
+                            ['option_text' => 'A', 'is_correct' => true],
+                            ['option_text' => 'B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        // Dual-role user WITH active enrollment
+        $dualUser = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::query()->create([
+            'center_id' => $ctx['center']->id,
+            'user_id' => $dualUser->id,
+            'status' => 'active',
+        ]);
+        $adminRole = Role::query()->where('key', 'center_admin')->firstOrFail();
+        $studentRole = Role::query()->where('key', 'student')->firstOrFail();
+        $membership->roles()->attach([$adminRole->id, $studentRole->id]);
+        $studentProfile = StudentProfile::factory()->forMembership($membership)->create();
+
+        $cohort = Cohort::factory()->forCourse($ctx['course'])->inProgress()->create([
+            'starts_at' => now()->subDays(2),
+            'ends_at' => now()->addMonths(2),
+        ]);
+
+        Enrollment::factory()
+            ->forStudentProfile($studentProfile)
+            ->forCohort($cohort)
+            ->create([
+                'start_at' => now()->subDay(),
+                'end_at' => now()->addMonth(),
+            ]);
+
+        $token = $this->tokenFor($dualUser);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertCreated();
+    }
+
+    public function test_starting_attempt_twice_resumes_same_in_progress_attempt(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Resume Test Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Q1',
+                        'options' => [
+                            ['option_text' => 'A', 'is_correct' => true],
+                            ['option_text' => 'B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        $studentCtx = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentCtx['studentUser']);
+
+        // First start
+        $res1 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        );
+        $res1->assertCreated();
+        $attemptId1 = $res1->json('data.id');
+
+        // Second start
+        $res2 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        );
+        $res2->assertCreated();
+        $attemptId2 = $res2->json('data.id');
+
+        // Must be the same attempt
+        $this->assertSame($attemptId1, $attemptId2);
+        $this->assertSame(1, ExerciseAttempt::count());
+    }
+
+    public function test_max_attempts_limit_and_submitting_twice_are_enforced(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Strict Max 1 Quiz',
+                'max_attempts' => 1,
+                'questions' => [
+                    [
+                        'prompt' => 'Q1',
+                        'options' => [
+                            ['option_text' => 'A', 'is_correct' => true],
+                            ['option_text' => 'B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        $studentCtx = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentCtx['studentUser']);
+
+        // Start attempt #1
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertCreated();
+
+        // Submit attempt #1
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            ['answers' => []]
+        )->assertOk();
+
+        // Cannot save answers on completed attempt
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'answers' => [
+                    ['question_id' => 1, 'selected_option_id' => null],
+                ],
+            ]
+        )->assertNotFound(); // firstOrFail on in_progress attempt throws 404
+
+        // Cannot start attempt #2 because max_attempts is 1
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertUnprocessable()
+         ->assertJsonValidationErrors(['attempt']);
+    }
+
+    public function test_question_and_option_id_integrity_validation(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Legitimate Q1',
+                        'options' => [
+                            ['option_text' => 'Opt 1', 'is_correct' => true],
+                            ['option_text' => 'Opt 2', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+        $qId = $createRes->json('data.questions.0.id');
+        $optId = $createRes->json('data.questions.0.options.0.id');
+
+        // 1. Update with a non-existent / foreign question ID
+        $updateRes1 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'id' => 99999,
+                        'prompt' => 'Hacked Question',
+                        'options' => [
+                            ['option_text' => 'Opt 1', 'is_correct' => true],
+                            ['option_text' => 'Opt 2', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $updateRes1->assertUnprocessable();
+
+        // Verify database was NOT touched
+        $this->assertDatabaseHas('questions', ['id' => $qId, 'prompt' => 'Legitimate Q1']);
+
+        // 2. Update with duplicate question IDs in payload
+        $updateRes2 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'id' => $qId,
+                        'prompt' => 'Dup Q',
+                        'options' => [['option_text' => 'A', 'is_correct' => true], ['option_text' => 'B', 'is_correct' => false]],
+                    ],
+                    [
+                        'id' => $qId,
+                        'prompt' => 'Dup Q 2',
+                        'options' => [['option_text' => 'C', 'is_correct' => true], ['option_text' => 'D', 'is_correct' => false]],
+                    ],
+                ],
+            ]
+        );
+        $updateRes2->assertUnprocessable();
+
+        // 3. New question referencing existing option ID
+        $updateRes3 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'New Question without ID',
+                        'options' => [
+                            ['id' => $optId, 'option_text' => 'Stolen Option', 'is_correct' => true],
+                            ['option_text' => 'Normal Option', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $updateRes3->assertUnprocessable();
+    }
+
+    public function test_atomically_author_and_insert_exercise_block(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+
+        $res = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.content.blocks.exercise.author-and-insert', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'revision' => $draft->id,
+            ]),
+            [
+                'title' => 'Atomic Author & Insert Quiz',
+                'passing_score' => 80,
+                'questions' => [
+                    [
+                        'prompt' => 'Atomic Q1',
+                        'points' => 5,
+                        'question_type' => 'single_choice',
+                        'options' => [
+                            ['option_text' => 'Choice A', 'is_correct' => true],
+                            ['option_text' => 'Choice B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+
+        $res->assertCreated();
+        $res->assertJsonPath('data.block_type', 'exercise');
+        $this->assertNotNull($res->json('data.exercise.id'));
+        $this->assertSame('Atomic Author & Insert Quiz', $res->json('data.exercise.title'));
+        $this->assertSame('published', $res->json('data.exercise.status'));
+
+        // Check block in database
+        $this->assertDatabaseHas('lesson_blocks', [
+            'lesson_revision_id' => $draft->id,
+            'block_type' => 'exercise',
+            'exercise_id' => $res->json('data.exercise.id'),
+        ]);
+    }
 }

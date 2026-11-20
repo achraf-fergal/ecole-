@@ -9,8 +9,7 @@ import {
   addAdminTextBlock,
   addAdminMediaBlock,
   addAdminExerciseBlock,
-  createAdminExercise,
-  publishAdminExercise,
+  createAndInsertAdminExerciseBlock,
   updateAdminBlock,
   deleteAdminBlock,
   reorderAdminBlocks,
@@ -494,7 +493,7 @@ export default function UnifiedLessonEditor({
     try {
       const draft = await getOrCreateDraft();
 
-      const createdEx = await createAdminExercise(centerSlug, courseSlug, lessonId, {
+      await createAndInsertAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, {
         title: newExerciseTitle.trim(),
         instructions: newExerciseInstructions.trim() || null,
         passing_score: newExercisePassingScore,
@@ -513,9 +512,6 @@ export default function UnifiedLessonEditor({
           })),
         })),
       });
-
-      await publishAdminExercise(centerSlug, courseSlug, lessonId, createdEx.id);
-      await addAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, createdEx.id);
 
       setIsCreatingExercise(false);
       setNewExerciseTitle("");

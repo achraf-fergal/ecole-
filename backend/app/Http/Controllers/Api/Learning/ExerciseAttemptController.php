@@ -39,19 +39,21 @@ class ExerciseAttemptController extends Controller
             ->with('answers')
             ->first();
 
-        $completedAttempts = ExerciseAttempt::query()
+        $completedQuery = ExerciseAttempt::query()
             ->where('center_id', $center->id)
             ->where('student_profile_id', $studentProfile->id)
             ->where('exercise_id', $exercise->id)
             ->whereIn('status', [
                 ExerciseAttempt::STATUS_SUBMITTED,
                 ExerciseAttempt::STATUS_GRADED,
-            ])
-            ->orderByDesc('attempt_number')
-            ->get();
+            ]);
 
-        $completedCount = $completedAttempts->count();
-        $latestCompleted = $completedAttempts->first();
+        $completedCount = (clone $completedQuery)->count();
+
+        $latestCompleted = (clone $completedQuery)
+            ->with('answers')
+            ->orderByDesc('attempt_number')
+            ->first();
 
         $canStartNew = $exercise->max_attempts === null || $completedCount < (int) $exercise->max_attempts;
         $attemptsRemaining = $exercise->max_attempts !== null
@@ -163,11 +165,13 @@ class ExerciseAttemptController extends Controller
     }
 
     /**
-     * View history of attempts for this student on this exercise.
+     * View history of attempts for this student on this exercise (paginated).
      */
     public function history(Request $request): JsonResponse
     {
         [$center, $course, $lesson, $exercise, $studentProfile] = $this->resolveContext($request);
+
+        $perPage = min(max((int) $request->query('per_page', 10), 1), 50);
 
         $attempts = ExerciseAttempt::query()
             ->where('center_id', $center->id)
@@ -175,12 +179,18 @@ class ExerciseAttemptController extends Controller
             ->where('exercise_id', $exercise->id)
             ->with('answers')
             ->orderByDesc('attempt_number')
-            ->get();
+            ->paginate($perPage);
 
         return response()->json([
-            'data' => $attempts->map(
+            'data' => collect($attempts->items())->map(
                 fn (ExerciseAttempt $attempt) => $this->attemptService->formatAttemptPayload($attempt)
             )->values(),
+            'meta' => [
+                'current_page' => $attempts->currentPage(),
+                'last_page' => $attempts->lastPage(),
+                'per_page' => $attempts->perPage(),
+                'total' => $attempts->total(),
+            ],
         ]);
     }
 
@@ -197,11 +207,10 @@ class ExerciseAttemptController extends Controller
         $user = $request->user();
         abort_unless($user instanceof User, 401, 'Unauthenticated.');
 
-        // Prevent preview modes from acting as students
-        abort_if(
-            $this->learningAccess->isAdministrativeViewer($user, $center) && ! $user->hasRoleInCenter($center, 'student'),
+        abort_unless(
+            $user->hasRoleInCenter($center, 'student'),
             403,
-            'Student assessment requires a valid student account.'
+            'Student assessment requires a student role in this center.'
         );
 
         $courseParam = (string) $request->route('course');

@@ -103,6 +103,7 @@ class AdminExerciseService
 
     /**
      * Synchronize questions and options for an exercise.
+     * Enforces strict ID validation to prevent accidental deletion, foreign ID injection, or duplicate IDs.
      */
     public function syncQuestionsAndOptions(
         Exercise $exercise,
@@ -110,13 +111,83 @@ class AdminExerciseService
     ): void {
         $this->revisionService->assertExerciseCanBeModified($exercise);
 
-        DB::transaction(function () use ($exercise, $questionsData): void {
-            // Remove existing questions and options that are not in the new payload.
-            $submittedQuestionIds = array_filter(
-                array_column($questionsData, 'id'),
-                fn ($id) => is_numeric($id) && (int) $id > 0
-            );
+        // Pre-validation: Strictly validate question and option IDs before modifying anything.
+        $submittedQuestionIds = [];
+        $existingQuestionIdsInDb = Question::query()
+            ->where('center_id', $exercise->center_id)
+            ->where('exercise_id', $exercise->id)
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
 
+        foreach ($questionsData as $qIndex => $qData) {
+            $qId = $qData['id'] ?? null;
+            if ($qId !== null) {
+                if (! is_numeric($qId) || (int) $qId <= 0) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.id" => ['Invalid question ID provided.'],
+                    ]);
+                }
+                $qId = (int) $qId;
+                if (in_array($qId, $submittedQuestionIds, true)) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.id" => ["Duplicate question ID {$qId} in payload."],
+                    ]);
+                }
+                if (! in_array($qId, $existingQuestionIdsInDb, true)) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.id" => ["Question ID {$qId} does not belong to this exercise."],
+                    ]);
+                }
+                $submittedQuestionIds[] = $qId;
+            }
+
+            // Validate options for this question
+            if (isset($qData['options']) && is_array($qData['options'])) {
+                $submittedOptionIds = [];
+                $existingOptionIdsForQuestion = [];
+                if ($qId !== null) {
+                    $existingOptionIdsForQuestion = QuestionOption::query()
+                        ->where('center_id', $exercise->center_id)
+                        ->where('question_id', $qId)
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                }
+
+                foreach ($qData['options'] as $oIndex => $oData) {
+                    $oId = $oData['id'] ?? null;
+                    if ($oId !== null) {
+                        if (! is_numeric($oId) || (int) $oId <= 0) {
+                            throw ValidationException::withMessages([
+                                "questions.{$qIndex}.options.{$oIndex}.id" => ['Invalid option ID provided.'],
+                            ]);
+                        }
+                        $oId = (int) $oId;
+                        if (in_array($oId, $submittedOptionIds, true)) {
+                            throw ValidationException::withMessages([
+                                "questions.{$qIndex}.options.{$oIndex}.id" => ["Duplicate option ID {$oId} in question."],
+                            ]);
+                        }
+                        // If question is new ($qId is null), it cannot have existing option IDs
+                        if ($qId === null) {
+                            throw ValidationException::withMessages([
+                                "questions.{$qIndex}.options.{$oIndex}.id" => ["New question cannot reference existing option ID {$oId}."],
+                            ]);
+                        }
+                        if (! in_array($oId, $existingOptionIdsForQuestion, true)) {
+                            throw ValidationException::withMessages([
+                                "questions.{$qIndex}.options.{$oIndex}.id" => ["Option ID {$oId} does not belong to Question ID {$qId}."],
+                            ]);
+                        }
+                        $submittedOptionIds[] = $oId;
+                    }
+                }
+            }
+        }
+
+        DB::transaction(function () use ($exercise, $questionsData, $submittedQuestionIds): void {
+            // Delete questions not present in the payload
             Question::query()
                 ->where('center_id', $exercise->center_id)
                 ->where('exercise_id', $exercise->id)
@@ -124,12 +195,17 @@ class AdminExerciseService
                 ->delete();
 
             foreach ($questionsData as $qIndex => $qData) {
-                $qId = $qData['id'] ?? null;
+                $qId = isset($qData['id']) && $qData['id'] !== null ? (int) $qData['id'] : null;
                 $questionType = $qData['question_type'] ?? Question::TYPE_SINGLE_CHOICE;
                 $points = $qData['points'] ?? 1.00;
-                $sortOrder = $qData['sort_order'] ?? $qIndex;
+                $sortOrder = $qData['sort_order'] ?? ($qIndex + 1);
 
-                if ($qId && ($q = Question::query()->where('center_id', $exercise->center_id)->where('exercise_id', $exercise->id)->find($qId))) {
+                if ($qId !== null) {
+                    $q = Question::query()
+                        ->where('center_id', $exercise->center_id)
+                        ->where('exercise_id', $exercise->id)
+                        ->findOrFail($qId);
+
                     $q->update([
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'],
@@ -150,23 +226,28 @@ class AdminExerciseService
                 }
 
                 if (isset($qData['options']) && is_array($qData['options'])) {
-                    $submittedOptionIds = array_filter(
-                        array_column($qData['options'], 'id'),
-                        fn ($id) => is_numeric($id) && (int) $id > 0
-                    );
+                    $submittedOptIds = array_values(array_filter(
+                        array_map(fn ($o) => isset($o['id']) && $o['id'] !== null ? (int) $o['id'] : null, $qData['options']),
+                        fn ($id) => $id !== null
+                    ));
 
                     QuestionOption::query()
                         ->where('center_id', $exercise->center_id)
                         ->where('question_id', $q->id)
-                        ->whereNotIn('id', $submittedOptionIds)
+                        ->whereNotIn('id', $submittedOptIds)
                         ->delete();
 
                     foreach ($qData['options'] as $oIndex => $oData) {
-                        $oId = $oData['id'] ?? null;
+                        $oId = isset($oData['id']) && $oData['id'] !== null ? (int) $oData['id'] : null;
                         $isCorrect = (bool) ($oData['is_correct'] ?? false);
-                        $oSortOrder = $oData['sort_order'] ?? $oIndex;
+                        $oSortOrder = $oData['sort_order'] ?? ($oIndex + 1);
 
-                        if ($oId && ($opt = QuestionOption::query()->where('center_id', $exercise->center_id)->where('question_id', $q->id)->find($oId))) {
+                        if ($oId !== null) {
+                            $opt = QuestionOption::query()
+                                ->where('center_id', $exercise->center_id)
+                                ->where('question_id', $q->id)
+                                ->findOrFail($oId);
+
                             $opt->update([
                                 'option_text' => $oData['option_text'],
                                 'is_correct' => $isCorrect,

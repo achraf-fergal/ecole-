@@ -12,6 +12,7 @@ import {
   startExerciseAttempt,
   saveExerciseAttemptAnswers,
   submitExerciseAttempt,
+  getExerciseAttemptHistory,
   LearningApiError,
 } from "@/lib/learning";
 
@@ -44,6 +45,17 @@ export default function LessonExerciseBlock({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(
+    null
+  );
+
+  // Attempt history state
+  const [historyAttempts, setHistoryAttempts] = useState<
+    ExerciseAttemptData[] | null
+  >(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [inspectingAttemptId, setInspectingAttemptId] = useState<number | null>(
     null
   );
 
@@ -219,6 +231,7 @@ export default function LessonExerciseBlock({
         answersPayload
       );
       setActiveAttempt(null);
+      setHistoryAttempts(null);
       // Reload attempt state to display graded result and updated attempt counts
       const state = await getExerciseCurrentAttempt(params, exerciseId);
       setAttemptState(state);
@@ -230,6 +243,31 @@ export default function LessonExerciseBlock({
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleToggleHistory = async () => {
+    if (isHistoryOpen) {
+      setIsHistoryOpen(false);
+      return;
+    }
+
+    setIsHistoryOpen(true);
+    if (historyAttempts !== null || !params || !exerciseId) return;
+
+    setIsLoadingHistory(true);
+    setHistoryError(null);
+    try {
+      const attempts = await getExerciseAttemptHistory(params, exerciseId);
+      setHistoryAttempts(attempts);
+    } catch (err: unknown) {
+      if (err instanceof LearningApiError) {
+        setHistoryError(err.message);
+      } else {
+        setHistoryError("Failed to load attempt history.");
+      }
+    } finally {
+      setIsLoadingHistory(false);
     }
   };
 
@@ -718,6 +756,235 @@ export default function LessonExerciseBlock({
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Attempt History Section */}
+      {attemptsCount > 0 && (
+        <div className="mt-6 border-t border-slate-100 pt-5">
+          <button
+            type="button"
+            onClick={() => void handleToggleHistory()}
+            className="flex items-center gap-2 text-xs font-bold text-[#0e8988] hover:text-[#0c7776]"
+          >
+            <span>{isHistoryOpen ? "▼" : "▶"}</span>
+            <span>
+              View Attempt History ({attemptsCount}{" "}
+              {attemptsCount === 1 ? "attempt" : "attempts"})
+            </span>
+          </button>
+
+          {isHistoryOpen && (
+            <div className="mt-4 space-y-3">
+              {isLoadingHistory && (
+                <div className="rounded-xl border border-slate-100 bg-slate-50 p-4 text-center text-xs text-slate-500">
+                  Loading attempt history...
+                </div>
+              )}
+
+              {historyError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+                  {historyError}
+                </div>
+              )}
+
+              {historyAttempts &&
+                historyAttempts.length === 0 &&
+                !isLoadingHistory && (
+                  <p className="text-xs italic text-slate-500">
+                    No attempts recorded yet.
+                  </p>
+                )}
+
+              {historyAttempts &&
+                historyAttempts.map((hist) => {
+                  const isInspecting = inspectingAttemptId === hist.id;
+
+                  return (
+                    <div
+                      key={hist.id}
+                      className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 transition"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-black text-[#102b4c]">
+                              Attempt #{hist.attempt_number}
+                            </span>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase ${
+                                hist.passed
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-rose-50 text-rose-700"
+                              }`}
+                            >
+                              {hist.passed ? "Passed" : "Needs Review"}
+                            </span>
+                          </div>
+
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {hist.submitted_at
+                              ? `Submitted on ${new Date(
+                                  hist.submitted_at
+                                ).toLocaleDateString()} at ${new Date(
+                                  hist.submitted_at
+                                ).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}`
+                              : `Started on ${new Date(
+                                  hist.started_at
+                                ).toLocaleDateString()}`}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                          <div className="text-right">
+                            <span className="text-sm font-black text-[#102b4c]">
+                              {hist.score ?? 0} / {hist.max_score}
+                            </span>
+                            <span className="ml-1 text-xs text-slate-500">
+                              ({hist.percentage ?? 0}%)
+                            </span>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setInspectingAttemptId(
+                                isInspecting ? null : hist.id
+                              )
+                            }
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100"
+                          >
+                            {isInspecting ? "Close Review" : "Review Answers"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Detailed Review for this historical attempt */}
+                      {isInspecting && hist.questions.length > 0 && (
+                        <div className="mt-4 space-y-4 border-t border-slate-200/60 pt-4">
+                          {hist.questions.map((q, qIdx) => (
+                            <div
+                              key={q.id}
+                              className="rounded-lg border border-slate-100 bg-white p-3.5"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                                  Question {qIdx + 1} ({q.points_possible}{" "}
+                                  {Number(q.points_possible) === 1
+                                    ? "point"
+                                    : "points"}
+                                  )
+                                </span>
+                                {q.is_correct !== undefined && (
+                                  <span
+                                    className={`text-[10px] font-bold ${
+                                      q.is_correct
+                                        ? "text-emerald-700"
+                                        : "text-rose-700"
+                                    }`}
+                                  >
+                                    {q.is_correct
+                                      ? `+${
+                                          q.points_awarded ?? q.points_possible
+                                        } pts`
+                                      : "0 pts"}
+                                  </span>
+                                )}
+                              </div>
+
+                              <p className="mt-1 text-xs font-semibold leading-5 text-[#102b4c]">
+                                {q.prompt}
+                              </p>
+
+                              <div className="mt-3 space-y-1.5">
+                                {q.options.map((opt) => {
+                                  const wasSelected =
+                                    q.selected_option_id === opt.id;
+                                  const isCorrect = opt.is_correct;
+
+                                  let optBorder =
+                                    "border-slate-200 bg-white text-slate-700";
+                                  if (wasSelected && isCorrect === true) {
+                                    optBorder =
+                                      "border-emerald-300 bg-emerald-50/70 text-emerald-900 font-bold";
+                                  } else if (
+                                    wasSelected &&
+                                    isCorrect === false
+                                  ) {
+                                    optBorder =
+                                      "border-rose-300 bg-rose-50/70 text-rose-900 font-bold";
+                                  } else if (isCorrect === true) {
+                                    optBorder =
+                                      "border-emerald-200 bg-emerald-50/40 text-emerald-900";
+                                  } else if (wasSelected) {
+                                    optBorder =
+                                      "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold";
+                                  }
+
+                                  return (
+                                    <div
+                                      key={opt.id}
+                                      className={`flex items-center justify-between rounded-lg border p-2.5 text-xs ${optBorder}`}
+                                    >
+                                      <div className="flex items-center gap-2">
+                                        <span
+                                          className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
+                                            wasSelected
+                                              ? "border-[#0e8988] bg-[#0e8988] text-white"
+                                              : "border-slate-300 bg-white"
+                                          }`}
+                                        >
+                                          {wasSelected && (
+                                            <span className="h-1 w-1 rounded-full bg-white" />
+                                          )}
+                                        </span>
+                                        <span>{opt.option_text}</span>
+                                      </div>
+
+                                      <div className="flex items-center gap-1.5">
+                                        {wasSelected && (
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+                                            Your Answer
+                                          </span>
+                                        )}
+                                        {isCorrect === true && (
+                                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-extrabold text-emerald-800">
+                                            ✓ Correct
+                                          </span>
+                                        )}
+                                        {wasSelected && isCorrect === false && (
+                                          <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-extrabold text-rose-800">
+                                            ✗ Incorrect
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {q.explanation && (
+                                <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/80 p-2.5">
+                                  <p className="text-[9px] font-extrabold uppercase tracking-wide text-indigo-700">
+                                    Explanation
+                                  </p>
+                                  <p className="mt-0.5 text-xs text-indigo-950">
+                                    {q.explanation}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
         </div>
       )}
 

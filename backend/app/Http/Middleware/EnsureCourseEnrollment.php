@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\Center;
+use App\Models\Cohort;
 use App\Models\Course;
 use App\Models\Enrollment;
 use App\Models\StudentProfile;
@@ -26,11 +27,6 @@ class EnsureCourseEnrollment
             ], 401);
         }
 
-        // Super admins have global access.
-        if ($user->isPlatformAdmin()) {
-            return $next($request);
-        }
-
         /** @var Center|null $center */
         $center = $request->attributes->get('current_center') ?? $request->route('center');
 
@@ -40,9 +36,19 @@ class EnsureCourseEnrollment
             ], 400);
         }
 
-        // Center admins have administrative course access.
-        if ($user->hasRoleInCenter($center, 'center_admin')) {
-            return $next($request);
+        $isAssessmentRoute = $request->routeIs('*attempts*') || str_contains($request->path(), '/attempts');
+
+        // Administrative preview bypass is only allowed for general course content preview, never for assessment attempts.
+        if (! $isAssessmentRoute) {
+            // Super admins have global access for general course preview.
+            if ($user->isPlatformAdmin()) {
+                return $next($request);
+            }
+
+            // Center admins have administrative course preview access.
+            if ($user->hasRoleInCenter($center, 'center_admin')) {
+                return $next($request);
+            }
         }
 
         // Resolve student profile.
@@ -77,8 +83,14 @@ class EnsureCourseEnrollment
         $hasActiveEnrollment = Enrollment::query()
             ->where('center_id', $center->id)
             ->where('student_profile_id', $studentProfile->id)
-            ->whereHas('cohort', function ($query) use ($course) {
-                $query->where('course_id', $course->id);
+            ->whereHas('cohort', function ($query) use ($center, $course) {
+                $query->where('center_id', $center->id)
+                    ->where('course_id', $course->id)
+                    ->whereIn('status', [
+                        Cohort::STATUS_OPEN,
+                        Cohort::STATUS_IN_PROGRESS,
+                        Cohort::STATUS_COMPLETED,
+                    ]);
             })
             ->activeAt()
             ->exists();
