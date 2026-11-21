@@ -46,7 +46,48 @@ const MARK_ATTRIBUTES: Record<string, string[]> = {
   link: ["href", "target", "rel", "class", "title"],
 };
 
-function validateDocumentShape(value: unknown, depth = 0): string | null {
+const BLOCK_NODE_TYPES = new Set([
+  "paragraph",
+  "heading",
+  "blockquote",
+  "bulletList",
+  "orderedList",
+  "codeBlock",
+  "horizontalRule",
+]);
+
+function isValidChildNode(
+  parentType: string,
+  childType: string,
+  childIndex: number,
+): boolean {
+  switch (parentType) {
+    case "doc":
+    case "blockquote":
+      return BLOCK_NODE_TYPES.has(childType);
+    case "paragraph":
+    case "heading":
+      return childType === "text" || childType === "hardBreak";
+    case "bulletList":
+    case "orderedList":
+      return childType === "listItem";
+    case "listItem":
+      return childIndex === 0
+        ? childType === "paragraph"
+        : BLOCK_NODE_TYPES.has(childType);
+    case "codeBlock":
+      return childType === "text";
+    default:
+      return false;
+  }
+}
+
+function validateDocumentShape(
+  value: unknown,
+  depth = 0,
+  parentType?: string,
+  childIndex = 0,
+): string | null {
   if (depth > 20) {
     return "This document is nested too deeply to edit safely.";
   }
@@ -61,8 +102,19 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
     return "This text block uses a node the editor does not support. Its content was left untouched.";
   }
 
+  if (depth === 0 && type !== "doc") {
+    return "This text block does not contain a valid Tiptap document.";
+  }
+
   if (type === "doc" && depth !== 0) {
     return "This text block contains a nested document the editor cannot preserve.";
+  }
+
+  if (
+    parentType !== undefined &&
+    !isValidChildNode(parentType, type, childIndex)
+  ) {
+    return "This text block contains nodes in an unsupported structure.";
   }
 
   if (
@@ -94,6 +146,7 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
 
     if (
       type === "heading"
+      && attrs.level !== undefined
       && (!Number.isInteger(attrs.level) || ![1, 2, 3, 4, 5, 6].includes(Number(attrs.level)))
     ) {
       return "This text block contains an unsupported heading level.";
@@ -130,10 +183,14 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
   }
 
   if (type === "text") {
-    if (typeof node.text !== "string" || node.content !== undefined) {
+    if (
+      typeof node.text !== "string" ||
+      node.text.length === 0 ||
+      Object.hasOwn(node, "content")
+    ) {
       return "This text block contains an invalid text node.";
     }
-  } else if (node.text !== undefined || node.marks !== undefined) {
+  } else if (Object.hasOwn(node, "text")) {
     return "This text block contains text data in an unsupported location.";
   }
 
@@ -147,26 +204,58 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
     "listItem",
     "codeBlock",
   ]);
-  if (!contentNodeTypes.has(type) && node.content !== undefined) {
-    return "This text block contains children on a node that cannot preserve them.";
-  }
+  const hasContent = Object.hasOwn(node, "content");
+  let children: unknown[] = [];
 
-  if (node.content !== undefined) {
-    if (!Array.isArray(node.content)) {
-      return "This text block contains invalid nested content.";
+  if (hasContent) {
+    if (!contentNodeTypes.has(type) || !Array.isArray(node.content)) {
+      return "This text block contains children on a node that cannot preserve them.";
     }
 
-    for (const child of node.content) {
-      const error = validateDocumentShape(child, depth + 1);
+    children = node.content;
+  }
+
+  if (
+    ["blockquote", "bulletList", "orderedList", "listItem"].includes(type) &&
+    children.length === 0
+  ) {
+    return "This text block contains a node that requires child content.";
+  }
+
+  if (
+    type === "listItem" &&
+    (typeof children[0] !== "object" ||
+      children[0] === null ||
+      Array.isArray(children[0]) ||
+      (children[0] as Record<string, unknown>).type !== "paragraph")
+  ) {
+    return "Each list item must begin with a paragraph.";
+  }
+
+  if (
+    parentType === "codeBlock" &&
+    Array.isArray(node.marks) &&
+    node.marks.length > 0
+  ) {
+    return "Code blocks cannot contain marked text.";
+  }
+
+  if (hasContent) {
+    for (const [index, child] of children.entries()) {
+      const error = validateDocumentShape(child, depth + 1, type, index);
       if (error) return error;
     }
   }
 
-  if (node.marks !== undefined) {
-    if (!Array.isArray(node.marks)) {
-      return "This text block contains invalid text formatting.";
+  if (Object.hasOwn(node, "marks")) {
+    if (
+      !["text", "hardBreak"].includes(type) ||
+      !Array.isArray(node.marks)
+    ) {
+      return "This text block contains formatting in an unsupported location.";
     }
 
+    const markTypes: string[] = [];
     for (const markValue of node.marks) {
       if (
         typeof markValue !== "object" ||
@@ -220,6 +309,15 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
           return "This text block contains formatting values the editor cannot preserve.";
         }
       }
+
+      markTypes.push(markType);
+    }
+
+    if (
+      new Set(markTypes).size !== markTypes.length ||
+      (markTypes.includes("code") && markTypes.length > 1)
+    ) {
+      return "This text block combines formatting that the editor does not support.";
     }
   }
 

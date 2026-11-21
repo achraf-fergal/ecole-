@@ -1017,7 +1017,10 @@ class LessonContentApiTest extends TestCase
                             'text' => 'Inline code',
                             'marks' => [['type' => 'code']],
                         ],
-                        ['type' => 'hardBreak'],
+                        [
+                            'type' => 'hardBreak',
+                            'marks' => [['type' => 'bold']],
+                        ],
                         [
                             'type' => 'text',
                             'text' => 'After the hard break',
@@ -1134,18 +1137,38 @@ class LessonContentApiTest extends TestCase
         $context = $this->createContext();
         $token = $this->tokenFor($context['user']);
         $revisionId = $this->createDraftThroughApi($context, $token);
-        $route = route(
-            'api.centers.admin.learning.content.blocks.text.store',
-            $this->revisionRouteParameters($context, $revisionId)
-        );
-
-        $validParagraph = [
-            'type' => 'paragraph',
+        $validDocument = [
+            'type' => 'doc',
             'content' => [[
-                'type' => 'text',
-                'text' => 'Validation probe',
+                'type' => 'paragraph',
+                'content' => [[
+                    'type' => 'text',
+                    'text' => 'Preserve this existing block.',
+                ]],
             ]],
         ];
+        $validParagraph = $validDocument['content'][0];
+        $textNode = [
+            'type' => 'text',
+            'text' => 'Invalid text placement.',
+        ];
+        $createdBlock = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.content.blocks.text.store',
+                $this->revisionRouteParameters($context, $revisionId)
+            ),
+            ['content_json' => $validDocument]
+        );
+        $createdBlock->assertCreated();
+        $blockId = (int) $createdBlock->json('data.id');
+
+        $route = route(
+            'api.centers.admin.learning.content.blocks.update',
+            $this->blockRouteParameters($context, $revisionId, $blockId)
+        );
         $tooDeepNode = $validParagraph;
         for ($depth = 0; $depth < 21; $depth++) {
             $tooDeepNode = [
@@ -1155,6 +1178,93 @@ class LessonContentApiTest extends TestCase
         }
 
         $invalidDocuments = [
+            'text directly inside doc' => [
+                'type' => 'doc',
+                'content' => [$textNode],
+            ],
+            'nested paragraph inside paragraph' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [$validParagraph],
+                ]],
+            ],
+            'text directly inside blockquote' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'blockquote',
+                    'content' => [$textNode],
+                ]],
+            ],
+            'empty blockquote' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'blockquote',
+                    'content' => [],
+                ]],
+            ],
+            'text directly inside bullet list' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'bulletList',
+                    'content' => [$textNode],
+                ]],
+            ],
+            'list item not beginning with paragraph' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'bulletList',
+                    'content' => [[
+                        'type' => 'listItem',
+                        'content' => [[
+                            'type' => 'blockquote',
+                            'content' => [$validParagraph],
+                        ]],
+                    ]],
+                ]],
+            ],
+            'invalid code block content' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'codeBlock',
+                    'content' => [$validParagraph],
+                ]],
+            ],
+            'mark inside code block' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'codeBlock',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'marked code',
+                        'marks' => [['type' => 'bold']],
+                    ]],
+                ]],
+            ],
+            'hard break with children' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'hardBreak',
+                        'content' => [$textNode],
+                    ]],
+                ]],
+            ],
+            'horizontal rule with children' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'horizontalRule',
+                    'content' => [$validParagraph],
+                ]],
+            ],
+            'empty text node' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [['type' => 'text', 'text' => '']],
+                ]],
+            ],
             'unexpected root key' => [
                 'type' => 'doc',
                 'custom' => true,
@@ -1257,6 +1367,17 @@ class LessonContentApiTest extends TestCase
                     ]],
                 ]],
             ],
+            'incompatible code mark set' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Conflicting marks',
+                        'marks' => [['type' => 'bold'], ['type' => 'code']],
+                    ]],
+                ]],
+            ],
             'link protocol' => [
                 'type' => 'doc',
                 'content' => [[
@@ -1277,11 +1398,18 @@ class LessonContentApiTest extends TestCase
             ],
         ];
 
+        $revisionSnapshot = LessonRevision::query()
+            ->forLesson($context['lesson']->id)
+            ->orderBy('id')
+            ->get()
+            ->map(fn (LessonRevision $revision): array => $revision->getRawOriginal())
+            ->all();
+
         foreach ($invalidDocuments as $case => $document) {
             $response = $this->withHeader(
                 'Authorization',
                 "Bearer {$token}"
-            )->postJson($route, [
+            )->patchJson($route, [
                 'content_json' => $document,
             ]);
 
@@ -1292,6 +1420,28 @@ class LessonContentApiTest extends TestCase
             );
             $response->assertJsonValidationErrors(['content_json']);
         }
+
+        $this->assertSame(
+            $revisionSnapshot,
+            LessonRevision::query()
+                ->forLesson($context['lesson']->id)
+                ->orderBy('id')
+                ->get()
+                ->map(fn (LessonRevision $revision): array => $revision->getRawOriginal())
+                ->all()
+        );
+
+        $reloaded = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(route(
+            'api.centers.admin.learning.content.show',
+            $this->contentRouteParameters($context)
+        ));
+        $reloaded->assertOk();
+        $reloadedBlock = collect($reloaded->json('data.draft_revision.blocks'))
+            ->firstWhere('id', $blockId);
+        $this->assertSame($validDocument, $reloadedBlock['content_json']);
     }
 
     public function test_admin_can_inspect_history_and_restore_as_a_new_draft(): void

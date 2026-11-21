@@ -1139,7 +1139,7 @@ class LessonRevisionService
             );
         }
 
-        foreach ($document['content'] as $node) {
+        foreach ($document['content'] as $index => $node) {
             if (! is_array($node)) {
                 $this->fail(
                     'content_json',
@@ -1147,7 +1147,7 @@ class LessonRevisionService
                 );
             }
 
-            $this->validateNode($node, 1);
+            $this->validateNode($node, 1, 'doc', $index);
         }
 
         if (! $this->hasMeaningfulContent($document['content'])) {
@@ -1187,8 +1187,12 @@ class LessonRevisionService
     /**
      * Validate supported TipTap nodes and marks recursively.
      */
-    private function validateNode(array $node, int $depth): void
-    {
+    private function validateNode(
+        array $node,
+        int $depth,
+        string $parentType,
+        int $childIndex
+    ): void {
         if ($depth > 20) {
             $this->fail(
                 'content_json',
@@ -1218,6 +1222,13 @@ class LessonRevisionService
             );
         }
 
+        if (! $this->isValidChildNode($parentType, $type, $childIndex)) {
+            $this->fail(
+                'content_json',
+                'A content node is not allowed inside its parent node.'
+            );
+        }
+
         $unexpectedKeys = array_diff(
             array_keys($node),
             ['type', 'attrs', 'content', 'text', 'marks']
@@ -1238,10 +1249,11 @@ class LessonRevisionService
             if (
                 ! array_key_exists('text', $node)
                 || ! is_string($node['text'])
+                || $node['text'] === ''
             ) {
                 $this->fail(
                     'content_json',
-                    'Text nodes must contain a valid string.'
+                    'Text nodes must contain a non-empty string.'
                 );
             }
 
@@ -1258,59 +1270,64 @@ class LessonRevisionService
                     'A single text node is too long.'
                 );
             }
-        } elseif (
-            array_key_exists('text', $node)
-            || array_key_exists('marks', $node)
-        ) {
+        } elseif (array_key_exists('text', $node)) {
             $this->fail(
                 'content_json',
-                'Only text nodes can contain text or marks.'
+                'Only text nodes can contain text.'
             );
         }
 
-        if (array_key_exists('content', $node)) {
-            $contentNodeTypes = [
-                'paragraph',
-                'heading',
-                'blockquote',
-                'bulletList',
-                'orderedList',
-                'listItem',
-                'codeBlock',
-            ];
+        $hasContent = array_key_exists('content', $node);
+        $children = [];
 
+        if (array_key_exists('content', $node)) {
             if (
-                ! in_array($type, $contentNodeTypes, true)
-                || ! is_array($node['content'])
+                ! is_array($node['content'])
                 || ! array_is_list($node['content'])
             ) {
                 $this->fail(
                     'content_json',
-                    'This node cannot contain the supplied child content.'
+                    'Node content must be an ordered list.'
                 );
             }
 
-            foreach ($node['content'] as $child) {
-                if (! is_array($child)) {
-                    $this->fail(
-                        'content_json',
-                        'Invalid nested content node.'
-                    );
-                }
+            $children = $node['content'];
+        }
 
-                $this->validateNode($child, $depth + 1);
+        $this->validateNodeContent($type, $children, $hasContent);
+
+        foreach ($children as $index => $child) {
+            if (! is_array($child)) {
+                $this->fail(
+                    'content_json',
+                    'Invalid nested content node.'
+                );
             }
+
+            $this->validateNode(
+                $child,
+                $depth + 1,
+                $type,
+                $index
+            );
         }
 
         if (array_key_exists('marks', $node)) {
             if (
-                $type !== 'text'
+                ! in_array($type, ['text', 'hardBreak'], true)
                 || ! is_array($node['marks'])
                 || ! array_is_list($node['marks'])
             ) {
                 $this->fail(
                     'content_json',
-                    'Only text nodes can contain a list of marks.'
+                    'Only inline nodes can contain a list of marks.'
+                );
+            }
+
+            if ($parentType === 'codeBlock' && $node['marks'] !== []) {
+                $this->fail(
+                    'content_json',
+                    'Code blocks cannot contain marked text.'
                 );
             }
 
@@ -1323,6 +1340,7 @@ class LessonRevisionService
                 'highlight',
                 'link',
             ];
+            $markTypes = [];
 
             foreach ($node['marks'] as $mark) {
                 if (! is_array($mark)) {
@@ -1333,8 +1351,106 @@ class LessonRevisionService
                 }
 
                 $this->validateMark($mark, $allowedMarks);
+                $markTypes[] = $mark['type'];
+            }
+
+            if (
+                count($markTypes) !== count(array_unique($markTypes))
+                || (
+                    in_array('code', $markTypes, true)
+                    && count($markTypes) > 1
+                )
+            ) {
+                $this->fail(
+                    'content_json',
+                    'The selected text marks cannot be combined.'
+                );
             }
         }
+    }
+
+    /**
+     * Match the content expressions of the configured TipTap schema.
+     *
+     * @param  array<int, array<string, mixed>>  $children
+     */
+    private function validateNodeContent(
+        string $type,
+        array $children,
+        bool $hasContent
+    ): void {
+        $contentBearingNodes = [
+            'paragraph',
+            'heading',
+            'blockquote',
+            'bulletList',
+            'orderedList',
+            'listItem',
+            'codeBlock',
+        ];
+
+        if ($hasContent && ! in_array($type, $contentBearingNodes, true)) {
+            $this->fail(
+                'content_json',
+                'This node cannot contain child content.'
+            );
+        }
+
+        if (
+            in_array($type, ['blockquote', 'bulletList', 'orderedList', 'listItem'], true)
+            && $children === []
+        ) {
+            $this->fail(
+                'content_json',
+                'This node requires child content.'
+            );
+        }
+
+        $firstChild = $children[0] ?? null;
+
+        if (
+            $type === 'listItem'
+            && (
+                ! is_array($firstChild)
+                || ($firstChild['type'] ?? null) !== 'paragraph'
+            )
+        ) {
+            $this->fail(
+                'content_json',
+                'List items must begin with a paragraph.'
+            );
+        }
+    }
+
+    private function isValidChildNode(
+        string $parentType,
+        string $childType,
+        int $childIndex
+    ): bool {
+        $blockTypes = [
+            'paragraph',
+            'heading',
+            'blockquote',
+            'bulletList',
+            'orderedList',
+            'codeBlock',
+            'horizontalRule',
+        ];
+
+        return match ($parentType) {
+            'doc', 'blockquote' => in_array($childType, $blockTypes, true),
+            'paragraph', 'heading' => in_array(
+                $childType,
+                ['text', 'hardBreak'],
+                true
+            ),
+            'bulletList', 'orderedList' => $childType === 'listItem',
+            'listItem' => $childIndex === 0
+                ? $childType === 'paragraph'
+                : in_array($childType, $blockTypes, true),
+            'codeBlock' => $childType === 'text',
+            default => false,
+        };
     }
 
     /**
