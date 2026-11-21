@@ -6,6 +6,7 @@ import type {
   LearningRouteParams,
   ExerciseAttemptData,
   ExerciseCurrentAttemptState,
+  PaginatedExerciseAttempts,
 } from "@/lib/learning";
 import {
   getExerciseCurrentAttempt,
@@ -40,6 +41,8 @@ export default function LessonExerciseBlock({
   const [isLoading, setIsLoading] = useState(
     () => !isAdminPreview && Boolean(params) && Boolean(exercise?.id)
   );
+  const [initError, setInitError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [isStarting, setIsStarting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -49,9 +52,8 @@ export default function LessonExerciseBlock({
   );
 
   // Attempt history state
-  const [historyAttempts, setHistoryAttempts] = useState<
-    ExerciseAttemptData[] | null
-  >(null);
+  const [historyData, setHistoryData] = useState<PaginatedExerciseAttempts | null>(null);
+  const [historyPage, setHistoryPage] = useState(1);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -76,6 +78,7 @@ export default function LessonExerciseBlock({
         const state = await getExerciseCurrentAttempt(params!, exerciseId!);
         if (!isMounted) return;
         setAttemptState(state);
+        setInitError(null);
         if (state.active_attempt) {
           setActiveAttempt(state.active_attempt);
           const initialAnswers: Record<number, number> = {};
@@ -91,9 +94,9 @@ export default function LessonExerciseBlock({
       } catch (err: unknown) {
         if (!isMounted) return;
         if (err instanceof LearningApiError) {
-          setActionError(err.message);
+          setInitError(err.message);
         } else {
-          setActionError("Failed to load assessment information.");
+          setInitError("Failed to load assessment information.");
         }
       } finally {
         if (isMounted) {
@@ -107,7 +110,7 @@ export default function LessonExerciseBlock({
     return () => {
       isMounted = false;
     };
-  }, [isAdminPreview, params, exerciseId]);
+  }, [isAdminPreview, params, exerciseId, reloadKey]);
 
   if (!exercise) {
     return null;
@@ -115,8 +118,16 @@ export default function LessonExerciseBlock({
 
   // --- Student Assessment Handlers ---
 
+  const handleRetryInit = () => {
+    setIsLoading(true);
+    setInitError(null);
+    setReloadKey((k) => k + 1);
+  };
+
+  const canStartNew = Boolean(attemptState?.exercise.can_start_new_attempt);
+
   const handleStartAttempt = async () => {
-    if (!params || !exerciseId) return;
+    if (isStarting || !params || !exerciseId || !canStartNew) return;
 
     setIsStarting(true);
     setActionError(null);
@@ -231,7 +242,7 @@ export default function LessonExerciseBlock({
         answersPayload
       );
       setActiveAttempt(null);
-      setHistoryAttempts(null);
+      setHistoryData(null);
       // Reload attempt state to display graded result and updated attempt counts
       const state = await getExerciseCurrentAttempt(params, exerciseId);
       setAttemptState(state);
@@ -246,20 +257,15 @@ export default function LessonExerciseBlock({
     }
   };
 
-  const handleToggleHistory = async () => {
-    if (isHistoryOpen) {
-      setIsHistoryOpen(false);
-      return;
-    }
-
-    setIsHistoryOpen(true);
-    if (historyAttempts !== null || !params || !exerciseId) return;
+  const fetchHistoryPage = async (page: number) => {
+    if (!params || !exerciseId) return;
 
     setIsLoadingHistory(true);
     setHistoryError(null);
     try {
-      const attempts = await getExerciseAttemptHistory(params, exerciseId);
-      setHistoryAttempts(attempts);
+      const paginated = await getExerciseAttemptHistory(params, exerciseId, page);
+      setHistoryData(paginated);
+      setHistoryPage(paginated.meta.current_page);
     } catch (err: unknown) {
       if (err instanceof LearningApiError) {
         setHistoryError(err.message);
@@ -269,6 +275,17 @@ export default function LessonExerciseBlock({
     } finally {
       setIsLoadingHistory(false);
     }
+  };
+
+  const handleToggleHistory = async () => {
+    if (isHistoryOpen) {
+      setIsHistoryOpen(false);
+      return;
+    }
+
+    setIsHistoryOpen(true);
+    if (historyData !== null) return;
+    await fetchHistoryPage(1);
   };
 
   // =========================================================================
@@ -539,10 +556,43 @@ export default function LessonExerciseBlock({
   }
 
   // =========================================================================
+  // VIEW: Student Loading or Init Error Mode
+  // =========================================================================
+  if (!isAdminPreview && isLoading) {
+    return (
+      <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-xs">
+        <div className="flex items-center gap-3">
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#0e8988] border-t-transparent" />
+          <p className="text-xs font-semibold text-slate-500">Loading assessment...</p>
+        </div>
+      </article>
+    );
+  }
+
+  if (!isAdminPreview && initError && !attemptState) {
+    return (
+      <article className="rounded-2xl border border-rose-200 bg-rose-50/60 p-5 sm:p-7 shadow-xs">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h4 className="text-sm font-bold text-rose-800">Assessment Unavailable</h4>
+            <p className="mt-1 text-xs text-rose-700">{initError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleRetryInit}
+            className="rounded-xl border border-rose-300 bg-white px-3.5 py-1.5 text-xs font-bold text-rose-800 transition hover:bg-rose-50 shadow-xs"
+          >
+            Retry
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  // =========================================================================
   // VIEW: Completed / Graded Attempt Review or Start Screen
   // =========================================================================
   const completedAttempt = attemptState?.latest_completed_attempt;
-  const canStartNew = attemptState?.exercise.can_start_new_attempt ?? true;
   const attemptsRemaining = attemptState?.exercise.attempts_remaining;
   const attemptsCount = attemptState?.exercise.attempts_count ?? 0;
   const maxAttempts = attemptState?.exercise.max_attempts;
@@ -592,7 +642,7 @@ export default function LessonExerciseBlock({
                 : "bg-rose-50 text-rose-700"
             }`}
           >
-            {completedAttempt.passed ? "Passed" : "Needs Review"}
+            {completedAttempt.passed ? "Passed" : "Failed"}
           </span>
         ) : (
           <span className="rounded-full bg-[#e5f5f2] px-3 py-1 text-[10px] font-extrabold uppercase text-[#087b83]">
@@ -662,7 +712,7 @@ export default function LessonExerciseBlock({
                   Question {questionIndex + 1} ({question.points_possible}{" "}
                   {Number(question.points_possible) === 1 ? "point" : "points"})
                 </span>
-                {question.is_correct !== undefined && (
+                {completedAttempt.show_correct_answers && question.is_correct !== undefined && (
                   <span
                     className={`text-[10px] font-bold ${
                       question.is_correct
@@ -685,7 +735,9 @@ export default function LessonExerciseBlock({
                 {question.options.map((option) => {
                   const wasSelected =
                     question.selected_option_id === option.id;
-                  const isCorrect = option.is_correct;
+                  const isCorrect = completedAttempt.show_correct_answers
+                    ? question.correct_option_id === option.id
+                    : undefined;
 
                   let optionBorder = "border-slate-200 bg-white text-slate-700";
                   if (wasSelected && isCorrect === true) {
@@ -744,7 +796,7 @@ export default function LessonExerciseBlock({
                 })}
               </div>
 
-              {question.explanation && (
+              {completedAttempt.show_correct_answers && question.explanation && (
                 <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50/80 p-3.5">
                   <p className="text-[10px] font-extrabold uppercase tracking-wide text-indigo-700">
                     Explanation
@@ -777,27 +829,35 @@ export default function LessonExerciseBlock({
           {isHistoryOpen && (
             <div className="mt-4 space-y-3">
               {isLoadingHistory && (
-                <div className="rounded-xl border border-slate-100 bg-slate-50 p-4 text-center text-xs text-slate-500">
-                  Loading attempt history...
+                <div className="flex items-center justify-center gap-2 rounded-xl border border-slate-100 bg-slate-50 p-4 text-xs text-slate-500">
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#0e8988] border-t-transparent" />
+                  <span>Loading attempt history...</span>
                 </div>
               )}
 
               {historyError && (
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
-                  {historyError}
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+                  <span>{historyError}</span>
+                  <button
+                    type="button"
+                    onClick={() => void fetchHistoryPage(historyPage)}
+                    className="rounded-lg border border-rose-300 bg-white px-2.5 py-1 font-bold text-rose-800 hover:bg-rose-50"
+                  >
+                    Retry
+                  </button>
                 </div>
               )}
 
-              {historyAttempts &&
-                historyAttempts.length === 0 &&
+              {historyData &&
+                historyData.data.length === 0 &&
                 !isLoadingHistory && (
                   <p className="text-xs italic text-slate-500">
                     No attempts recorded yet.
                   </p>
                 )}
 
-              {historyAttempts &&
-                historyAttempts.map((hist) => {
+              {historyData &&
+                historyData.data.map((hist) => {
                   const isInspecting = inspectingAttemptId === hist.id;
 
                   return (
@@ -813,12 +873,12 @@ export default function LessonExerciseBlock({
                             </span>
                             <span
                               className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase ${
-                                hist.passed
+                                hist.passed === true
                                   ? "bg-emerald-50 text-emerald-700"
                                   : "bg-rose-50 text-rose-700"
                               }`}
                             >
-                              {hist.passed ? "Passed" : "Needs Review"}
+                              {hist.passed === true ? "Passed" : "Failed"}
                             </span>
                           </div>
 
@@ -878,7 +938,7 @@ export default function LessonExerciseBlock({
                                     : "points"}
                                   )
                                 </span>
-                                {q.is_correct !== undefined && (
+                                {hist.show_correct_answers && q.is_correct !== undefined && (
                                   <span
                                     className={`text-[10px] font-bold ${
                                       q.is_correct
@@ -903,7 +963,9 @@ export default function LessonExerciseBlock({
                                 {q.options.map((opt) => {
                                   const wasSelected =
                                     q.selected_option_id === opt.id;
-                                  const isCorrect = opt.is_correct;
+                                  const isCorrect = hist.show_correct_answers
+                                    ? q.correct_option_id === opt.id
+                                    : undefined;
 
                                   let optBorder =
                                     "border-slate-200 bg-white text-slate-700";
@@ -966,7 +1028,7 @@ export default function LessonExerciseBlock({
                                 })}
                               </div>
 
-                              {q.explanation && (
+                              {hist.show_correct_answers && q.explanation && (
                                 <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/80 p-2.5">
                                   <p className="text-[9px] font-extrabold uppercase tracking-wide text-indigo-700">
                                     Explanation
@@ -983,6 +1045,31 @@ export default function LessonExerciseBlock({
                     </div>
                   );
                 })}
+
+              {/* Pagination Controls */}
+              {historyData && historyData.meta.last_page > 1 && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200/60 pt-3 text-xs">
+                  <button
+                    type="button"
+                    disabled={historyData.meta.current_page <= 1 || isLoadingHistory}
+                    onClick={() => void fetchHistoryPage(historyData.meta.current_page - 1)}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-bold text-slate-700 transition hover:bg-slate-100 disabled:opacity-40"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-slate-500">
+                    Page {historyData.meta.current_page} of {historyData.meta.last_page} ({historyData.meta.total} total)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={historyData.meta.current_page >= historyData.meta.last_page || isLoadingHistory}
+                    onClick={() => void fetchHistoryPage(historyData.meta.current_page + 1)}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-bold text-slate-700 transition hover:bg-slate-100 disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

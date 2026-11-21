@@ -18,6 +18,7 @@ class AdminExerciseService
 
     /**
      * Create an exercise in draft status for a lesson.
+     * Enforces locking on the owning Lesson row.
      */
     public function createExercise(
         Lesson $lesson,
@@ -25,18 +26,24 @@ class AdminExerciseService
         User $actor
     ): Exercise {
         return DB::transaction(function () use ($lesson, $data): Exercise {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $lesson->center_id)
+                ->whereKey($lesson->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $sortOrder = $data['sort_order'] ?? null;
             if ($sortOrder === null) {
                 $maxOrder = Exercise::query()
-                    ->where('center_id', $lesson->center_id)
-                    ->where('lesson_id', $lesson->id)
+                    ->where('center_id', $lockedLesson->center_id)
+                    ->where('lesson_id', $lockedLesson->id)
                     ->max('sort_order');
                 $sortOrder = $maxOrder !== null ? $maxOrder + 1 : 0;
             }
 
             return Exercise::query()->create([
-                'center_id' => $lesson->center_id,
-                'lesson_id' => $lesson->id,
+                'center_id' => $lockedLesson->center_id,
+                'lesson_id' => $lockedLesson->id,
                 'title' => $data['title'],
                 'instructions' => $data['instructions'] ?? null,
                 'max_attempts' => $data['max_attempts'] ?? null,
@@ -51,14 +58,28 @@ class AdminExerciseService
 
     /**
      * Update exercise metadata.
+     * Follows strict lock order: 1. Owning Lesson -> 2. Exercise -> 3. assertExerciseCanBeModified.
      */
     public function updateExercise(
         Exercise $exercise,
         array $data
     ): Exercise {
-        $this->revisionService->assertExerciseCanBeModified($exercise);
-
         return DB::transaction(function () use ($exercise, $data): Exercise {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $exercise->center_id)
+                ->whereKey($exercise->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $lockedExercise = Exercise::query()
+                ->where('center_id', $lockedLesson->center_id)
+                ->where('lesson_id', $lockedLesson->id)
+                ->whereKey($exercise->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->revisionService->assertExerciseCanBeModified($lockedExercise);
+
             $fillable = array_intersect_key($data, array_flip([
                 'title',
                 'instructions',
@@ -68,14 +89,15 @@ class AdminExerciseService
                 'sort_order',
             ]));
 
-            $exercise->update($fillable);
+            $lockedExercise->update($fillable);
 
-            return $exercise->fresh();
+            return $lockedExercise->fresh();
         });
     }
 
     /**
      * Save an entire exercise with questions and options atomically.
+     * Follows strict lock order: 1. Owning Lesson -> 2. Exercise (if existing) -> 3. assertCanBeModified.
      */
     public function saveAggregateExercise(
         Lesson $lesson,
@@ -83,12 +105,56 @@ class AdminExerciseService
         User $actor,
         ?Exercise $existing = null
     ): Exercise {
-        return DB::transaction(function () use ($lesson, $data, $actor, $existing): Exercise {
+        return DB::transaction(function () use ($lesson, $data, $existing): Exercise {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $lesson->center_id)
+                ->whereKey($lesson->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             if ($existing !== null) {
-                $this->revisionService->assertExerciseCanBeModified($existing);
-                $exercise = $this->updateExercise($existing, $data);
+                $lockedExercise = Exercise::query()
+                    ->where('center_id', $lockedLesson->center_id)
+                    ->where('lesson_id', $lockedLesson->id)
+                    ->whereKey($existing->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $this->revisionService->assertExerciseCanBeModified($lockedExercise);
+
+                $fillable = array_intersect_key($data, array_flip([
+                    'title',
+                    'instructions',
+                    'max_attempts',
+                    'passing_score',
+                    'show_correct_answers_after_submission',
+                    'sort_order',
+                ]));
+
+                $lockedExercise->update($fillable);
+                $exercise = $lockedExercise;
             } else {
-                $exercise = $this->createExercise($lesson, $data, $actor);
+                $sortOrder = $data['sort_order'] ?? null;
+                if ($sortOrder === null) {
+                    $maxOrder = Exercise::query()
+                        ->where('center_id', $lockedLesson->center_id)
+                        ->where('lesson_id', $lockedLesson->id)
+                        ->max('sort_order');
+                    $sortOrder = $maxOrder !== null ? $maxOrder + 1 : 0;
+                }
+
+                $exercise = Exercise::query()->create([
+                    'center_id' => $lockedLesson->center_id,
+                    'lesson_id' => $lockedLesson->id,
+                    'title' => $data['title'],
+                    'instructions' => $data['instructions'] ?? null,
+                    'max_attempts' => $data['max_attempts'] ?? null,
+                    'passing_score' => $data['passing_score'] ?? 70.00,
+                    'show_correct_answers_after_submission' => (bool) ($data['show_correct_answers_after_submission'] ?? false),
+                    'sort_order' => $sortOrder,
+                    'status' => Exercise::STATUS_DRAFT,
+                    'published_at' => null,
+                ]);
             }
 
             if (isset($data['questions']) && is_array($data['questions'])) {
@@ -103,94 +169,108 @@ class AdminExerciseService
 
     /**
      * Synchronize questions and options for an exercise.
-     * Enforces strict ID validation to prevent accidental deletion, foreign ID injection, or duplicate IDs.
+     * Enforces locking on Lesson -> Exercise -> Questions, followed by strict ID validation.
      */
     public function syncQuestionsAndOptions(
         Exercise $exercise,
         array $questionsData
     ): void {
-        $this->revisionService->assertExerciseCanBeModified($exercise);
+        DB::transaction(function () use ($exercise, $questionsData): void {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $exercise->center_id)
+                ->whereKey($exercise->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        // Pre-validation: Strictly validate question and option IDs before modifying anything.
-        $submittedQuestionIds = [];
-        $existingQuestionIdsInDb = Question::query()
-            ->where('center_id', $exercise->center_id)
-            ->where('exercise_id', $exercise->id)
-            ->pluck('id')
-            ->map(fn ($id) => (int) $id)
-            ->all();
+            $lockedExercise = Exercise::query()
+                ->where('center_id', $lockedLesson->center_id)
+                ->where('lesson_id', $lockedLesson->id)
+                ->whereKey($exercise->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        foreach ($questionsData as $qIndex => $qData) {
-            $qId = $qData['id'] ?? null;
-            if ($qId !== null) {
-                if (! is_numeric($qId) || (int) $qId <= 0) {
-                    throw ValidationException::withMessages([
-                        "questions.{$qIndex}.id" => ['Invalid question ID provided.'],
-                    ]);
-                }
-                $qId = (int) $qId;
-                if (in_array($qId, $submittedQuestionIds, true)) {
-                    throw ValidationException::withMessages([
-                        "questions.{$qIndex}.id" => ["Duplicate question ID {$qId} in payload."],
-                    ]);
-                }
-                if (! in_array($qId, $existingQuestionIdsInDb, true)) {
-                    throw ValidationException::withMessages([
-                        "questions.{$qIndex}.id" => ["Question ID {$qId} does not belong to this exercise."],
-                    ]);
-                }
-                $submittedQuestionIds[] = $qId;
-            }
+            $this->revisionService->assertExerciseCanBeModified($lockedExercise);
 
-            // Validate options for this question
-            if (isset($qData['options']) && is_array($qData['options'])) {
-                $submittedOptionIds = [];
-                $existingOptionIdsForQuestion = [];
+            // Pre-validation: Strictly validate question and option IDs while locks are held.
+            $submittedQuestionIds = [];
+            $existingQuestionIdsInDb = Question::query()
+                ->where('center_id', $lockedExercise->center_id)
+                ->where('exercise_id', $lockedExercise->id)
+                ->lockForUpdate()
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->all();
+
+            foreach ($questionsData as $qIndex => $qData) {
+                $qId = $qData['id'] ?? null;
                 if ($qId !== null) {
-                    $existingOptionIdsForQuestion = QuestionOption::query()
-                        ->where('center_id', $exercise->center_id)
-                        ->where('question_id', $qId)
-                        ->pluck('id')
-                        ->map(fn ($id) => (int) $id)
-                        ->all();
+                    if (! is_numeric($qId) || (int) $qId <= 0) {
+                        throw ValidationException::withMessages([
+                            "questions.{$qIndex}.id" => ['Invalid question ID provided.'],
+                        ]);
+                    }
+                    $qId = (int) $qId;
+                    if (in_array($qId, $submittedQuestionIds, true)) {
+                        throw ValidationException::withMessages([
+                            "questions.{$qIndex}.id" => ["Duplicate question ID {$qId} in payload."],
+                        ]);
+                    }
+                    if (! in_array($qId, $existingQuestionIdsInDb, true)) {
+                        throw ValidationException::withMessages([
+                            "questions.{$qIndex}.id" => ["Question ID {$qId} does not belong to this exercise."],
+                        ]);
+                    }
+                    $submittedQuestionIds[] = $qId;
                 }
 
-                foreach ($qData['options'] as $oIndex => $oData) {
-                    $oId = $oData['id'] ?? null;
-                    if ($oId !== null) {
-                        if (! is_numeric($oId) || (int) $oId <= 0) {
-                            throw ValidationException::withMessages([
-                                "questions.{$qIndex}.options.{$oIndex}.id" => ['Invalid option ID provided.'],
-                            ]);
+                // Validate options for this question
+                if (isset($qData['options']) && is_array($qData['options'])) {
+                    $submittedOptionIds = [];
+                    $existingOptionIdsForQuestion = [];
+                    if ($qId !== null) {
+                        $existingOptionIdsForQuestion = QuestionOption::query()
+                            ->where('center_id', $lockedExercise->center_id)
+                            ->where('question_id', $qId)
+                            ->lockForUpdate()
+                            ->pluck('id')
+                            ->map(fn ($id) => (int) $id)
+                            ->all();
+                    }
+
+                    foreach ($qData['options'] as $oIndex => $oData) {
+                        $oId = $oData['id'] ?? null;
+                        if ($oId !== null) {
+                            if (! is_numeric($oId) || (int) $oId <= 0) {
+                                throw ValidationException::withMessages([
+                                    "questions.{$qIndex}.options.{$oIndex}.id" => ['Invalid option ID provided.'],
+                                ]);
+                            }
+                            $oId = (int) $oId;
+                            if (in_array($oId, $submittedOptionIds, true)) {
+                                throw ValidationException::withMessages([
+                                    "questions.{$qIndex}.options.{$oIndex}.id" => ["Duplicate option ID {$oId} in question."],
+                                ]);
+                            }
+                            if ($qId === null) {
+                                throw ValidationException::withMessages([
+                                    "questions.{$qIndex}.options.{$oIndex}.id" => ["New question cannot reference existing option ID {$oId}."],
+                                ]);
+                            }
+                            if (! in_array($oId, $existingOptionIdsForQuestion, true)) {
+                                throw ValidationException::withMessages([
+                                    "questions.{$qIndex}.options.{$oIndex}.id" => ["Option ID {$oId} does not belong to Question ID {$qId}."],
+                                ]);
+                            }
+                            $submittedOptionIds[] = $oId;
                         }
-                        $oId = (int) $oId;
-                        if (in_array($oId, $submittedOptionIds, true)) {
-                            throw ValidationException::withMessages([
-                                "questions.{$qIndex}.options.{$oIndex}.id" => ["Duplicate option ID {$oId} in question."],
-                            ]);
-                        }
-                        // If question is new ($qId is null), it cannot have existing option IDs
-                        if ($qId === null) {
-                            throw ValidationException::withMessages([
-                                "questions.{$qIndex}.options.{$oIndex}.id" => ["New question cannot reference existing option ID {$oId}."],
-                            ]);
-                        }
-                        if (! in_array($oId, $existingOptionIdsForQuestion, true)) {
-                            throw ValidationException::withMessages([
-                                "questions.{$qIndex}.options.{$oIndex}.id" => ["Option ID {$oId} does not belong to Question ID {$qId}."],
-                            ]);
-                        }
-                        $submittedOptionIds[] = $oId;
                     }
                 }
             }
-        }
 
-        DB::transaction(function () use ($exercise, $questionsData, $submittedQuestionIds): void {
             // Delete questions not present in the payload
             Question::query()
-                ->where('center_id', $exercise->center_id)
-                ->where('exercise_id', $exercise->id)
+                ->where('center_id', $lockedExercise->center_id)
+                ->where('exercise_id', $lockedExercise->id)
                 ->whereNotIn('id', $submittedQuestionIds)
                 ->delete();
 
@@ -202,8 +282,9 @@ class AdminExerciseService
 
                 if ($qId !== null) {
                     $q = Question::query()
-                        ->where('center_id', $exercise->center_id)
-                        ->where('exercise_id', $exercise->id)
+                        ->where('center_id', $lockedExercise->center_id)
+                        ->where('exercise_id', $lockedExercise->id)
+                        ->lockForUpdate()
                         ->findOrFail($qId);
 
                     $q->update([
@@ -215,8 +296,8 @@ class AdminExerciseService
                     ]);
                 } else {
                     $q = Question::query()->create([
-                        'center_id' => $exercise->center_id,
-                        'exercise_id' => $exercise->id,
+                        'center_id' => $lockedExercise->center_id,
+                        'exercise_id' => $lockedExercise->id,
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'],
                         'explanation' => $qData['explanation'] ?? null,
@@ -232,7 +313,7 @@ class AdminExerciseService
                     ));
 
                     QuestionOption::query()
-                        ->where('center_id', $exercise->center_id)
+                        ->where('center_id', $lockedExercise->center_id)
                         ->where('question_id', $q->id)
                         ->whereNotIn('id', $submittedOptIds)
                         ->delete();
@@ -244,8 +325,9 @@ class AdminExerciseService
 
                         if ($oId !== null) {
                             $opt = QuestionOption::query()
-                                ->where('center_id', $exercise->center_id)
+                                ->where('center_id', $lockedExercise->center_id)
                                 ->where('question_id', $q->id)
+                                ->lockForUpdate()
                                 ->findOrFail($oId);
 
                             $opt->update([
@@ -255,7 +337,7 @@ class AdminExerciseService
                             ]);
                         } else {
                             QuestionOption::query()->create([
-                                'center_id' => $exercise->center_id,
+                                'center_id' => $lockedExercise->center_id,
                                 'question_id' => $q->id,
                                 'option_text' => $oData['option_text'],
                                 'is_correct' => $isCorrect,
@@ -270,84 +352,114 @@ class AdminExerciseService
 
     /**
      * Publish an exercise after comprehensive validation.
+     * Follows strict lock order: 1. Owning Lesson -> 2. Exercise -> 3. assertExerciseCanBeModified.
      */
     public function publishExercise(
         Exercise $exercise,
         User $actor
     ): Exercise {
-        $this->revisionService->assertExerciseCanBeModified($exercise);
+        return DB::transaction(function () use ($exercise): Exercise {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $exercise->center_id)
+                ->whereKey($exercise->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        if (trim((string) $exercise->title) === '') {
-            throw ValidationException::withMessages([
-                'title' => ['An exercise title is required before publication.'],
+            $lockedExercise = Exercise::query()
+                ->where('center_id', $lockedLesson->center_id)
+                ->where('lesson_id', $lockedLesson->id)
+                ->whereKey($exercise->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->revisionService->assertExerciseCanBeModified($lockedExercise);
+
+            if (trim((string) $lockedExercise->title) === '') {
+                throw ValidationException::withMessages([
+                    'title' => ['An exercise title is required before publication.'],
+                ]);
+            }
+
+            $questions = $lockedExercise->questions()->with('options')->lockForUpdate()->get();
+
+            if ($questions->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'questions' => ['An exercise must contain at least one question before publication.'],
+                ]);
+            }
+
+            foreach ($questions as $question) {
+                if (trim((string) $question->prompt) === '') {
+                    throw ValidationException::withMessages([
+                        'questions' => ["Question #{$question->id} must have a prompt."],
+                    ]);
+                }
+
+                if ((float) $question->points <= 0) {
+                    throw ValidationException::withMessages([
+                        'questions' => ["Question #{$question->id} points must be greater than zero."],
+                    ]);
+                }
+
+                if (! in_array($question->question_type, Question::TYPES, true)) {
+                    throw ValidationException::withMessages([
+                        'questions' => ["Question #{$question->id} has an invalid question type."],
+                    ]);
+                }
+
+                $errors = $question->optionConfigurationErrors();
+                if ($errors !== []) {
+                    throw ValidationException::withMessages([
+                        'questions' => array_map(
+                            fn (string $err): string => "Question #{$question->id}: {$err}",
+                            $errors
+                        ),
+                    ]);
+                }
+            }
+
+            $lockedExercise->update([
+                'status' => Exercise::STATUS_PUBLISHED,
+                'published_at' => now(),
             ]);
-        }
 
-        $questions = $exercise->questions()->with('options')->get();
-
-        if ($questions->isEmpty()) {
-            throw ValidationException::withMessages([
-                'questions' => ['An exercise must contain at least one question before publication.'],
-            ]);
-        }
-
-        foreach ($questions as $question) {
-            if (trim((string) $question->prompt) === '') {
-                throw ValidationException::withMessages([
-                    'questions' => ["Question #{$question->id} must have a prompt."],
-                ]);
-            }
-
-            if ((float) $question->points <= 0) {
-                throw ValidationException::withMessages([
-                    'questions' => ["Question #{$question->id} points must be greater than zero."],
-                ]);
-            }
-
-            if (! in_array($question->question_type, Question::TYPES, true)) {
-                throw ValidationException::withMessages([
-                    'questions' => ["Question #{$question->id} has an invalid question type."],
-                ]);
-            }
-
-            $errors = $question->optionConfigurationErrors();
-            if ($errors !== []) {
-                throw ValidationException::withMessages([
-                    'questions' => array_map(
-                        fn (string $err): string => "Question #{$question->id}: {$err}",
-                        $errors
-                    ),
-                ]);
-            }
-        }
-
-        $exercise->update([
-            'status' => Exercise::STATUS_PUBLISHED,
-            'published_at' => now(),
-        ]);
-
-        return $exercise->fresh(['questions.options']);
+            return $lockedExercise->fresh(['questions.options']);
+        });
     }
 
     /**
      * Delete an exercise.
+     * Follows strict lock order: 1. Owning Lesson -> 2. Exercise -> 3. assertExerciseCanBeModified.
      */
     public function deleteExercise(Exercise $exercise): void
     {
-        $this->revisionService->assertExerciseCanBeModified($exercise);
-
         DB::transaction(function () use ($exercise): void {
+            $lockedLesson = Lesson::query()
+                ->forCenter((int) $exercise->center_id)
+                ->whereKey($exercise->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $lockedExercise = Exercise::query()
+                ->where('center_id', $lockedLesson->center_id)
+                ->where('lesson_id', $lockedLesson->id)
+                ->whereKey($exercise->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->revisionService->assertExerciseCanBeModified($lockedExercise);
+
             // Delete options first, then questions, then exercise.
             QuestionOption::query()
-                ->where('center_id', $exercise->center_id)
+                ->where('center_id', $lockedExercise->center_id)
                 ->whereIn(
                     'question_id',
-                    $exercise->questions()->select('id')
+                    $lockedExercise->questions()->select('id')
                 )
                 ->delete();
 
-            $exercise->questions()->delete();
-            $exercise->delete();
+            $lockedExercise->questions()->delete();
+            $lockedExercise->delete();
         });
     }
 }

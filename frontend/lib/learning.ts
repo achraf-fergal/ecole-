@@ -579,6 +579,59 @@ async function requestLearningData<T>(
   return body.data as T;
 }
 
+/**
+ * Perform an authenticated request against the learning API expecting paginated data.
+ */
+async function requestLearningPaginatedData<T>(
+  endpoint: string,
+  init: RequestInit = {}
+): Promise<{ data: T[]; meta: PaginationMeta }> {
+  if (typeof window === "undefined") {
+    throw new Error(
+      "Learning API requests must run in the browser."
+    );
+  }
+
+  let response: Response;
+
+  try {
+    response = await authFetch(endpoint, {
+      ...init,
+      cache: "no-store",
+    });
+  } catch {
+    throw new LearningApiError(
+      "Unable to connect to the learning service.",
+      0
+    );
+  }
+
+  const body = await readResponseBody(response);
+
+  if (!response.ok) {
+    throw new LearningApiError(
+      getApiErrorMessage(
+        body,
+        "Learning request failed."
+      ),
+      response.status,
+      getValidationErrors(body)
+    );
+  }
+
+  if (!isRecord(body) || !("data" in body) || !("meta" in body)) {
+    throw new LearningApiError(
+      "Invalid learning API paginated response.",
+      response.status
+    );
+  }
+
+  return {
+    data: body.data as T[],
+    meta: body.meta as PaginationMeta,
+  };
+}
+
 /*
 |--------------------------------------------------------------------------
 | Learning Overview API
@@ -831,6 +884,18 @@ export interface ExerciseCurrentAttemptState {
   latest_completed_attempt: ExerciseAttemptData | null;
 }
 
+export interface PaginationMeta {
+  current_page: number;
+  last_page: number;
+  per_page: number;
+  total: number;
+}
+
+export interface PaginatedExerciseAttempts {
+  data: ExerciseAttemptData[];
+  meta: PaginationMeta;
+}
+
 export interface SaveAttemptAnswerPayload {
   question_id: number;
   selected_option_id: number | null;
@@ -897,15 +962,16 @@ export async function submitExerciseAttempt(
 }
 
 /**
- * Retrieve completed attempt history.
+ * Retrieve completed attempt history with pagination metadata.
  */
 export async function getExerciseAttemptHistory(
   params: LearningRouteParams,
-  exerciseId: number
-): Promise<ExerciseAttemptData[]> {
-  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/history`;
+  exerciseId: number,
+  page: number = 1
+): Promise<PaginatedExerciseAttempts> {
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/history?page=${page}`;
 
-  return requestLearningData<ExerciseAttemptData[]>(endpoint, {
+  return requestLearningPaginatedData<ExerciseAttemptData>(endpoint, {
     method: "GET",
   });
 }

@@ -13,9 +13,10 @@ use App\Models\ExerciseAttempt;
 use App\Models\Language;
 use App\Models\Lesson;
 use App\Models\LessonBlock;
-use App\Models\LessonRevision;
 use App\Models\Level;
+use App\Models\PlatformAdmin;
 use App\Models\Question;
+use App\Models\QuestionOption;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
@@ -110,6 +111,52 @@ class AssessmentEngineTest extends TestCase
             'studentProfile' => $studentProfile,
             'enrollment' => $enrollment,
         ];
+    }
+
+    private function createPublishedExercise(array $context, bool $showCorrectAnswers): Exercise
+    {
+        $token = $this->tokenFor($context['user']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+        ];
+
+        $response = $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'Assessment Authorization Fixture',
+                'show_correct_answers_after_submission' => $showCorrectAnswers,
+                'questions' => [
+                    [
+                        'prompt' => 'Which option is correct?',
+                        'explanation' => 'This explanation follows the attempt release policy.',
+                        'options' => [
+                            ['option_text' => 'Correct', 'is_correct' => true],
+                            ['option_text' => 'Incorrect', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $response->assertCreated();
+
+        $exerciseId = (int) $response->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                ...$routeParameters,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($context['lesson'], $context['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($context['lesson'], $context['user']);
+
+        return Exercise::query()->findOrFail($exerciseId);
     }
 
     public function test_center_admin_can_create_and_update_draft_exercise(): void
@@ -577,14 +624,93 @@ class AssessmentEngineTest extends TestCase
 
         $token = $this->tokenFor($unenrolledUser);
 
+        $attemptRouteParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+            'exercise' => $exerciseId,
+        ];
+
         $this->withHeader('Authorization', "Bearer {$token}")->getJson(
-            route('api.centers.courses.learn.lessons.exercises.attempts.current', [
-                'center' => $ctx['center']->slug,
-                'course' => $ctx['course']->slug,
-                'lesson' => $ctx['lesson']->id,
-                'exercise' => $exerciseId,
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', $attemptRouteParameters)
+        )->assertForbidden();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $attemptRouteParameters)
+        )->assertForbidden();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', $attemptRouteParameters),
+            ['answers' => []]
+        )->assertForbidden();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $attemptRouteParameters),
+            ['answers' => []]
+        )->assertForbidden();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.history', $attemptRouteParameters)
+        )->assertForbidden();
+
+        $this->assertDatabaseCount('exercise_attempts', 0);
+    }
+
+    public function test_center_admin_without_student_membership_cannot_use_assessments(): void
+    {
+        $context = $this->createAdminContext();
+        $exercise = $this->createPublishedExercise($context, true);
+        $token = $this->tokenFor($context['user']);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+                'exercise' => $exercise->id,
             ])
         )->assertForbidden();
+
+        $this->assertDatabaseCount('exercise_attempts', 0);
+    }
+
+    public function test_platform_admin_without_course_enrollment_cannot_use_assessments(): void
+    {
+        $context = $this->createAdminContext();
+        $exercise = $this->createPublishedExercise($context, true);
+
+        $platformUser = User::factory()->create([
+            'email_verified_at' => now(),
+        ]);
+        PlatformAdmin::query()->create([
+            'user_id' => $platformUser->id,
+        ]);
+        $membership = CenterUser::query()->create([
+            'center_id' => $context['center']->id,
+            'user_id' => $platformUser->id,
+            'status' => 'active',
+        ]);
+        $studentRole = Role::query()->where('key', 'student')->firstOrFail();
+        $membership->roles()->attach($studentRole->id);
+        StudentProfile::factory()->forMembership($membership)->create();
+
+        $token = $this->tokenFor($platformUser);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+            'exercise' => $exercise->id,
+        ];
+
+        $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', $routeParameters)
+        )->assertForbidden();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
+        )->assertForbidden();
+
+        $this->assertDatabaseCount('exercise_attempts', 0);
     }
 
     public function test_dual_role_admin_without_course_enrollment_is_denied_assessment(): void
@@ -870,6 +996,37 @@ class AssessmentEngineTest extends TestCase
             ['answers' => []]
         )->assertOk();
 
+        $attempt = ExerciseAttempt::query()
+            ->where('exercise_id', $exerciseId)
+            ->where('student_profile_id', $studentCtx['studentProfile']->id)
+            ->firstOrFail();
+
+        $originalScore = $attempt->score;
+        $originalSubmittedAt = $attempt->submitted_at?->toIso8601String();
+        $originalGradedAt = $attempt->graded_at?->toIso8601String();
+
+        // Explicitly send a second POST submit request after first successful submission
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            ['answers' => []]
+        )->assertNotFound();
+
+        // Verify the second submission cannot modify the graded attempt
+        $attempt->refresh();
+        $this->assertSame(ExerciseAttempt::STATUS_GRADED, $attempt->status);
+        $this->assertSame((float) $originalScore, (float) $attempt->score);
+        $this->assertSame($originalSubmittedAt, $attempt->submitted_at?->toIso8601String());
+        $this->assertSame($originalGradedAt, $attempt->graded_at?->toIso8601String());
+
+        // Verify no answers are graded twice
+        $this->assertCount(1, $attempt->answers);
+        $this->assertSame((float) $originalScore, (float) $attempt->answers->first()->points_awarded);
+
         // Cannot save answers on completed attempt
         $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.save', [
@@ -894,7 +1051,7 @@ class AssessmentEngineTest extends TestCase
                 'exercise' => $exerciseId,
             ])
         )->assertUnprocessable()
-         ->assertJsonValidationErrors(['attempt']);
+            ->assertJsonValidationErrors(['attempt']);
     }
 
     public function test_question_and_option_id_integrity_validation(): void
@@ -918,14 +1075,112 @@ class AssessmentEngineTest extends TestCase
                             ['option_text' => 'Opt 2', 'is_correct' => false],
                         ],
                     ],
+                    [
+                        'prompt' => 'Legitimate Q2',
+                        'options' => [
+                            ['option_text' => 'Q2 Opt 1', 'is_correct' => true],
+                            ['option_text' => 'Q2 Opt 2', 'is_correct' => false],
+                        ],
+                    ],
                 ],
             ]
         );
+        $createRes->assertCreated();
         $exerciseId = $createRes->json('data.id');
-        $qId = $createRes->json('data.questions.0.id');
-        $optId = $createRes->json('data.questions.0.options.0.id');
+        $q1Id = $createRes->json('data.questions.0.id');
+        $q2Id = $createRes->json('data.questions.1.id');
+        $q1OptionId = $createRes->json('data.questions.0.options.0.id');
+        $q2OptionId = $createRes->json('data.questions.1.options.0.id');
 
-        // 1. Update with a non-existent / foreign question ID
+        $otherContext = $this->createAdminContext();
+        $otherAdminToken = $this->tokenFor($otherContext['user']);
+        $foreignExerciseResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$otherAdminToken}"
+        )->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $otherContext['center']->slug,
+                'course' => $otherContext['course']->slug,
+                'lesson' => $otherContext['lesson']->id,
+            ]),
+            [
+                'title' => 'Foreign Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Foreign Question',
+                        'options' => [
+                            ['option_text' => 'Foreign Correct', 'is_correct' => true],
+                            ['option_text' => 'Foreign Incorrect', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $foreignExerciseResponse->assertCreated();
+        $foreignQuestionId = $foreignExerciseResponse->json('data.questions.0.id');
+
+        $originalQuestionRows = Question::query()
+            ->where('center_id', $ctx['center']->id)
+            ->where('exercise_id', $exerciseId)
+            ->orderBy('id')
+            ->get()
+            ->map(fn (Question $question): array => [
+                'id' => $question->id,
+                'prompt' => $question->prompt,
+                'sort_order' => $question->sort_order,
+            ])
+            ->all();
+        $originalOptionRows = QuestionOption::query()
+            ->where('center_id', $ctx['center']->id)
+            ->whereIn('question_id', [$q1Id, $q2Id])
+            ->orderBy('id')
+            ->get()
+            ->map(fn (QuestionOption $option): array => [
+                'id' => $option->id,
+                'question_id' => $option->question_id,
+                'option_text' => $option->option_text,
+                'is_correct' => $option->is_correct,
+                'sort_order' => $option->sort_order,
+            ])
+            ->all();
+        $assertOriginalRowsRemain = function () use (
+            $ctx,
+            $exerciseId,
+            $q1Id,
+            $q2Id,
+            $originalQuestionRows,
+            $originalOptionRows
+        ): void {
+            $currentQuestions = Question::query()
+                ->where('center_id', $ctx['center']->id)
+                ->where('exercise_id', $exerciseId)
+                ->orderBy('id')
+                ->get()
+                ->map(fn (Question $question): array => [
+                    'id' => $question->id,
+                    'prompt' => $question->prompt,
+                    'sort_order' => $question->sort_order,
+                ])
+                ->all();
+            $currentOptions = QuestionOption::query()
+                ->where('center_id', $ctx['center']->id)
+                ->whereIn('question_id', [$q1Id, $q2Id])
+                ->orderBy('id')
+                ->get()
+                ->map(fn (QuestionOption $option): array => [
+                    'id' => $option->id,
+                    'question_id' => $option->question_id,
+                    'option_text' => $option->option_text,
+                    'is_correct' => $option->is_correct,
+                    'sort_order' => $option->sort_order,
+                ])
+                ->all();
+
+            $this->assertSame($originalQuestionRows, $currentQuestions);
+            $this->assertSame($originalOptionRows, $currentOptions);
+        };
+
+        // A question ID from another center and exercise must be rejected before any deletes.
         $updateRes1 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
             route('api.centers.admin.learning.exercises.update', [
                 'center' => $ctx['center']->slug,
@@ -937,7 +1192,7 @@ class AssessmentEngineTest extends TestCase
                 'title' => 'Integrity Check Quiz',
                 'questions' => [
                     [
-                        'id' => 99999,
+                        'id' => $foreignQuestionId,
                         'prompt' => 'Hacked Question',
                         'options' => [
                             ['option_text' => 'Opt 1', 'is_correct' => true],
@@ -948,9 +1203,7 @@ class AssessmentEngineTest extends TestCase
             ]
         );
         $updateRes1->assertUnprocessable();
-
-        // Verify database was NOT touched
-        $this->assertDatabaseHas('questions', ['id' => $qId, 'prompt' => 'Legitimate Q1']);
+        $assertOriginalRowsRemain();
 
         // 2. Update with duplicate question IDs in payload
         $updateRes2 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
@@ -964,12 +1217,12 @@ class AssessmentEngineTest extends TestCase
                 'title' => 'Integrity Check Quiz',
                 'questions' => [
                     [
-                        'id' => $qId,
+                        'id' => $q1Id,
                         'prompt' => 'Dup Q',
                         'options' => [['option_text' => 'A', 'is_correct' => true], ['option_text' => 'B', 'is_correct' => false]],
                     ],
                     [
-                        'id' => $qId,
+                        'id' => $q1Id,
                         'prompt' => 'Dup Q 2',
                         'options' => [['option_text' => 'C', 'is_correct' => true], ['option_text' => 'D', 'is_correct' => false]],
                     ],
@@ -977,8 +1230,9 @@ class AssessmentEngineTest extends TestCase
             ]
         );
         $updateRes2->assertUnprocessable();
+        $assertOriginalRowsRemain();
 
-        // 3. New question referencing existing option ID
+        // A new question cannot claim an existing option ID.
         $updateRes3 = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
             route('api.centers.admin.learning.exercises.update', [
                 'center' => $ctx['center']->slug,
@@ -992,7 +1246,7 @@ class AssessmentEngineTest extends TestCase
                     [
                         'prompt' => 'New Question without ID',
                         'options' => [
-                            ['id' => $optId, 'option_text' => 'Stolen Option', 'is_correct' => true],
+                            ['id' => $q1OptionId, 'option_text' => 'Stolen Option', 'is_correct' => true],
                             ['option_text' => 'Normal Option', 'is_correct' => false],
                         ],
                     ],
@@ -1000,6 +1254,57 @@ class AssessmentEngineTest extends TestCase
             ]
         );
         $updateRes3->assertUnprocessable();
+        $assertOriginalRowsRemain();
+
+        // Duplicate option IDs in one question are rejected without changing either question.
+        $duplicateOptionsResponse = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'id' => $q1Id,
+                        'prompt' => 'Duplicate Option Question',
+                        'options' => [
+                            ['id' => $q1OptionId, 'option_text' => 'Duplicate A', 'is_correct' => true],
+                            ['id' => $q1OptionId, 'option_text' => 'Duplicate B', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $duplicateOptionsResponse->assertUnprocessable();
+        $assertOriginalRowsRemain();
+
+        // An option belonging to another question cannot be reassigned.
+        $crossQuestionOptionResponse = $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Integrity Check Quiz',
+                'questions' => [
+                    [
+                        'id' => $q1Id,
+                        'prompt' => 'Cross Question Option',
+                        'options' => [
+                            ['id' => $q2OptionId, 'option_text' => 'Stolen Between Questions', 'is_correct' => true],
+                            ['option_text' => 'New Option', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $crossQuestionOptionResponse->assertUnprocessable();
+        $assertOriginalRowsRemain();
     }
 
     public function test_atomically_author_and_insert_exercise_block(): void
@@ -1047,5 +1352,325 @@ class AssessmentEngineTest extends TestCase
             'block_type' => 'exercise',
             'exercise_id' => $res->json('data.exercise.id'),
         ]);
+    }
+
+    public function test_author_and_insert_rolls_back_when_revision_is_not_the_current_draft(): void
+    {
+        $context = $this->createAdminContext();
+        $token = $this->tokenFor($context['user']);
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $revision = $revisionService->createDraft($context['lesson'], $context['user']);
+        $revisionService->publish($context['lesson'], $context['user']);
+
+        $initialExerciseCount = Exercise::query()->count();
+        $initialQuestionCount = Question::query()->count();
+        $initialBlockCount = LessonBlock::query()->count();
+
+        $response = $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.content.blocks.exercise.author-and-insert', [
+                'center' => $context['center']->slug,
+                'course' => $context['course']->slug,
+                'lesson' => $context['lesson']->id,
+                'revision' => $revision->id,
+            ]),
+            [
+                'title' => 'Must Roll Back',
+                'questions' => [
+                    [
+                        'prompt' => 'Rollback question',
+                        'options' => [
+                            ['option_text' => 'Correct', 'is_correct' => true],
+                            ['option_text' => 'Incorrect', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+
+        $response->assertUnprocessable();
+        $this->assertSame($initialExerciseCount, Exercise::query()->count());
+        $this->assertSame($initialQuestionCount, Question::query()->count());
+        $this->assertSame($initialBlockCount, LessonBlock::query()->count());
+    }
+
+    public function test_attempt_history_is_paginated_and_respects_each_attempt_release_snapshot(): void
+    {
+        $context = $this->createAdminContext();
+        $exercise = $this->createPublishedExercise($context, false);
+        $student = $this->createStudentContext(
+            $context['center'],
+            $context['course'],
+            $context['lesson']
+        );
+        $token = $this->tokenFor($student['studentUser']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+            'exercise' => $exercise->id,
+        ];
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
+        )->assertCreated();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $routeParameters),
+            ['answers' => []]
+        )->assertOk()
+            ->assertJsonPath('data.show_correct_answers', false)
+            ->assertJsonMissingPath('data.questions.0.correct_option_id')
+            ->assertJsonMissingPath('data.questions.0.explanation');
+
+        // The attempt keeps its original release setting when the exercise setting changes.
+        $exercise->update([
+            'show_correct_answers_after_submission' => true,
+        ]);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
+        )->assertCreated();
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $routeParameters),
+            ['answers' => []]
+        )->assertOk()
+            ->assertJsonPath('data.show_correct_answers', true)
+            ->assertJsonPath('data.questions.0.correct_option_id', $exercise->questions()->firstOrFail()->options()->where('is_correct', true)->value('id'))
+            ->assertJsonPath('data.questions.0.explanation', 'This explanation follows the attempt release policy.');
+
+        // Keep a third active attempt to verify history includes completed attempts only.
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
+        )->assertCreated();
+
+        $historyRouteParameters = [
+            ...$routeParameters,
+            'per_page' => 1,
+            'page' => 1,
+        ];
+        $firstPage = $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.history', $historyRouteParameters)
+        );
+
+        $firstPage->assertOk()
+            ->assertJsonPath('meta.current_page', 1)
+            ->assertJsonPath('meta.last_page', 2)
+            ->assertJsonPath('meta.per_page', 1)
+            ->assertJsonPath('meta.total', 2)
+            ->assertJsonPath('data.0.attempt_number', 2)
+            ->assertJsonPath('data.0.show_correct_answers', true)
+            ->assertJsonPath('data.0.questions.0.correct_option_id', $exercise->questions()->firstOrFail()->options()->where('is_correct', true)->value('id'))
+            ->assertJsonPath('data.0.questions.0.explanation', 'This explanation follows the attempt release policy.');
+
+        $historyRouteParameters['page'] = 2;
+        $secondPage = $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.history', $historyRouteParameters)
+        );
+
+        $secondPage->assertOk()
+            ->assertJsonPath('meta.current_page', 2)
+            ->assertJsonPath('data.0.attempt_number', 1)
+            ->assertJsonPath('data.0.show_correct_answers', false)
+            ->assertJsonMissingPath('data.0.questions.0.correct_option_id')
+            ->assertJsonMissingPath('data.0.questions.0.explanation');
+    }
+
+    public function test_strict_answer_payload_validation(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Payload Validation Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Question One',
+                        'options' => [
+                            ['option_text' => 'Q1 Opt 1', 'is_correct' => true],
+                            ['option_text' => 'Q1 Opt 2', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'prompt' => 'Question Two',
+                        'options' => [
+                            ['option_text' => 'Q2 Opt 1', 'is_correct' => true],
+                            ['option_text' => 'Q2 Opt 2', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+        $q1Id = $createRes->json('data.questions.0.id');
+        $q1Opt1 = $createRes->json('data.questions.0.options.0.id');
+        $q2Id = $createRes->json('data.questions.1.id');
+        $q2Opt1 = $createRes->json('data.questions.1.options.0.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        $studentCtx = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentCtx['studentUser']);
+
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertCreated();
+
+        // 1. Reject duplicate question_id in answers payload
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'answers' => [
+                    ['question_id' => $q1Id, 'selected_option_id' => $q1Opt1],
+                    ['question_id' => $q1Id, 'selected_option_id' => null],
+                ],
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['answers']);
+
+        // 2. Reject foreign question ID
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'answers' => [
+                    ['question_id' => 99999, 'selected_option_id' => null],
+                ],
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['answers']);
+
+        // 3. Reject option from another question
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'answers' => [
+                    ['question_id' => $q1Id, 'selected_option_id' => $q2Opt1],
+                ],
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['answers']);
+
+        // 4. Incomplete answer array with null selection is allowed
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'answers' => [
+                    ['question_id' => $q1Id, 'selected_option_id' => null],
+                ],
+            ]
+        )->assertOk();
+    }
+
+    public function test_published_exercise_immutability_is_protected(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+
+        $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Immutable Quiz',
+                'questions' => [
+                    [
+                        'prompt' => 'Immutability Q1',
+                        'options' => [
+                            ['option_text' => 'Yes', 'is_correct' => true],
+                            ['option_text' => 'No', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        );
+        $exerciseId = $createRes->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        // Now that the lesson revision is published, modifying the exercise must fail
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->putJson(
+            route('api.centers.admin.learning.exercises.update', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            [
+                'title' => 'Attempted Rename',
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['exercise']);
+
+        // Deleting the exercise must fail
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->deleteJson(
+            route('api.centers.admin.learning.exercises.destroy', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ])
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['exercise']);
     }
 }

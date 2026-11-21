@@ -612,9 +612,54 @@ class LessonRevisionService
                 );
             }
 
+            // Lock referenced exercises in deterministic order (sorted by ID)
+            $exerciseIds = $blocks
+                ->where('block_type', LessonBlock::TYPE_EXERCISE)
+                ->pluck('exercise_id')
+                ->filter()
+                ->unique()
+                ->sort()
+                ->values()
+                ->all();
+
+            $lockedExercises = ! empty($exerciseIds)
+                ? Exercise::query()
+                    ->forCenter($lockedLesson->center_id)
+                    ->where('lesson_id', $lockedLesson->id)
+                    ->whereIn('id', $exerciseIds)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->with(['questions.options'])
+                    ->get()
+                    ->keyBy('id')
+                : collect();
+
+            // Lock referenced media assets in deterministic order (sorted by ID)
+            $assetIds = $blocks
+                ->where('block_type', LessonBlock::TYPE_MEDIA)
+                ->pluck('lesson_asset_id')
+                ->filter()
+                ->unique()
+                ->sort()
+                ->values()
+                ->all();
+
+            $lockedAssets = ! empty($assetIds)
+                ? LessonAsset::query()
+                    ->forCenter($lockedLesson->center_id)
+                    ->where('lesson_id', $lockedLesson->id)
+                    ->whereIn('id', $assetIds)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id')
+                : collect();
+
             $this->validateBlocksForPublication(
                 $lockedLesson,
-                $blocks
+                $blocks,
+                $lockedExercises,
+                $lockedAssets
             );
 
             // Lock and resolve the previous published revision.
@@ -867,7 +912,9 @@ class LessonRevisionService
 
     private function validateBlocksForPublication(
         Lesson $lesson,
-        Collection $blocks
+        Collection $blocks,
+        $lockedExercises = null,
+        $lockedAssets = null
     ): void {
         foreach ($blocks as $block) {
             if ($block->isText()) {
@@ -884,11 +931,13 @@ class LessonRevisionService
             }
 
             if ($block->isMedia()) {
-                $asset = LessonAsset::query()
-                    ->forCenter($lesson->center_id)
-                    ->where('lesson_id', $lesson->id)
-                    ->whereKey($block->lesson_asset_id)
-                    ->first();
+                $asset = ($lockedAssets && $lockedAssets->has($block->lesson_asset_id))
+                    ? $lockedAssets->get($block->lesson_asset_id)
+                    : LessonAsset::query()
+                        ->forCenter($lesson->center_id)
+                        ->where('lesson_id', $lesson->id)
+                        ->whereKey($block->lesson_asset_id)
+                        ->first();
 
                 if (! $asset) {
                     $this->fail(
@@ -903,12 +952,14 @@ class LessonRevisionService
             }
 
             if ($block->isExercise()) {
-                $exercise = Exercise::query()
-                    ->forCenter($lesson->center_id)
-                    ->where('lesson_id', $lesson->id)
-                    ->whereKey($block->exercise_id)
-                    ->with('questions')
-                    ->first();
+                $exercise = ($lockedExercises && $lockedExercises->has($block->exercise_id))
+                    ? $lockedExercises->get($block->exercise_id)
+                    : Exercise::query()
+                        ->forCenter($lesson->center_id)
+                        ->where('lesson_id', $lesson->id)
+                        ->whereKey($block->exercise_id)
+                        ->with(['questions.options'])
+                        ->first();
 
                 if (! $exercise || ! $exercise->isPublished()) {
                     $this->fail(

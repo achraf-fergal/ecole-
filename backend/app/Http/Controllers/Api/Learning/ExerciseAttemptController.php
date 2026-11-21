@@ -12,10 +12,8 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use App\Services\Learning\ExerciseAttemptService;
 use App\Services\Learning\LearningAccessService;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Gate;
 
 class ExerciseAttemptController extends Controller
 {
@@ -177,6 +175,10 @@ class ExerciseAttemptController extends Controller
             ->where('center_id', $center->id)
             ->where('student_profile_id', $studentProfile->id)
             ->where('exercise_id', $exercise->id)
+            ->whereIn('status', [
+                ExerciseAttempt::STATUS_SUBMITTED,
+                ExerciseAttempt::STATUS_GRADED,
+            ])
             ->with('answers')
             ->orderByDesc('attempt_number')
             ->paginate($perPage);

@@ -173,6 +173,8 @@ class ExerciseAttemptService
             // Lock parent row (student profile) inside transaction in consistent order
             // to serialize concurrent requests when no attempt exists yet.
             $lockedStudentProfile = StudentProfile::query()
+                ->where('center_id', $center->id)
+                ->where('status', StudentProfile::STATUS_ACTIVE)
                 ->whereKey($studentProfile->id)
                 ->lockForUpdate()
                 ->firstOrFail();
@@ -304,9 +306,24 @@ class ExerciseAttemptService
             }
 
             $attemptAnswers = $lockedAttempt->answers()->get();
+            $seenQuestionIds = [];
 
             foreach ($answers as $entry) {
-                $questionId = (int) ($entry['question_id'] ?? 0);
+                if (! isset($entry['question_id']) || ! is_numeric($entry['question_id'])) {
+                    throw ValidationException::withMessages([
+                        'answers' => ['Each answer must provide a valid question ID.'],
+                    ]);
+                }
+
+                $questionId = (int) $entry['question_id'];
+
+                if (in_array($questionId, $seenQuestionIds, true)) {
+                    throw ValidationException::withMessages([
+                        'answers' => ["Duplicate answer for Question ID {$questionId} in payload."],
+                    ]);
+                }
+                $seenQuestionIds[] = $questionId;
+
                 $selectedOptionId = isset($entry['selected_option_id']) && $entry['selected_option_id'] !== null
                     ? (int) $entry['selected_option_id']
                     : null;

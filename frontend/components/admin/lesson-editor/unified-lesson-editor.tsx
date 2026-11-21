@@ -130,8 +130,10 @@ export default function UnifiedLessonEditor({
         setMetaDescription(contentData.lesson.description ?? "");
         setMetaDuration("");
       }
+      return true;
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load lesson editor.");
+      return false;
     } finally {
       setIsLoading(false);
     }
@@ -529,8 +531,12 @@ export default function UnifiedLessonEditor({
         },
       ]);
       setComposerMode("none");
-      await loadData();
-      showSuccess("New exercise created, published, and added to the revision timeline!");
+      const refreshed = await loadData();
+      if (refreshed) {
+        showSuccess("New exercise created, published, and added to the revision timeline!");
+      } else {
+        setError("Exercise was created and added, but the lesson could not refresh. Reload the lesson to view it.");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create exercise.");
     } finally {
