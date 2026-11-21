@@ -3,6 +3,13 @@
 import Link from "next/link";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  DragDropProvider,
+  DragOverlay,
+  type DragEndEvent,
+  type DragStartEvent,
+} from "@dnd-kit/react";
+import { isSortable } from "@dnd-kit/react/sortable";
+import {
   getAdminLessonContent,
   createAdminDraft,
   updateAdminDraftMetadata,
@@ -14,6 +21,9 @@ import {
   deleteAdminBlock,
   reorderAdminBlocks,
   publishAdminLesson,
+  getAdminLessonRevisionHistory,
+  getAdminHistoricalRevision,
+  restoreAdminHistoricalRevision,
   getAdminLessonAssets,
   uploadAdminLessonAsset,
   requestAdminVideoUpload,
@@ -22,14 +32,23 @@ import {
   cancelAdminVideoUpload,
   type AdminLessonContent,
   type AdminLessonRevision,
+  type AdminLessonRevisionHistoryItem,
 } from "@/lib/admin-learning";
+import {
+  hasUnsavedLessonChanges,
+  moveBlockInOrder,
+  persistBlockOrderOptimistically,
+} from "@/lib/admin-block-ordering.mjs";
 import type {
+  LessonBlock,
   TipTapDocument,
   LearningLessonAsset,
 } from "@/lib/learning";
 import LessonTextBlock from "@/components/learning/lesson-text-block";
 import LessonMediaBlock from "@/components/learning/lesson-media-block";
 import LessonExerciseBlock from "@/components/learning/lesson-exercise-block";
+import RichTextEditor from "./rich-text-editor";
+import SortableBlockCard from "./sortable-block-card";
 
 interface UnifiedLessonEditorProps {
   centerSlug: string;
@@ -50,8 +69,13 @@ export default function UnifiedLessonEditor({
   const [assets, setAssets] = useState<LearningLessonAsset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isReorderSaving, setIsReorderSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [revisionHistory, setRevisionHistory] = useState<AdminLessonRevisionHistoryItem[]>([]);
+  const [selectedHistoricalRevision, setSelectedHistoricalRevision] = useState<AdminLessonRevision | null>(null);
+  const [isLoadingHistoricalRevision, setIsLoadingHistoricalRevision] = useState(false);
+  const [sortAnnouncement, setSortAnnouncement] = useState("");
 
   // Metadata editing state
   const [isEditingMetadata, setIsEditingMetadata] = useState(false);
@@ -64,9 +88,8 @@ export default function UnifiedLessonEditor({
   const [composerMode, setComposerMode] = useState<"none" | "text" | "media" | "exercise">("none");
 
   // Rich text composer
-  const [textInput, setTextInput] = useState("");
   const [editingBlockId, setEditingBlockId] = useState<number | null>(null);
-  const [editingText, setEditingText] = useState("");
+  const [isTextDirty, setIsTextDirty] = useState(false);
 
   // Media selection/upload
   const [selectedAssetId, setSelectedAssetId] = useState<number | "">("");
@@ -96,6 +119,7 @@ export default function UnifiedLessonEditor({
   const [newExercisePassingScore, setNewExercisePassingScore] = useState<number>(70);
   const [newExerciseMaxAttempts, setNewExerciseMaxAttempts] = useState<number | "">("");
   const [newExerciseShowAnswers, setNewExerciseShowAnswers] = useState<boolean>(true);
+  const [isExerciseDirty, setIsExerciseDirty] = useState(false);
   const [newExerciseQuestions, setNewExerciseQuestions] = useState<
     Array<{
       prompt: string;
@@ -122,18 +146,54 @@ export default function UnifiedLessonEditor({
 
   const routeParams = { centerSlug, courseSlug, lessonId };
 
+  const metadataSource = content?.draft_revision ?? content?.published_revision;
+  const metadataIsDirty = isEditingMetadata && Boolean(content) && (
+    metaTitle !== (metadataSource?.title ?? content?.lesson.title ?? "") ||
+    metaDescription !== (metadataSource?.description ?? content?.lesson.description ?? "") ||
+    metaLocale !== (metadataSource?.content_locale ?? "en") ||
+    metaDuration !== (metadataSource?.duration_minutes ?? "")
+  );
+  const mediaComposerIsDirty = composerMode === "media" && (
+    uploadFile !== null
+    || selectedAssetId !== ""
+    || uploadTitle.trim() !== ""
+    || uploadAltText.trim() !== ""
+  );
+  const hasUnsavedChanges = hasUnsavedLessonChanges({
+    metadata: metadataIsDirty,
+    text: isTextDirty,
+    exercise: isExerciseDirty,
+    media: mediaComposerIsDirty,
+    reordering: isReorderSaving,
+  });
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasUnsavedChanges]);
+
   const loadData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
 
     try {
-      const [contentData, assetsData] = await Promise.all([
+      const [contentData, assetsData, historyData] = await Promise.all([
         getAdminLessonContent(centerSlug, courseSlug, lessonId),
         getAdminLessonAssets(centerSlug, courseSlug, lessonId).catch(() => []),
+        getAdminLessonRevisionHistory(centerSlug, courseSlug, lessonId).catch(() => []),
       ]);
 
       setContent(contentData);
       setAssets(assetsData);
+      setRevisionHistory(historyData);
+      setSelectedHistoricalRevision(null);
 
       const activeRev = contentData.draft_revision ?? contentData.published_revision;
       if (activeRev) {
@@ -144,6 +204,7 @@ export default function UnifiedLessonEditor({
       } else {
         setMetaTitle(contentData.lesson.title);
         setMetaDescription(contentData.lesson.description ?? "");
+        setMetaLocale("en");
         setMetaDuration("");
       }
       return true;
@@ -213,74 +274,13 @@ export default function UnifiedLessonEditor({
     return draft;
   };
 
-  // Convert plain multiline text to a valid TipTap JSON doc
-  const textToTipTap = (text: string): TipTapDocument => {
-    const paragraphs = text
-      .split(/\n\n+/)
-      .map((p) => p.trim())
-      .filter(Boolean);
-
-    if (paragraphs.length === 0) {
-      return {
-        type: "doc",
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text }],
-          },
-        ],
-      };
-    }
-
-    return {
-      type: "doc",
-      content: paragraphs.map((para) => {
-        if (para.startsWith("# ")) {
-          return {
-            type: "heading",
-            attrs: { level: 1 },
-            content: [{ type: "text", text: para.replace(/^#\s+/, "") }],
-          };
-        }
-        if (para.startsWith("## ")) {
-          return {
-            type: "heading",
-            attrs: { level: 2 },
-            content: [{ type: "text", text: para.replace(/^##\s+/, "") }],
-          };
-        }
-        if (para.startsWith("### ")) {
-          return {
-            type: "heading",
-            attrs: { level: 3 },
-            content: [{ type: "text", text: para.replace(/^###\s+/, "") }],
-          };
-        }
-        return {
-          type: "paragraph",
-          content: [{ type: "text", text: para }],
-        };
-      }),
-    };
-  };
-
-  // TipTap doc to plain text
-  const tipTapToText = (doc: TipTapDocument | null): string => {
-    if (!doc || !doc.content) return "";
-    return doc.content
-      .map((node) => {
-        const text = node.content?.map((c) => c.text ?? "").join("") ?? "";
-        if (node.type === "heading") {
-          const level = Number(node.attrs?.level) || 2;
-          return `${"#".repeat(level)} ${text}`;
-        }
-        return text;
-      })
-      .join("\n\n");
-  };
-
   // Handle Draft Creation
   const handleCreateDraft = async () => {
+    if (hasUnsavedChanges) {
+      setError("Save or discard the current changes before creating a draft.");
+      return;
+    }
+
     setIsSubmitting(true);
     setError(null);
     try {
@@ -296,6 +296,11 @@ export default function UnifiedLessonEditor({
 
   // Handle Metadata Save
   const handleSaveMetadata = async () => {
+    if (isTextDirty || isExerciseDirty || mediaComposerIsDirty) {
+      setError("Save or discard the other composer changes before saving metadata.");
+      return;
+    }
+
     setIsSubmitting(true);
     setError(null);
     try {
@@ -317,19 +322,25 @@ export default function UnifiedLessonEditor({
   };
 
   // Handle Add Text Block
-  const handleAddText = async () => {
-    if (!textInput.trim()) return;
+  const handleAddText = async (document: TipTapDocument) => {
+    if (metadataIsDirty || isExerciseDirty || mediaComposerIsDirty) {
+      setError("Save or discard the other unsaved changes before inserting this text block.");
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
     try {
       const draft = await getOrCreateDraft();
-      const doc = textToTipTap(textInput);
-      await addAdminTextBlock(centerSlug, courseSlug, lessonId, draft.id, doc);
-      setTextInput("");
+      await addAdminTextBlock(centerSlug, courseSlug, lessonId, draft.id, document);
+      setIsTextDirty(false);
       setComposerMode("none");
-      await loadData();
-      showSuccess("Text block added.");
+      const refreshed = await loadData();
+      if (refreshed) {
+        showSuccess("Text block added.");
+      } else {
+        setError("Text block was saved, but the lesson could not refresh. Reload to confirm it.");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to add text block.");
     } finally {
@@ -338,21 +349,215 @@ export default function UnifiedLessonEditor({
   };
 
   // Handle Edit Text Block
-  const handleUpdateTextBlock = async (blockId: number) => {
+  const handleUpdateTextBlock = async (blockId: number, document: TipTapDocument) => {
     if (!content?.draft_revision) return;
+    if (metadataIsDirty || isExerciseDirty || mediaComposerIsDirty) {
+      setError("Save or discard the other unsaved changes before updating this text block.");
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
     try {
-      const doc = textToTipTap(editingText);
       await updateAdminBlock(centerSlug, courseSlug, lessonId, content.draft_revision.id, blockId, {
-        content_json: doc,
+        content_json: document,
       });
+      setIsTextDirty(false);
       setEditingBlockId(null);
-      await loadData();
-      showSuccess("Text block updated.");
+      const refreshed = await loadData();
+      if (refreshed) {
+        showSuccess("Text block updated.");
+      } else {
+        setError("Text block was saved, but the lesson could not refresh. Reload to confirm it.");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to update text block.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCancelTextEditor = (): boolean => {
+    if (isTextDirty && !window.confirm("Discard the unsaved text changes?")) {
+      return false;
+    }
+
+    setIsTextDirty(false);
+    setEditingBlockId(null);
+    setComposerMode("none");
+    return true;
+  };
+
+  const resetExerciseComposer = () => {
+    setIsExerciseDirty(false);
+    setSelectedExerciseId("");
+    setIsCreatingExercise(false);
+    setNewExerciseTitle("");
+    setNewExerciseInstructions("");
+    setNewExercisePassingScore(70);
+    setNewExerciseMaxAttempts("");
+    setNewExerciseShowAnswers(true);
+    setNewExerciseQuestions([{
+      prompt: "",
+      points: 1,
+      question_type: "single_choice",
+      explanation: "",
+      options: [
+        { option_text: "", is_correct: true },
+        { option_text: "", is_correct: false },
+      ],
+    }]);
+  };
+
+  const switchExerciseComposerMode = (createNew: boolean) => {
+    if (createNew === isCreatingExercise) return;
+
+    if (
+      isExerciseDirty
+      && !window.confirm("Discard the current exercise selection or authoring changes?")
+    ) {
+      return;
+    }
+
+    resetExerciseComposer();
+    setIsCreatingExercise(createNew);
+  };
+
+  const handleCloseComposer = () => {
+    const composerDirty = isExerciseDirty
+      || (composerMode === "text" && isTextDirty)
+      || mediaComposerIsDirty;
+
+    if (composerDirty && !window.confirm("Discard the unsaved composer changes?")) {
+      return;
+    }
+
+    setIsTextDirty(false);
+    setUploadFile(null);
+    setUploadTitle("");
+    setUploadAltText("");
+    setSelectedAssetId("");
+    resetExerciseComposer();
+    setComposerMode("none");
+  };
+
+  const handleSwitchComposer = (
+    nextMode: "text" | "media" | "exercise"
+  ) => {
+    if (composerMode === nextMode) {
+      handleCloseComposer();
+      return;
+    }
+
+    const composerDirty = isExerciseDirty
+      || (composerMode === "text" && isTextDirty)
+      || mediaComposerIsDirty;
+    if (composerDirty && !window.confirm("Discard the current composer changes?")) {
+      return;
+    }
+
+    setIsTextDirty(false);
+    setUploadFile(null);
+    setUploadTitle("");
+    setUploadAltText("");
+    setSelectedAssetId("");
+    if (composerMode === "exercise" || nextMode === "exercise") {
+      resetExerciseComposer();
+    }
+    setComposerMode(nextMode);
+  };
+
+  const handleToggleMetadata = () => {
+    if (isEditingMetadata) {
+      if (metadataIsDirty && !window.confirm("Discard unsaved lesson metadata?")) {
+        return;
+      }
+
+      const current = content?.draft_revision ?? content?.published_revision;
+      setMetaTitle(current?.title ?? content?.lesson.title ?? "");
+      setMetaDescription(current?.description ?? content?.lesson.description ?? "");
+      setMetaLocale(current?.content_locale ?? "en");
+      setMetaDuration(current?.duration_minutes ?? "");
+      setIsEditingMetadata(false);
+      return;
+    }
+
+    setIsEditingMetadata(true);
+  };
+
+  const handleInspectHistoricalRevision = async (revisionId: number) => {
+    if (selectedHistoricalRevision?.id === revisionId) {
+      setSelectedHistoricalRevision(null);
+      return;
+    }
+
+    setIsLoadingHistoricalRevision(true);
+    setError(null);
+    try {
+      const revision = await getAdminHistoricalRevision(
+        centerSlug,
+        courseSlug,
+        lessonId,
+        revisionId
+      );
+      setSelectedHistoricalRevision(revision);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to inspect this revision.");
+    } finally {
+      setIsLoadingHistoricalRevision(false);
+    }
+  };
+
+  const handleRestoreHistoricalRevision = async (
+    revision: AdminLessonRevisionHistoryItem
+  ) => {
+    if (revision.status === "draft") {
+      setError("Only published or superseded revisions can be restored.");
+      return;
+    }
+
+    if (content?.draft_revision) {
+      setError("Publish or finish the current draft before restoring a historical version.");
+      return;
+    }
+
+    if (
+      hasUnsavedChanges &&
+      !window.confirm("Discard unsaved editor changes and continue with the restore?")
+    ) {
+      return;
+    }
+
+    if (!window.confirm(`Restore version ${revision.version_number} as a new draft? The original revision will remain unchanged.`)) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      await restoreAdminHistoricalRevision(
+        centerSlug,
+        courseSlug,
+        lessonId,
+        revision.id
+      );
+      setIsTextDirty(false);
+      setIsExerciseDirty(false);
+      setIsEditingMetadata(false);
+      setUploadFile(null);
+      setUploadTitle("");
+      setUploadAltText("");
+      setSelectedAssetId("");
+      resetExerciseComposer();
+      setComposerMode("none");
+      const refreshed = await loadData();
+      if (refreshed) {
+        showSuccess(`Version ${revision.version_number} was copied into a new draft.`);
+      } else {
+        setError("The new draft was created, but the editor could not refresh. Reload to view it.");
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to restore the selected revision.");
     } finally {
       setIsSubmitting(false);
     }
@@ -613,6 +818,10 @@ export default function UnifiedLessonEditor({
   // Handle Asset Upload
   const handleUploadAsset = async () => {
     if (!uploadFile) return;
+    if (metadataIsDirty || isTextDirty || isExerciseDirty) {
+      setError("Save or discard the other unsaved changes before uploading media.");
+      return;
+    }
     if (uploadType === "video") {
       await handleVideoUpload();
       return;
@@ -649,6 +858,10 @@ export default function UnifiedLessonEditor({
   // Handle Add Media Block
   const handleAddMedia = async () => {
     if (!selectedAssetId) return;
+    if (metadataIsDirty || isTextDirty || isExerciseDirty) {
+      setError("Save or discard the other unsaved changes before inserting media.");
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
@@ -669,6 +882,10 @@ export default function UnifiedLessonEditor({
   // Handle Add Exercise Block
   const handleAddExercise = async () => {
     if (!selectedExerciseId) return;
+    if (metadataIsDirty || isTextDirty || mediaComposerIsDirty) {
+      setError("Save or discard the other unsaved changes before inserting this exercise.");
+      return;
+    }
 
     setIsSubmitting(true);
     setError(null);
@@ -676,6 +893,7 @@ export default function UnifiedLessonEditor({
       const draft = await getOrCreateDraft();
       await addAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, Number(selectedExerciseId));
       setSelectedExerciseId("");
+      setIsExerciseDirty(false);
       setComposerMode("none");
       await loadData();
       showSuccess("Exercise block added.");
@@ -688,6 +906,7 @@ export default function UnifiedLessonEditor({
 
   // Question manipulation helpers for Exercise Creator
   const handleAddQuestion = () => {
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) => [
       ...prev,
       {
@@ -705,16 +924,19 @@ export default function UnifiedLessonEditor({
 
   const handleRemoveQuestion = (index: number) => {
     if (newExerciseQuestions.length <= 1) return;
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleUpdateQuestion = (index: number, field: string, value: unknown) => {
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) =>
       prev.map((q, i) => (i === index ? { ...q, [field]: value } : q))
     );
   };
 
   const handleAddOption = (questionIndex: number) => {
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) =>
       prev.map((q, i) => {
         if (i !== questionIndex) return q;
@@ -727,6 +949,7 @@ export default function UnifiedLessonEditor({
   };
 
   const handleRemoveOption = (questionIndex: number, optionIndex: number) => {
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) =>
       prev.map((q, i) => {
         if (i !== questionIndex) return q;
@@ -745,6 +968,7 @@ export default function UnifiedLessonEditor({
     field: "option_text" | "is_correct",
     value: string | boolean
   ) => {
+    setIsExerciseDirty(true);
     setNewExerciseQuestions((prev) =>
       prev.map((q, i) => {
         if (i !== questionIndex) return q;
@@ -768,6 +992,11 @@ export default function UnifiedLessonEditor({
   };
 
   const handleCreateAndInsertExercise = async () => {
+    if (metadataIsDirty || isTextDirty || mediaComposerIsDirty) {
+      setError("Save or discard the other unsaved changes before creating this exercise.");
+      return;
+    }
+
     if (!newExerciseTitle.trim()) {
       setError("Please provide an exercise title.");
       return;
@@ -823,6 +1052,7 @@ export default function UnifiedLessonEditor({
       });
 
       setIsCreatingExercise(false);
+      setIsExerciseDirty(false);
       setNewExerciseTitle("");
       setNewExerciseInstructions("");
       setNewExerciseQuestions([
@@ -869,35 +1099,109 @@ export default function UnifiedLessonEditor({
     }
   };
 
-  // Handle Move Block Up / Down
-  const handleMoveBlock = async (blockIndex: number, direction: "up" | "down") => {
-    if (!content?.draft_revision) return;
-    const blocks = [...content.draft_revision.blocks];
-    const targetIndex = direction === "up" ? blockIndex - 1 : blockIndex + 1;
+  // Persist one complete, duplicate-free draft order and roll back on failure.
+  const handleReorderBlock = async (
+    blockId: number,
+    oldIndex: number,
+    newIndex: number
+  ) => {
+    const draft = content?.draft_revision;
+    if (!draft || isSubmitting || isReorderSaving) return;
 
-    if (targetIndex < 0 || targetIndex >= blocks.length) return;
+    const previousBlocks = draft.blocks;
+    let reorderedBlocks: LessonBlock[];
+    try {
+      reorderedBlocks = moveBlockInOrder(
+        previousBlocks,
+        blockId,
+        oldIndex,
+        newIndex
+      );
+    } catch {
+      setSortAnnouncement("Block order was not changed because the timeline is stale.");
+      setError("The timeline changed before the reorder could be saved. Reload the lesson and try again.");
+      return;
+    }
 
-    // Swap elements
-    const [moved] = blocks.splice(blockIndex, 1);
-    blocks.splice(targetIndex, 0, moved);
-
-    const reorderedIds = blocks.map((b) => b.id);
-
+    if (oldIndex === newIndex) return;
+    setIsReorderSaving(true);
     setIsSubmitting(true);
     setError(null);
+
     try {
-      await reorderAdminBlocks(centerSlug, courseSlug, lessonId, content.draft_revision.id, reorderedIds);
-      await loadData();
-      showSuccess("Block order updated.");
+      await persistBlockOrderOptimistically(
+        previousBlocks,
+        reorderedBlocks,
+        (orderedIds) => reorderAdminBlocks(
+          centerSlug,
+          courseSlug,
+          lessonId,
+          draft.id,
+          orderedIds
+        ),
+        (blocks) => {
+          setContent((current) => current?.draft_revision?.id === draft.id
+            ? {
+                ...current,
+                draft_revision: { ...current.draft_revision, blocks },
+              }
+            : current);
+        }
+      );
+      setSortAnnouncement(`Moved block ${blockId} to position ${newIndex + 1}.`);
+      showSuccess("Block order saved.");
     } catch (err: unknown) {
+      setSortAnnouncement("The reorder failed. The previous order was restored.");
       setError(err instanceof Error ? err.message : "Failed to reorder blocks.");
     } finally {
+      setIsReorderSaving(false);
       setIsSubmitting(false);
     }
   };
 
+  const handleMoveBlock = (
+    blockIndex: number,
+    direction: "up" | "down"
+  ) => {
+    const blocks = content?.draft_revision?.blocks;
+    if (!blocks) return;
+
+    const targetIndex = direction === "up" ? blockIndex - 1 : blockIndex + 1;
+    const block = blocks[blockIndex];
+    if (block) {
+      void handleReorderBlock(block.id, blockIndex, targetIndex);
+    }
+  };
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const source = event.operation.source;
+    if (source) {
+      setSortAnnouncement(`Picked up block ${source.id}.`);
+    }
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (event.canceled) {
+      setSortAnnouncement("Block reorder canceled.");
+      return;
+    }
+
+    const { source, target } = event.operation;
+    if (!target || !isSortable(source) || !isSortable(target)) {
+      setSortAnnouncement("Block reorder canceled.");
+      return;
+    }
+
+    void handleReorderBlock(Number(source.id), source.initialIndex, source.index);
+  };
+
   // Handle Publication
   const handlePublish = async () => {
+    if (hasUnsavedChanges) {
+      setError("Save or discard all unsaved changes before publishing the draft.");
+      return;
+    }
+
     if (!content?.draft_revision) {
       setError("No draft revision to publish.");
       return;
@@ -960,6 +1264,14 @@ export default function UnifiedLessonEditor({
   const activeBlocks = draft?.blocks ?? published?.blocks ?? [];
   const hasDraft = Boolean(draft);
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
+  const blockTypeName = (block: LessonBlock): string => {
+    if (block.block_type === "text") return "Text";
+    if (block.block_type === "exercise") return "Exercise";
+    if (block.asset?.asset_type === "image") return "Image";
+    if (block.asset?.asset_type === "video") return "Video";
+    if (block.asset?.asset_type === "file") return "Document";
+    return "Media";
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 pb-20">
@@ -968,6 +1280,11 @@ export default function UnifiedLessonEditor({
         <div className="flex items-center gap-3">
           <Link
             href={returnHref}
+            onClick={(event) => {
+              if (hasUnsavedChanges && !window.confirm("Leave this lesson editor and discard unsaved changes?")) {
+                event.preventDefault();
+              }
+            }}
             className="flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-[#102b4c] transition hover:bg-slate-50"
           >
             ←
@@ -980,15 +1297,34 @@ export default function UnifiedLessonEditor({
               <span className="text-slate-300">/</span>
               <span className="text-xs font-bold text-slate-500">Lesson #{content.lesson.id}</span>
             </div>
-            <h1 className="text-xl font-black text-[#102b4c]">{content.lesson.title}</h1>
+            <h1 className="text-xl font-black text-[#102b4c]">
+              {draft?.title ?? published?.title ?? content.lesson.title}
+            </h1>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <span
+            role="status"
+            className={`rounded-full px-3 py-2 text-xs font-semibold ${
+              hasUnsavedChanges
+                ? "bg-amber-50 text-amber-800"
+                : "bg-emerald-50 text-emerald-800"
+            }`}
+          >
+            {hasUnsavedChanges
+              ? "Unsaved changes"
+              : draft ? "Draft saved" : "No unsaved changes"}
+          </span>
           {onSwitchToPreview && (
             <button
               type="button"
-              onClick={onSwitchToPreview}
+              onClick={() => {
+                if (hasUnsavedChanges && !window.confirm("Open the preview and leave unsaved changes behind?")) {
+                  return;
+                }
+                onSwitchToPreview();
+              }}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-[#102b4c] shadow-xs transition hover:bg-slate-50"
             >
               👁 View Preview
@@ -998,7 +1334,7 @@ export default function UnifiedLessonEditor({
           {!draft ? (
             <button
               type="button"
-              disabled={isSubmitting}
+              disabled={isSubmitting || hasUnsavedChanges}
               onClick={() => void handleCreateDraft()}
               className="rounded-xl bg-[#0e8988] px-5 py-2 text-xs font-extrabold text-white shadow-xs transition hover:bg-[#087b83] disabled:opacity-50"
             >
@@ -1007,7 +1343,7 @@ export default function UnifiedLessonEditor({
           ) : (
             <button
               type="button"
-              disabled={isSubmitting || draft.blocks.length === 0}
+              disabled={isSubmitting || hasUnsavedChanges || draft.blocks.length === 0}
               onClick={() => void handlePublish()}
               className="rounded-xl bg-emerald-600 px-5 py-2 text-xs font-extrabold text-white shadow-xs transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -1080,7 +1416,7 @@ export default function UnifiedLessonEditor({
           <div>
             <button
               type="button"
-              onClick={() => setIsEditingMetadata(!isEditingMetadata)}
+              onClick={handleToggleMetadata}
               className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-[#102b4c] transition hover:bg-slate-100"
             >
               {isEditingMetadata ? "Cancel" : "Edit Metadata"}
@@ -1139,7 +1475,7 @@ export default function UnifiedLessonEditor({
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                disabled={isSubmitting}
+                disabled={isSubmitting || !metadataIsDirty}
                 onClick={() => void handleSaveMetadata()}
                 className="rounded-xl bg-[#0e8988] px-4 py-2 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
               >
@@ -1163,7 +1499,7 @@ export default function UnifiedLessonEditor({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => setComposerMode(composerMode === "text" ? "none" : "text")}
+              onClick={() => handleSwitchComposer("text")}
               className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
                 composerMode === "text"
                   ? "bg-[#0e8988] text-white"
@@ -1175,7 +1511,7 @@ export default function UnifiedLessonEditor({
 
             <button
               type="button"
-              onClick={() => setComposerMode(composerMode === "media" ? "none" : "media")}
+              onClick={() => handleSwitchComposer("media")}
               className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
                 composerMode === "media"
                   ? "bg-[#0e8988] text-white"
@@ -1187,7 +1523,7 @@ export default function UnifiedLessonEditor({
 
             <button
               type="button"
-              onClick={() => setComposerMode(composerMode === "exercise" ? "none" : "exercise")}
+              onClick={() => handleSwitchComposer("exercise")}
               className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
                 composerMode === "exercise"
                   ? "bg-[#0e8988] text-white"
@@ -1202,34 +1538,21 @@ export default function UnifiedLessonEditor({
         {/* Composer: Text Form */}
         {composerMode === "text" && (
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4">
-            <h4 className="text-xs font-black text-[#102b4c]">Add Rich Text Block</h4>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Separate paragraphs with empty lines. Use # Heading 1, ## Heading 2, ### Heading 3.
-            </p>
-            <textarea
-              rows={4}
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              placeholder="Enter lesson text or notes here..."
-              className="mt-3 w-full rounded-xl border border-slate-200 bg-white p-3 text-xs leading-6 text-slate-800"
-            />
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setComposerMode("none")}
-                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting || !textInput.trim()}
-                onClick={() => void handleAddText()}
-                className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
-              >
-                Insert Text Block
-              </button>
+            <div className="mb-3">
+              <h4 className="text-xs font-black text-[#102b4c]">Add Text Block</h4>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Format the content here. It is saved as structured Tiptap JSON.
+              </p>
             </div>
+            <RichTextEditor
+              key="new-text-block"
+              initialDocument={{ type: "doc", content: [{ type: "paragraph" }] }}
+              isSubmitting={isSubmitting}
+              saveLabel="Insert Text Block"
+              onCancel={handleCancelTextEditor}
+              onDirtyChange={setIsTextDirty}
+              onSave={(document) => void handleAddText(document)}
+            />
           </div>
         )}
 
@@ -1467,7 +1790,7 @@ export default function UnifiedLessonEditor({
               <div className="flex rounded-lg border border-teal-200 bg-white p-0.5 text-[11px]">
                 <button
                   type="button"
-                  onClick={() => setIsCreatingExercise(false)}
+                  onClick={() => switchExerciseComposerMode(false)}
                   className={`rounded-md px-2.5 py-1 font-bold transition ${
                     !isCreatingExercise
                       ? "bg-[#0e8988] text-white"
@@ -1478,7 +1801,7 @@ export default function UnifiedLessonEditor({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setIsCreatingExercise(true)}
+                  onClick={() => switchExerciseComposerMode(true)}
                   className={`rounded-md px-2.5 py-1 font-bold transition ${
                     isCreatingExercise
                       ? "bg-[#0e8988] text-white"
@@ -1494,7 +1817,11 @@ export default function UnifiedLessonEditor({
               <div className="mt-3">
                 <select
                   value={selectedExerciseId}
-                  onChange={(e) => setSelectedExerciseId(e.target.value === "" ? "" : Number(e.target.value))}
+                  onChange={(e) => {
+                    const id = e.target.value === "" ? "" : Number(e.target.value);
+                    setSelectedExerciseId(id);
+                    setIsExerciseDirty(id !== "");
+                  }}
                   className="w-full rounded-xl border border-slate-200 bg-white p-2.5 text-xs text-slate-800"
                 >
                   <option value="">-- Choose an exercise --</option>
@@ -1514,7 +1841,7 @@ export default function UnifiedLessonEditor({
                 <div className="mt-3 flex justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setComposerMode("none")}
+                    onClick={handleCloseComposer}
                     className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
                   >
                     Cancel
@@ -1538,7 +1865,10 @@ export default function UnifiedLessonEditor({
                     <input
                       type="text"
                       value={newExerciseTitle}
-                      onChange={(e) => setNewExerciseTitle(e.target.value)}
+                      onChange={(e) => {
+                        setIsExerciseDirty(true);
+                        setNewExerciseTitle(e.target.value);
+                      }}
                       placeholder="e.g. Vocabulary Quiz: Unit 1"
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
                     />
@@ -1549,7 +1879,10 @@ export default function UnifiedLessonEditor({
                     <textarea
                       rows={2}
                       value={newExerciseInstructions}
-                      onChange={(e) => setNewExerciseInstructions(e.target.value)}
+                      onChange={(e) => {
+                        setIsExerciseDirty(true);
+                        setNewExerciseInstructions(e.target.value);
+                      }}
                       placeholder="e.g. Choose the single best answer for each question."
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
                     />
@@ -1562,7 +1895,10 @@ export default function UnifiedLessonEditor({
                       min={0}
                       max={100}
                       value={newExercisePassingScore}
-                      onChange={(e) => setNewExercisePassingScore(Number(e.target.value))}
+                      onChange={(e) => {
+                        setIsExerciseDirty(true);
+                        setNewExercisePassingScore(Number(e.target.value));
+                      }}
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
                     />
                   </div>
@@ -1573,7 +1909,10 @@ export default function UnifiedLessonEditor({
                       type="number"
                       min={1}
                       value={newExerciseMaxAttempts}
-                      onChange={(e) => setNewExerciseMaxAttempts(e.target.value === "" ? "" : Number(e.target.value))}
+                      onChange={(e) => {
+                        setIsExerciseDirty(true);
+                        setNewExerciseMaxAttempts(e.target.value === "" ? "" : Number(e.target.value));
+                      }}
                       placeholder="Unlimited"
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
                     />
@@ -1584,7 +1923,10 @@ export default function UnifiedLessonEditor({
                       <input
                         type="checkbox"
                         checked={newExerciseShowAnswers}
-                        onChange={(e) => setNewExerciseShowAnswers(e.target.checked)}
+                        onChange={(e) => {
+                          setIsExerciseDirty(true);
+                          setNewExerciseShowAnswers(e.target.checked);
+                        }}
                         className="rounded border-slate-300 text-[#0e8988]"
                       />
                       Release correct answers and explanations to students after submission
@@ -1727,8 +2069,7 @@ export default function UnifiedLessonEditor({
                   <button
                     type="button"
                     onClick={() => {
-                      setIsCreatingExercise(false);
-                      setComposerMode("none");
+                      handleCloseComposer();
                     }}
                     className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100"
                   >
@@ -1749,16 +2090,20 @@ export default function UnifiedLessonEditor({
         )}
       </section>
 
-      {/* Ordered Timeline */}
+      {/* Ordered curriculum timeline */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-black uppercase tracking-wider text-[#102b4c]">
-            Revision Timeline ({activeBlocks.length} {activeBlocks.length === 1 ? "Block" : "Blocks"})
+            Curriculum Timeline ({activeBlocks.length} {activeBlocks.length === 1 ? "Block" : "Blocks"})
           </h3>
           <span className="text-xs text-slate-500">
-            {hasDraft ? "Editing draft revision" : "Displaying published revision"}
+            {hasDraft ? "Draft · drag blocks by the handle to reorder" : "Published revision · read only"}
           </span>
         </div>
+
+        <p role="status" aria-live="polite" className="sr-only">
+          {sortAnnouncement}
+        </p>
 
         {activeBlocks.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
@@ -1768,16 +2113,38 @@ export default function UnifiedLessonEditor({
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <DragDropProvider
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+          >
+            <DragOverlay>
+              {(source) => {
+                const draggedBlock = activeBlocks.find(
+                  (block) => block.id === Number(source.id)
+                );
+                return draggedBlock ? (
+                  <div className="rounded-xl border border-teal-200 bg-white px-4 py-3 text-xs font-bold text-[#102b4c] shadow-xl">
+                    {blockTypeName(draggedBlock)} block · {draggedBlock.asset?.title ?? draggedBlock.exercise?.title ?? `Block #${draggedBlock.id}`}
+                  </div>
+                ) : null;
+              }}
+            </DragOverlay>
+            <div className="max-h-[70vh] overflow-y-auto overscroll-contain rounded-2xl pr-2">
+            <div className="space-y-4">
             {activeBlocks.map((block, index) => {
+              const blockLabel = blockTypeName(block);
               const isFirst = index === 0;
               const isLast = index === activeBlocks.length - 1;
 
               return (
-                <div
+                <SortableBlockCard
                   key={block.id}
-                  className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300"
+                  blockId={block.id}
+                  index={index}
+                  blockLabel={`${blockLabel} block`}
+                  disabled={!hasDraft || isSubmitting || hasUnsavedChanges}
                 >
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs transition hover:border-slate-300">
                   {/* Block Header */}
                   <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
                     <div className="flex items-center gap-2">
@@ -1787,24 +2154,33 @@ export default function UnifiedLessonEditor({
                       <span
                         className={`rounded-md px-2 py-0.5 text-[10px] font-extrabold uppercase ${
                           block.block_type === "text"
-                            ? "bg-sky-50 text-sky-700"
-                            : block.block_type === "media"
-                              ? "bg-purple-50 text-purple-700"
-                              : "bg-teal-50 text-teal-700"
+                          ? "bg-sky-50 text-sky-700"
+                            : block.block_type === "exercise"
+                              ? "bg-teal-50 text-teal-700"
+                              : block.asset?.asset_type === "image"
+                                ? "bg-purple-50 text-purple-700"
+                                : block.asset?.asset_type === "video"
+                                  ? "bg-rose-50 text-rose-700"
+                                  : "bg-amber-50 text-amber-800"
                         }`}
                       >
-                        {block.block_type}
+                        {blockLabel}
                       </span>
-                      <span className="text-xs font-semibold text-slate-400">
-                        Block ID: {block.id}
+                      <span className="text-xs font-semibold text-slate-600">
+                        {block.asset?.title ?? block.exercise?.title ?? "Formatted lesson content"}
                       </span>
+                      {(block.asset || block.exercise) && (
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-600">
+                          {block.asset?.status ?? block.exercise?.status}
+                        </span>
+                      )}
                     </div>
 
                     {hasDraft && (
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          disabled={isFirst || isSubmitting}
+                          disabled={isFirst || isSubmitting || hasUnsavedChanges}
                           onClick={() => void handleMoveBlock(index, "up")}
                           aria-label="Move block up"
                           className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-30"
@@ -1813,7 +2189,7 @@ export default function UnifiedLessonEditor({
                         </button>
                         <button
                           type="button"
-                          disabled={isLast || isSubmitting}
+                          disabled={isLast || isSubmitting || hasUnsavedChanges}
                           onClick={() => void handleMoveBlock(index, "down")}
                           aria-label="Move block down"
                           className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-30"
@@ -1823,12 +2199,13 @@ export default function UnifiedLessonEditor({
                         {block.block_type === "text" && (
                           <button
                             type="button"
+                            disabled={isSubmitting || editingBlockId !== null && editingBlockId !== block.id}
                             onClick={() => {
                               if (editingBlockId === block.id) {
-                                setEditingBlockId(null);
+                                handleCancelTextEditor();
                               } else {
+                                setIsTextDirty(false);
                                 setEditingBlockId(block.id);
-                                setEditingText(tipTapToText(block.content_json));
                               }
                             }}
                             className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-50"
@@ -1838,7 +2215,7 @@ export default function UnifiedLessonEditor({
                         )}
                         <button
                           type="button"
-                          disabled={isSubmitting}
+                          disabled={isSubmitting || hasUnsavedChanges}
                           onClick={() => void handleDeleteBlock(block.id)}
                           className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-bold text-red-600 hover:bg-red-50"
                         >
@@ -1851,31 +2228,15 @@ export default function UnifiedLessonEditor({
                   {/* Block Content Render / Edit */}
                   <div className="mt-4">
                     {editingBlockId === block.id ? (
-                      <div className="space-y-3">
-                        <textarea
-                          rows={5}
-                          value={editingText}
-                          onChange={(e) => setEditingText(e.target.value)}
-                          className="w-full rounded-xl border border-slate-200 p-3 text-xs leading-6 text-slate-800"
-                        />
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setEditingBlockId(null)}
-                            className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-600"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSubmitting}
-                            onClick={() => void handleUpdateTextBlock(block.id)}
-                            className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white"
-                          >
-                            Save Changes
-                          </button>
-                        </div>
-                      </div>
+                      <RichTextEditor
+                        key={`edit-text-${block.id}`}
+                        initialDocument={block.content_json ?? { type: "doc", content: [{ type: "paragraph" }] }}
+                        isSubmitting={isSubmitting}
+                        saveLabel="Save Text Block"
+                        onCancel={handleCancelTextEditor}
+                        onDirtyChange={setIsTextDirty}
+                        onSave={(document) => void handleUpdateTextBlock(block.id, document)}
+                      />
                     ) : (
                       <>
                         {block.block_type === "text" && <LessonTextBlock block={block} />}
@@ -1889,8 +2250,129 @@ export default function UnifiedLessonEditor({
                     )}
                   </div>
                 </div>
+                </SortableBlockCard>
               );
             })}
+            </div>
+            </div>
+          </DragDropProvider>
+        )}
+      </section>
+
+      <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-black text-[#102b4c]">Revision History</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Inspect prior versions read-only. Restoring copies content into a new draft.
+            </p>
+          </div>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+            {revisionHistory.length} {revisionHistory.length === 1 ? "version" : "versions"}
+          </span>
+        </div>
+
+        {revisionHistory.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">
+            No revision history is available yet.
+          </p>
+        ) : (
+          <ol className="space-y-2">
+            {revisionHistory.map((revision) => (
+              <li
+                key={revision.id}
+                className="flex flex-col gap-3 rounded-xl border border-slate-100 p-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-bold text-[#102b4c]">
+                      v{revision.version_number} · {revision.title}
+                    </span>
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-600">
+                      {revision.status}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {revision.author?.name ? `By ${revision.author.name} · ` : ""}
+                    {revision.published_at
+                      ? `Published ${new Date(revision.published_at).toLocaleString()}`
+                      : revision.created_at
+                        ? `Created ${new Date(revision.created_at).toLocaleString()}`
+                        : "Date unavailable"}
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={isLoadingHistoricalRevision}
+                    onClick={() => void handleInspectHistoricalRevision(revision.id)}
+                    className="min-h-10 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {selectedHistoricalRevision?.id === revision.id ? "Close preview" : "Inspect"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSubmitting || Boolean(draft) || revision.status === "draft"}
+                    title={draft ? "Publish or finish the current draft before restoring." : undefined}
+                    onClick={() => void handleRestoreHistoricalRevision(revision)}
+                    className="min-h-10 rounded-lg border border-teal-200 px-3 text-xs font-bold text-teal-800 hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    Restore as new draft
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+
+        {isLoadingHistoricalRevision && (
+          <p role="status" className="text-xs text-slate-500">Loading revision preview…</p>
+        )}
+
+        {selectedHistoricalRevision && (
+          <div className="space-y-4 rounded-xl border border-indigo-100 bg-indigo-50/30 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-indigo-100 pb-3">
+              <div>
+                <p className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700">
+                  {selectedHistoricalRevision.status === "draft"
+                    ? "Read-only draft preview"
+                    : "Read-only historical preview"} · v{selectedHistoricalRevision.version_number}
+                </p>
+                <h4 className="mt-1 text-base font-black text-[#102b4c]">
+                  {selectedHistoricalRevision.title}
+                </h4>
+                {selectedHistoricalRevision.description && (
+                  <p className="mt-1 text-xs text-slate-600">
+                    {selectedHistoricalRevision.description}
+                  </p>
+                )}
+              </div>
+              <span className="rounded-full bg-white px-3 py-1 text-xs font-bold uppercase text-slate-600">
+                {selectedHistoricalRevision.status}
+              </span>
+            </div>
+
+            {selectedHistoricalRevision.blocks.length === 0 ? (
+              <p className="text-xs text-slate-500">This revision has no content blocks.</p>
+            ) : (
+              <div className="space-y-3">
+                {selectedHistoricalRevision.blocks.map((block, index) => (
+                  <article key={block.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="mb-3 text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
+                      {index + 1}. {blockTypeName(block)}
+                    </p>
+                    {block.block_type === "text" && <LessonTextBlock block={block} />}
+                    {block.block_type === "media" && (
+                      <LessonMediaBlock block={block} params={routeParams} />
+                    )}
+                    {block.block_type === "exercise" && (
+                      <LessonExerciseBlock block={block} isAdminPreview={true} />
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>

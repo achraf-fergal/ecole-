@@ -160,6 +160,88 @@ class LessonRevisionService
         }, 3);
     }
 
+    /**
+     * Restore historical content into a new draft revision.
+     *
+     * Historical revisions remain immutable and an existing draft is never replaced.
+     */
+    public function createDraftFromRevision(
+        Lesson $lesson,
+        LessonRevision $sourceRevision,
+        User $actor
+    ): LessonRevision {
+        return DB::transaction(function () use (
+            $lesson,
+            $sourceRevision,
+            $actor
+        ): LessonRevision {
+            $lockedLesson = $this->lockLesson($lesson);
+
+            if ($lockedLesson->draft_revision_id !== null) {
+                $this->fail(
+                    'revision',
+                    'Publish or finish the current draft before restoring a historical revision.'
+                );
+            }
+
+            $lockedSource = LessonRevision::query()
+                ->forCenter($lockedLesson->center_id)
+                ->forLesson($lockedLesson->id)
+                ->whereKey($sourceRevision->id)
+                ->whereIn('status', [
+                    LessonRevision::STATUS_PUBLISHED,
+                    LessonRevision::STATUS_SUPERSEDED,
+                ])
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $latestVersion = (int) LessonRevision::query()
+                ->forCenter($lockedLesson->center_id)
+                ->forLesson($lockedLesson->id)
+                ->max('version_number');
+
+            $draft = LessonRevision::query()->create([
+                'center_id' => $lockedLesson->center_id,
+                'lesson_id' => $lockedLesson->id,
+                'version_number' => $latestVersion + 1,
+                'status' => LessonRevision::STATUS_DRAFT,
+                'title' => $lockedSource->title,
+                'description' => $lockedSource->description,
+                'content_locale' => $lockedSource->content_locale,
+                'duration_minutes' => $lockedSource->duration_minutes,
+                'created_by_user_id' => $actor->id,
+                'published_by_user_id' => null,
+                'published_at' => null,
+            ]);
+
+            $sourceBlocks = LessonBlock::query()
+                ->forCenter($lockedLesson->center_id)
+                ->forRevision($lockedSource->id)
+                ->ordered()
+                ->get();
+
+            foreach ($sourceBlocks as $sourceBlock) {
+                LessonBlock::query()->create([
+                    'center_id' => $lockedLesson->center_id,
+                    'lesson_id' => $lockedLesson->id,
+                    'lesson_revision_id' => $draft->id,
+                    'block_type' => $sourceBlock->block_type,
+                    'sort_order' => $sourceBlock->sort_order,
+                    'content_json' => $sourceBlock->content_json,
+                    'lesson_asset_id' => $sourceBlock->lesson_asset_id,
+                    'exercise_id' => $sourceBlock->exercise_id,
+                    'settings' => $sourceBlock->settings,
+                ]);
+            }
+
+            $lockedLesson->forceFill([
+                'draft_revision_id' => $draft->id,
+            ])->save();
+
+            return $draft->load('blocks');
+        }, 3);
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Update Draft Metadata
@@ -1050,6 +1132,39 @@ class LessonRevisionService
 
             $this->validateNode($node);
         }
+
+        if (! $this->hasMeaningfulContent($document['content'])) {
+            $this->fail(
+                'content_json',
+                'Text content cannot be empty.'
+            );
+        }
+    }
+
+    /** @param array<int, array<string, mixed>> $nodes */
+    private function hasMeaningfulContent(array $nodes): bool
+    {
+        foreach ($nodes as $node) {
+            if (
+                ($node['type'] ?? null) === 'horizontalRule'
+                || (
+                    ($node['type'] ?? null) === 'text'
+                    && is_string($node['text'] ?? null)
+                    && trim($node['text']) !== ''
+                )
+            ) {
+                return true;
+            }
+
+            if (
+                is_array($node['content'] ?? null)
+                && $this->hasMeaningfulContent($node['content'])
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

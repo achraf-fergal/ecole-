@@ -1,0 +1,108 @@
+.surface {
+  min-height: 15rem;
+  max-height: 32rem;
+  overflow-y: auto;
+  padding: 1rem 1.1rem;
+  color: #1e293b;
+  font-size: 0.875rem;
+  line-height: 1.75;
+}
+
+.surface .proseMirror {
+  min-height: 12rem;
+  outline: none;
+}
+
+.surface .proseMirror > * + * {
+  margin-top: 0.75rem;
+}
+
+.surface .proseMirror h1,
+.surface .proseMirror h2,
+.surface .proseMirror h3,
+.surface .proseMirror h4,
+.surface .proseMirror h5,
+.surface .proseMirror h6 {
+  color: #102b4c;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.surface .proseMirror h1 {
+  font-size: 1.6rem;
+}
+
+.surface .proseMirror h2 {
+  font-size: 1.35rem;
+}
+
+.surface .proseMirror h3 {
+  font-size: 1.15rem;
+}
+
+.surface .proseMirror ul,
+.surface .proseMirror ol {
+  padding-inline-start: 1.5rem;
+}
+
+.surface .proseMirror ul {
+  list-style: disc;
+}
+
+.surface .proseMirror ol {
+  list-style: decimal;
+}
+
+.surface .proseMirror li > p {
+  margin: 0.2rem 0;
+}
+
+.surface .proseMirror blockquote {
+  border-inline-start: 3px solid #0e8988;
+  padding-inline-start: 1rem;
+  color: #475569;
+}
+
+.surface .proseMirror pre {
+  overflow-x: auto;
+  border-radius: 0.65rem;
+  background: #f1f5f9;
+  padding: 0.85rem;
+  font-size: 0.8rem;
+}
+
+.surface .proseMirror code {
+  border-radius: 0.25rem;
+  background: #f1f5f9;
+  padding: 0.1rem 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.surface .proseMirror pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.surface .proseMirror a {
+  color: #087b83;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.surface .proseMirror mark {
+  border-radius: 0.15rem;
+  padding: 0 0.08rem;
+}
+
+.surface .proseMirror hr {
+  border: 0;
+  border-top: 1px solid #cbd5e1;
+}
+
+.surface .proseMirror p.is-editor-empty:first-child::before {
+  float: inline-start;
+  height: 0;
+  color: #94a3b8;
+  content: "Write lesson content…";
+  pointer-events: none;
+}

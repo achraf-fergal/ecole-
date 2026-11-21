@@ -68,6 +68,13 @@ return [
             5368709120
         ),
 
+        // Cloudflare's default per-video limit is less than 30 GB.
+        // Raise this only when the account's higher limit is confirmed.
+        'account_max_upload_bytes' => (int) env(
+            'CLOUDFLARE_STREAM_ACCOUNT_MAX_UPLOAD_BYTES',
+            29999999999
+        ),
+
         'tus_chunk_size_bytes' => (int) env(
             'CLOUDFLARE_STREAM_TUS_CHUNK_SIZE_BYTES',
             52428800

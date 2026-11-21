@@ -8,15 +8,36 @@ use App\Models\LessonAsset;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
 class CloudflareStreamService
 {
     private const DEFAULT_TUS_CHUNK_BYTES = 52428800;
 
+    private const DEFAULT_ACCOUNT_MAX_UPLOAD_BYTES = 29999999999;
+
     public function __construct(
         protected LessonRevisionService $lessonRevisionService
     ) {}
+
+    /** Return the configured application limit bounded by the confirmed account limit. */
+    public function maxUploadBytes(): int
+    {
+        $applicationLimit = max(
+            1,
+            (int) config('services.cloudflare_stream.max_upload_bytes', 5368709120)
+        );
+        $accountLimit = max(
+            1,
+            (int) config(
+                'services.cloudflare_stream.account_max_upload_bytes',
+                self::DEFAULT_ACCOUNT_MAX_UPLOAD_BYTES
+            )
+        );
+
+        return min($applicationLimit, $accountLimit);
+    }
 
     /**
      * Create a one-time Basic POST Direct Creator Upload endpoint.
@@ -266,11 +287,36 @@ class CloudflareStreamService
             );
 
             if ($lockedAsset->status === LessonAsset::STATUS_PROCESSING) {
-                $nextStatus = $this->isFullyReady($details)
-                    ? LessonAsset::STATUS_ACTIVE
-                    : ($state === 'error'
-                        ? LessonAsset::STATUS_FAILED
-                        : LessonAsset::STATUS_PROCESSING);
+                $providerSize = data_get($details, 'size');
+                $hasValidProviderSize = is_numeric($providerSize)
+                    && (int) $providerSize > 0;
+                $providerSizeWithinLimit = $hasValidProviderSize
+                    && (int) $providerSize <= $this->maxUploadBytes();
+                $fullyReady = $this->isFullyReady($details);
+
+                if ($fullyReady && ! $providerSizeWithinLimit) {
+                    $nextStatus = LessonAsset::STATUS_FAILED;
+                } elseif ($fullyReady) {
+                    $nextStatus = LessonAsset::STATUS_ACTIVE;
+                } elseif ($state === 'error') {
+                    $nextStatus = LessonAsset::STATUS_FAILED;
+                } else {
+                    $nextStatus = LessonAsset::STATUS_PROCESSING;
+                }
+
+                if ($fullyReady && ! $providerSizeWithinLimit) {
+                    $errorCode = $hasValidProviderSize
+                        ? 'UPLOAD_TOO_LARGE'
+                        : 'UPLOAD_SIZE_UNVERIFIED';
+
+                    if (! $this->deleteVideo($lockedAsset->provider_asset_id)) {
+                        Log::warning('Cloudflare video cleanup failed after the provider-reported size was rejected.', [
+                            'asset_id' => $lockedAsset->id,
+                            'center_id' => $lockedAsset->center_id,
+                            'lesson_id' => $lockedAsset->lesson_id,
+                        ]);
+                    }
+                }
 
                 if ($nextStatus !== LessonAsset::STATUS_PROCESSING) {
                     $this->lessonRevisionService
@@ -290,7 +336,14 @@ class CloudflareStreamService
                 'asset' => $lockedAsset->refresh(),
                 'status' => $lockedAsset->status,
                 'progress' => $progress,
-                'error_code' => $state === 'error' ? $errorCode : null,
+                'error_code' => $state === 'error'
+                    || in_array(
+                        $errorCode,
+                        ['UPLOAD_TOO_LARGE', 'UPLOAD_SIZE_UNVERIFIED'],
+                        true
+                    )
+                    ? $errorCode
+                    : null,
             ];
         }, 3);
     }
@@ -314,7 +367,12 @@ class CloudflareStreamService
             'The video is not ready to be restored.'
         );
 
-        return DB::transaction(function () use ($asset, $details): LessonAsset {
+        $verifiedMetadata = $this->verifiedAssetMetadata($details);
+
+        return DB::transaction(function () use (
+            $asset,
+            $verifiedMetadata
+        ): LessonAsset {
             Lesson::query()
                 ->forCenter((int) $asset->center_id)
                 ->whereKey($asset->lesson_id)
@@ -338,7 +396,7 @@ class CloudflareStreamService
 
             $lockedAsset->forceFill([
                 'status' => LessonAsset::STATUS_ACTIVE,
-                ...$this->verifiedAssetMetadata($details),
+                ...$verifiedMetadata,
             ])->save();
 
             return $lockedAsset->refresh();
@@ -641,13 +699,18 @@ class CloudflareStreamService
     /** @return array<string, int> */
     private function verifiedAssetMetadata(array $details): array
     {
-        $attributes = [];
         $size = data_get($details, 'size');
         $duration = data_get($details, 'duration');
 
-        if (is_numeric($size) && (int) $size > 0) {
-            $attributes['size_bytes'] = (int) $size;
-        }
+        abort_unless(
+            is_numeric($size)
+                && (int) $size > 0
+                && (int) $size <= $this->maxUploadBytes(),
+            409,
+            'Cloudflare reported a video size outside the configured upload limit.'
+        );
+
+        $attributes = ['size_bytes' => (int) $size];
 
         if (is_numeric($duration) && (float) $duration >= 0) {
             $attributes['duration_seconds'] = (int) round((float) $duration);

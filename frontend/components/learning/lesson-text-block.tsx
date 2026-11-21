@@ -56,6 +56,24 @@ function renderTextWithMarks(
       case "underline":
         return <u key={markKey} className="underline">{acc}</u>;
 
+      case "highlight": {
+        const color = mark.attrs?.color;
+        const safeColor =
+          typeof color === "string" && /^#[\da-f]{3,8}$/i.test(color)
+            ? color
+            : undefined;
+
+        return (
+          <mark
+            key={markKey}
+            className="rounded bg-yellow-200 px-0.5"
+            style={safeColor ? { backgroundColor: safeColor } : undefined}
+          >
+            {acc}
+          </mark>
+        );
+      }
+
       case "link": {
         const safeUrl = sanitizeHref(mark.attrs?.href);
         if (!safeUrl) return <span key={markKey}>{acc}</span>;
@@ -136,7 +154,7 @@ function renderNode(
       );
 
     case "orderedList": {
-      const start = Number(node.attrs?.start) || 1;
+      const start = Number(node.attrs?.order ?? node.attrs?.start) || 1;
       return (
         <ol
           key={key}

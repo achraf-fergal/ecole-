@@ -81,6 +81,85 @@ class LessonContentController extends Controller
         ]);
     }
 
+    /** List revision metadata without exposing mutable revision records. */
+    public function revisionHistory(Request $request): JsonResponse
+    {
+        [$center, , $lesson] = $this->resolveLessonContext($request);
+
+        $revisions = LessonRevision::query()
+            ->forCenter($center->id)
+            ->forLesson($lesson->id)
+            ->with('createdBy:id,name')
+            ->orderByDesc('version_number')
+            ->get()
+            ->map(fn (LessonRevision $revision): array => [
+                'id' => $revision->id,
+                'version_number' => $revision->version_number,
+                'status' => $revision->status,
+                'title' => $revision->title,
+                'created_at' => $revision->created_at?->toIso8601String(),
+                'published_at' => $revision->published_at?->toIso8601String(),
+                'author' => $revision->createdBy ? [
+                    'id' => $revision->createdBy->id,
+                    'name' => $revision->createdBy->name,
+                ] : null,
+            ])
+            ->values();
+
+        return response()->json(['data' => $revisions]);
+    }
+
+    /** Retrieve one historical revision for read-only inspection. */
+    public function showHistoricalRevision(Request $request): JsonResponse
+    {
+        [, , $lesson] = $this->resolveLessonContext($request);
+        $revision = $this->resolveRevision(
+            $lesson,
+            (string) $request->route('revision')
+        );
+
+        $revision->load([
+            'blocks.asset',
+            'blocks.exercise.questions.options',
+        ]);
+
+        return response()->json([
+            'data' => $this->revisionPayload($revision),
+        ]);
+    }
+
+    /** Restore historical content into a new draft revision. */
+    public function restoreHistoricalRevision(Request $request): JsonResponse
+    {
+        [, , $lesson] = $this->resolveLessonContext($request);
+        $revision = $this->resolveRevision(
+            $lesson,
+            (string) $request->route('revision')
+        );
+        $actor = $request->user();
+
+        abort_unless(
+            $actor instanceof User,
+            401,
+            'Unauthenticated.'
+        );
+
+        $draft = $this->revisionService->createDraftFromRevision(
+            $lesson,
+            $revision,
+            $actor
+        );
+        $draft->load([
+            'blocks.asset',
+            'blocks.exercise.questions.options',
+        ]);
+
+        return response()->json([
+            'message' => 'Historical revision restored as a new draft.',
+            'data' => $this->revisionPayload($draft),
+        ], 201);
+    }
+
     /**
      * Create or retrieve the current draft.
      */

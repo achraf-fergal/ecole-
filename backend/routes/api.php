@@ -201,6 +201,23 @@ Route::prefix('centers/{center}')
                             'show',
                         ])->name('api.centers.admin.learning.content.show');
 
+                        Route::get('/revisions/history', [
+                            LessonContentController::class,
+                            'revisionHistory',
+                        ])->name('api.centers.admin.learning.content.revisions.history');
+
+                        Route::get('/revisions/history/{revision}', [
+                            LessonContentController::class,
+                            'showHistoricalRevision',
+                        ])->name('api.centers.admin.learning.content.revisions.history.show');
+
+                        Route::post('/revisions/{revision}/restore', [
+                            LessonContentController::class,
+                            'restoreHistoricalRevision',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.content.revisions.restore');
+
                         // Create or retrieve the current draft.
                         Route::post('/revisions', [
                             LessonContentController::class,

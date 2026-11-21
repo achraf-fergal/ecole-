@@ -293,9 +293,9 @@ class LessonContentApiTest extends TestCase
                 $this->contentRouteParameters($context)
             )
         );
-        
+
         $initialContentResponse->assertOk();
-        
+
         $initialBlockIds = collect(
             $initialContentResponse->json(
                 'data.draft_revision.blocks',
@@ -530,7 +530,7 @@ class LessonContentApiTest extends TestCase
             'block_type' => 'media',
             'lesson_asset_id' => $asset->id,
         ]);
-        
+
         // Verify the exercise block.
         $this->assertDatabaseHas('lesson_blocks', [
             'center_id' => $context['center']->id,
@@ -538,7 +538,8 @@ class LessonContentApiTest extends TestCase
             'lesson_revision_id' => $revisionId,
             'block_type' => 'exercise',
             'exercise_id' => $exercise->id,
-        ]);    }
+        ]);
+    }
 
     public function test_platform_admin_can_manage_another_centers_lesson(): void
     {
@@ -944,5 +945,231 @@ class LessonContentApiTest extends TestCase
         );
 
         $showResponse->assertForbidden();
+    }
+
+    public function test_tiptap_json_marks_and_nested_lists_round_trip_through_the_api(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $revisionId = $this->createDraftThroughApi($context, $token);
+        $document = [
+            'type' => 'doc',
+            'content' => [
+                [
+                    'type' => 'heading',
+                    'attrs' => ['level' => 2],
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Formatting preserved',
+                        'marks' => [
+                            ['type' => 'bold'],
+                            ['type' => 'italic'],
+                            ['type' => 'link', 'attrs' => [
+                                'href' => 'https://example.test/lesson',
+                                'title' => 'Lesson reference',
+                                'target' => '_blank',
+                                'rel' => 'noopener noreferrer nofollow',
+                                'class' => null,
+                            ]],
+                        ],
+                    ]],
+                ],
+                [
+                    'type' => 'orderedList',
+                    'attrs' => ['start' => 3, 'type' => null],
+                    'content' => [[
+                        'type' => 'listItem',
+                        'content' => [
+                            [
+                                'type' => 'paragraph',
+                                'content' => [[
+                                    'type' => 'text',
+                                    'text' => 'First step',
+                                    'marks' => [['type' => 'underline']],
+                                ]],
+                            ],
+                            [
+                                'type' => 'bulletList',
+                                'content' => [[
+                                    'type' => 'listItem',
+                                    'content' => [[
+                                        'type' => 'paragraph',
+                                        'content' => [[
+                                            'type' => 'text',
+                                            'text' => 'Nested detail',
+                                            'marks' => [[
+                                                'type' => 'highlight',
+                                                'attrs' => ['color' => '#fef08a'],
+                                            ]],
+                                        ]],
+                                    ]],
+                                ]],
+                            ],
+                        ],
+                    ]],
+                ],
+                [
+                    'type' => 'codeBlock',
+                    'attrs' => ['language' => 'javascript'],
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'const lesson = true;',
+                    ]],
+                ],
+            ],
+        ];
+
+        $created = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.content.blocks.text.store',
+                $this->revisionRouteParameters($context, $revisionId)
+            ),
+            ['content_json' => $document]
+        );
+
+        $created->assertCreated();
+        $blockId = (int) $created->json('data.id');
+        $this->assertSame($document, $created->json('data.content_json'));
+
+        $updatedDocument = $document;
+        $updatedDocument['content'][0]['content'][0]['text'] = 'Updated without losing marks';
+
+        $updated = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->patchJson(
+            route(
+                'api.centers.admin.learning.content.blocks.update',
+                $this->blockRouteParameters($context, $revisionId, $blockId)
+            ),
+            ['content_json' => $updatedDocument]
+        );
+
+        $updated->assertOk();
+        $this->assertSame($updatedDocument, $updated->json('data.content_json'));
+
+        $reloaded = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(route(
+            'api.centers.admin.learning.content.show',
+            $this->contentRouteParameters($context)
+        ));
+        $reloaded->assertOk();
+        $reloadedBlock = collect($reloaded->json('data.draft_revision.blocks'))
+            ->firstWhere('id', $blockId);
+        $this->assertSame($updatedDocument, $reloadedBlock['content_json']);
+    }
+
+    public function test_empty_and_unsupported_tiptap_documents_are_rejected(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $revisionId = $this->createDraftThroughApi($context, $token);
+        $route = route(
+            'api.centers.admin.learning.content.blocks.text.store',
+            $this->revisionRouteParameters($context, $revisionId)
+        );
+
+        $empty = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($route, [
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [['type' => 'paragraph']],
+            ],
+        ]);
+        $empty->assertUnprocessable();
+        $empty->assertJsonValidationErrors(['content_json']);
+
+        $unsupported = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($route, [
+            'content_json' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'customEmbed',
+                    'content' => [],
+                ]],
+            ],
+        ]);
+        $unsupported->assertUnprocessable();
+        $unsupported->assertJsonValidationErrors(['content_json']);
+    }
+
+    public function test_admin_can_inspect_history_and_restore_as_a_new_draft(): void
+    {
+        $context = $this->createContext();
+        $context['lesson']->update(['body' => null]);
+        $token = $this->tokenFor($context['user']);
+        $service = app(LessonRevisionService::class);
+        $draft = $service->createDraft($context['lesson'], $context['user']);
+        $document = $this->document('Published historical content');
+        $sourceBlock = $service->addTextBlock($draft, $document);
+        $published = $service->publish($context['lesson'], $context['user']);
+
+        $history = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(route(
+            'api.centers.admin.learning.content.revisions.history',
+            $this->contentRouteParameters($context)
+        ));
+        $history->assertOk();
+        $history->assertJsonPath('data.0.id', $published->id);
+        $history->assertJsonPath('data.0.version_number', $published->version_number);
+        $history->assertJsonPath('data.0.status', LessonRevision::STATUS_PUBLISHED);
+        $history->assertJsonPath('data.0.author.name', $context['user']->name);
+
+        $inspection = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(route(
+            'api.centers.admin.learning.content.revisions.history.show',
+            $this->revisionRouteParameters($context, $published->id)
+        ));
+        $inspection->assertOk();
+        $this->assertSame($document, $inspection->json('data.blocks.0.content_json'));
+
+        $restored = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(route(
+            'api.centers.admin.learning.content.revisions.restore',
+            $this->revisionRouteParameters($context, $published->id)
+        ));
+        $restored->assertCreated();
+        $restored->assertJsonPath('data.status', LessonRevision::STATUS_DRAFT);
+        $this->assertNotSame($published->id, $restored->json('data.id'));
+        $this->assertSame($published->version_number + 1, $restored->json('data.version_number'));
+        $this->assertSame($document, $restored->json('data.blocks.0.content_json'));
+
+        $this->assertDatabaseHas('lesson_revisions', [
+            'id' => $published->id,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+        ]);
+        $this->assertDatabaseHas('lesson_blocks', [
+            'id' => $sourceBlock->id,
+            'lesson_revision_id' => $published->id,
+            'content_json' => json_encode($document),
+        ]);
+
+        $secondRestore = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(route(
+            'api.centers.admin.learning.content.revisions.restore',
+            $this->revisionRouteParameters($context, $published->id)
+        ));
+        $secondRestore->assertUnprocessable();
+        $this->assertDatabaseHas('lessons', [
+            'id' => $context['lesson']->id,
+            'draft_revision_id' => $restored->json('data.id'),
+        ]);
     }
 }

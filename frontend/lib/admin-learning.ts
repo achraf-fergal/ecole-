@@ -25,6 +25,16 @@ export interface AdminLessonRevision {
   blocks: LessonBlock[];
 }
 
+export interface AdminLessonRevisionHistoryItem {
+  id: number;
+  version_number: number;
+  status: "draft" | "published" | "superseded";
+  title: string;
+  created_at: string | null;
+  published_at: string | null;
+  author: { id: number; name: string } | null;
+}
+
 export interface AdminLessonContent {
   course: {
     id: number;
@@ -111,6 +121,55 @@ export async function createAdminDraft(
   const response = await authFetch(endpoint, { method: "POST" });
 
   return handleResponse<AdminLessonRevision>(response, "Failed to create lesson draft.");
+}
+
+/** Retrieve immutable revision metadata for the lesson history panel. */
+export async function getAdminLessonRevisionHistory(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string
+): Promise<AdminLessonRevisionHistoryItem[]> {
+  const endpoint = `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/revisions/history`;
+  const response = await authFetch(endpoint, { method: "GET" });
+
+  return handleResponse<AdminLessonRevisionHistoryItem[]>(
+    response,
+    "Failed to load lesson revision history."
+  );
+}
+
+/** Load a historical revision as read-only content for the editor preview. */
+export async function getAdminHistoricalRevision(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  revisionId: number
+): Promise<AdminLessonRevision> {
+  const endpoint = `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/revisions/history/${revisionId}`;
+  const response = await authFetch(endpoint, { method: "GET" });
+
+  return handleResponse<AdminLessonRevision>(
+    response,
+    "Failed to load the selected lesson revision."
+  );
+}
+
+/** Copy a published or superseded revision into a new current draft. */
+export async function restoreAdminHistoricalRevision(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  revisionId: number
+): Promise<AdminLessonRevision> {
+  const endpoint = `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/revisions/${revisionId}/restore`;
+  const response = await authFetch(endpoint, {
+    method: "POST",
+  });
+
+  return handleResponse<AdminLessonRevision>(
+    response,
+    "Failed to restore the selected lesson revision."
+  );
 }
 
 /**

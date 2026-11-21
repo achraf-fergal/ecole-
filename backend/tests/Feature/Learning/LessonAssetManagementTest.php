@@ -18,6 +18,7 @@ use App\Models\PlatformAdmin;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\Learning\CloudflareStreamService;
 use App\Services\Learning\LessonRevisionService;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -515,6 +516,144 @@ class LessonAssetManagementTest extends TestCase
         $asset->refresh();
         $this->assertSame(14900000, $asset->size_bytes);
         $this->assertSame(82, $asset->duration_seconds);
+    }
+
+    public function test_cloudflare_video_limit_cannot_exceed_the_configured_account_cap(): void
+    {
+        config([
+            'services.cloudflare_stream.max_upload_bytes' => 40000000000,
+            'services.cloudflare_stream.account_max_upload_bytes' => 29999999999,
+        ]);
+
+        $this->assertSame(
+            29999999999,
+            app(CloudflareStreamService::class)->maxUploadBytes()
+        );
+    }
+
+    public function test_cloudflare_actual_size_above_the_application_limit_fails_closed(): void
+    {
+        $this->configureCloudflare();
+        config(['services.cloudflare_stream.max_upload_bytes' => 50]);
+        $context = $this->createContext();
+        $asset = LessonAsset::factory()
+            ->forLesson($context['lesson'])
+            ->video()
+            ->create([
+                'status' => LessonAsset::STATUS_PROCESSING,
+                'size_bytes' => 45,
+            ]);
+
+        Http::fake(function ($request) use ($asset) {
+            if ($request->method() === 'DELETE') {
+                return Http::response(['success' => true]);
+            }
+
+            return Http::response([
+                'success' => true,
+                'result' => [
+                    'uid' => $asset->provider_asset_id,
+                    'readyToStream' => true,
+                    'status' => ['state' => 'ready', 'pctComplete' => '100'],
+                    'size' => 51,
+                    'duration' => 10,
+                ],
+            ]);
+        });
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($context['user'])
+        )->getJson(
+            route(
+                'api.centers.admin.learning.assets.status',
+                [
+                    ...$this->assetRouteParameters($context),
+                    'asset' => $asset->id,
+                ]
+            )
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.status', LessonAsset::STATUS_FAILED);
+        $response->assertJsonPath('data.error_code', 'UPLOAD_TOO_LARGE');
+        $this->assertSame(45, $asset->refresh()->size_bytes);
+        $this->assertSame(LessonAsset::STATUS_FAILED, $asset->status);
+        Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+            && str_contains($request->url(), $asset->provider_asset_id)
+        );
+    }
+
+    public function test_cloudflare_ready_video_without_provider_size_is_rejected_and_cleaned_up(): void
+    {
+        $this->configureCloudflare();
+        $context = $this->createContext();
+        $asset = LessonAsset::factory()
+            ->forLesson($context['lesson'])
+            ->video()
+            ->create(['status' => LessonAsset::STATUS_PROCESSING]);
+
+        Http::fake(function ($request) use ($asset) {
+            if ($request->method() === 'DELETE') {
+                return Http::response(['success' => true]);
+            }
+
+            return Http::response([
+                'success' => true,
+                'result' => [
+                    'uid' => $asset->provider_asset_id,
+                    'readyToStream' => true,
+                    'status' => ['state' => 'ready', 'pctComplete' => '100'],
+                    'duration' => 10,
+                ],
+            ]);
+        });
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($context['user'])
+        )->getJson(
+            route(
+                'api.centers.admin.learning.assets.status',
+                [
+                    ...$this->assetRouteParameters($context),
+                    'asset' => $asset->id,
+                ]
+            )
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.status', LessonAsset::STATUS_FAILED);
+        $response->assertJsonPath('data.error_code', 'UPLOAD_SIZE_UNVERIFIED');
+        $this->assertSame(LessonAsset::STATUS_FAILED, $asset->refresh()->status);
+        Http::assertSent(fn ($request): bool => $request->method() === 'DELETE');
+    }
+
+    public function test_generic_archive_rejects_a_processing_cloudflare_video(): void
+    {
+        $this->configureCloudflare();
+        $context = $this->createContext();
+        $asset = LessonAsset::factory()
+            ->forLesson($context['lesson'])
+            ->video()
+            ->create(['status' => LessonAsset::STATUS_PROCESSING]);
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($context['user'])
+        )->patchJson(
+            route(
+                'api.centers.admin.learning.assets.archive',
+                [
+                    ...$this->assetRouteParameters($context),
+                    'asset' => $asset->id,
+                ]
+            )
+        );
+
+        $response->assertStatus(409);
+        $this->assertSame(LessonAsset::STATUS_PROCESSING, $asset->refresh()->status);
+        Http::assertNothingSent();
     }
 
     public function test_video_remains_processing_until_every_cloudflare_quality_is_ready(): void

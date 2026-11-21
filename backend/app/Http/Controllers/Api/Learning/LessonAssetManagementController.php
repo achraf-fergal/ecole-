@@ -262,13 +262,7 @@ class LessonAssetManagementController extends Controller
     {
         [$center, , $lesson] = $this->resolveLessonContext($request);
 
-        $maximumBytes = max(
-            1,
-            min(
-                53687091200,
-                (int) config('services.cloudflare_stream.max_upload_bytes', 5368709120)
-            )
-        );
+        $maximumBytes = $this->cloudflareStream->maxUploadBytes();
 
         $validated = $request->validate([
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -522,6 +516,14 @@ class LessonAssetManagementController extends Controller
 
         $this->lessonRevisionService
             ->assertAssetCanBeModified($asset);
+
+        abort_unless(
+            ! $asset->isProviderVideo()
+                || $asset->video_provider !== 'cloudflare_stream'
+                || $asset->status !== LessonAsset::STATUS_PROCESSING,
+            409,
+            'Cancel the Cloudflare upload before archiving this video.'
+        );
 
         $asset->update([
             'status' => LessonAsset::STATUS_ARCHIVED,
