@@ -88,7 +88,13 @@ class ExerciseAttemptController extends Controller
     {
         [$center, $course, $lesson, $exercise, $studentProfile] = $this->resolveContext($request);
 
+        $user = $request->user();
+        abort_unless($user instanceof User, 401, 'Unauthenticated.');
+
         $attempt = $this->attemptService->startOrResumeAttempt(
+            $user,
+            $course,
+            $lesson,
             $exercise,
             $studentProfile,
             $center

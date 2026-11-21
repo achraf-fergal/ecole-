@@ -311,6 +311,110 @@ export async function uploadAdminLessonAsset(
   return handleResponse<LearningLessonAsset>(response, "Failed to upload asset.");
 }
 
+export interface AdminVideoUploadProvision {
+  asset: LearningLessonAsset;
+  upload_url: string;
+  protocol: "basic" | "tus";
+  expires_at: string;
+  chunk_size_bytes: number | null;
+}
+
+export interface AdminVideoStatus {
+  asset: LearningLessonAsset;
+  status: LearningLessonAsset["status"];
+  progress: number | null;
+  error_code: string | null;
+}
+
+/** Ask Laravel for a one-time upload capability; video bytes go to Cloudflare. */
+export async function requestAdminVideoUpload(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  payload: {
+    title: string;
+    original_filename: string;
+    mime_type: string;
+    size_bytes: number;
+    resumable: boolean;
+  }
+): Promise<AdminVideoUploadProvision> {
+  const response = await authFetch(`${buildAssetBasePath(centerSlug, courseSlug, lessonId)}/video-upload`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  return handleResponse<AdminVideoUploadProvision>(response, "Failed to prepare video upload.");
+}
+
+/** Upload a small video directly to Cloudflare using its one-time Basic POST URL. */
+export function uploadVideoBasic(
+  uploadUrl: string,
+  file: File,
+  onProgress: (progress: number) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append("file", file);
+
+    xhr.open("POST", uploadUrl);
+    xhr.withCredentials = false;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(100, (event.loaded / event.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        resolve();
+      } else {
+        reject(new Error("Cloudflare rejected the video upload."));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Video upload was interrupted."));
+    xhr.onabort = () => reject(new DOMException("Video upload cancelled.", "AbortError"));
+
+    if (signal?.aborted) {
+      xhr.abort();
+      return;
+    }
+
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(formData);
+  });
+}
+
+/** Poll Cloudflare's canonical processing status through the authorized backend. */
+export async function getAdminVideoStatus(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  assetId: number
+): Promise<AdminVideoStatus> {
+  const response = await authFetch(`${buildAssetBasePath(centerSlug, courseSlug, lessonId)}/${assetId}/status`, {
+    method: "GET",
+  });
+
+  return handleResponse<AdminVideoStatus>(response, "Failed to retrieve video status.");
+}
+
+/** Cancel a still-processing upload and clean up its Cloudflare video. */
+export async function cancelAdminVideoUpload(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  assetId: number
+): Promise<LearningLessonAsset> {
+  const response = await authFetch(`${buildAssetBasePath(centerSlug, courseSlug, lessonId)}/${assetId}/cancel`, {
+    method: "POST",
+  });
+
+  return handleResponse<LearningLessonAsset>(response, "Failed to cancel video upload.");
+}
+
 /*
 |--------------------------------------------------------------------------
 | Exercise Authoring API

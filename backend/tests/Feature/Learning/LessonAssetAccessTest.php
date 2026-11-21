@@ -571,6 +571,37 @@ class LessonAssetAccessTest extends TestCase
         ]);
     }
 
+    public function test_processing_video_cannot_be_played_even_if_a_block_references_it(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->video()
+            ->create([
+                'status' => LessonAsset::STATUS_PROCESSING,
+            ]);
+
+        // Model a stale or manually corrupted block; status remains the access gate.
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
+        Http::preventStrayRequests();
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($user)
+        )->getJson(
+            $this->assetAccessUrl($center, $course, $lesson, $asset)
+        );
+
+        $response->assertNotFound();
+    }
+
     public function test_student_cannot_access_active_asset_not_referenced_by_current_published_revision(): void
     {
         [

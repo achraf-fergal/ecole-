@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\Auth\EmailVerificationController;
 use App\Http\Controllers\Api\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\Auth\PasswordResetController;
 use App\Http\Controllers\Api\Learning\AdminExerciseController;
+use App\Http\Controllers\Api\Learning\CloudflareStreamWebhookController;
 use App\Http\Controllers\Api\Learning\ExerciseAttemptController;
 use App\Http\Controllers\Api\Learning\LearningLessonController;
 use App\Http\Controllers\Api\Learning\LearningOverviewController;
@@ -25,6 +26,10 @@ use Illuminate\Support\Facades\Route;
 | Public Routes
 |--------------------------------------------------------------------------
 */
+
+Route::post('/webhooks/cloudflare/stream', CloudflareStreamWebhookController::class)
+    ->middleware('throttle:120,1')
+    ->name('api.webhooks.cloudflare.stream');
 
 Route::prefix('public/centers/{center:slug}')->group(function () {
     // Public course registration request.
@@ -306,6 +311,25 @@ Route::prefix('centers/{center}')
                         ])
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.assets.store');
+
+                        Route::post('/video-upload', [
+                            LessonAssetManagementController::class,
+                            'videoUpload',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.video-upload');
+
+                        Route::get('/{asset}/status', [
+                            LessonAssetManagementController::class,
+                            'videoStatus',
+                        ])->name('api.centers.admin.learning.assets.status');
+
+                        Route::post('/{asset}/cancel', [
+                            LessonAssetManagementController::class,
+                            'cancelVideoUpload',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.cancel');
 
                         Route::patch('/{asset}', [
                             LessonAssetManagementController::class,

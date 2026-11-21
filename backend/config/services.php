@@ -45,6 +45,41 @@ return [
         'api_token' => env('CLOUDFLARE_STREAM_API_TOKEN'),
         'customer_code' => env('CLOUDFLARE_STREAM_CUSTOMER_CODE'),
 
+        'allowed_origins' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env(
+                'CLOUDFLARE_STREAM_ALLOWED_ORIGINS',
+                'http://localhost:3000'
+            ))
+        ))),
+
+        'max_duration_seconds' => (int) env(
+            'CLOUDFLARE_STREAM_MAX_DURATION_SECONDS',
+            3600
+        ),
+
+        'upload_expiry_minutes' => (int) env(
+            'CLOUDFLARE_STREAM_UPLOAD_EXPIRY_MINUTES',
+            30
+        ),
+
+        'max_upload_bytes' => (int) env(
+            'CLOUDFLARE_STREAM_MAX_UPLOAD_BYTES',
+            5368709120
+        ),
+
+        'tus_chunk_size_bytes' => (int) env(
+            'CLOUDFLARE_STREAM_TUS_CHUNK_SIZE_BYTES',
+            52428800
+        ),
+
+        'webhook_secret' => env('CLOUDFLARE_STREAM_WEBHOOK_SECRET'),
+
+        'webhook_tolerance_seconds' => (int) env(
+            'CLOUDFLARE_STREAM_WEBHOOK_TOLERANCE_SECONDS',
+            300
+        ),
+
         'token_ttl_minutes' => (int) env(
             'CLOUDFLARE_STREAM_TOKEN_TTL_MINUTES',
             10

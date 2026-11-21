@@ -7,6 +7,7 @@ use App\Models\Center;
 use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Services\Learning\CloudflareStreamService;
 use App\Services\Learning\LearningAccessService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
@@ -15,6 +16,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Throwable;
@@ -23,7 +25,8 @@ class LessonAssetManagementController extends Controller
 {
     public function __construct(
         protected LearningAccessService $learningAccess,
-        protected LessonRevisionService $lessonRevisionService
+        protected LessonRevisionService $lessonRevisionService,
+        protected CloudflareStreamService $cloudflareStream
     ) {}
 
     /**
@@ -254,6 +257,176 @@ class LessonAssetManagementController extends Controller
         ], 201);
     }
 
+    /** Request a one-time Cloudflare Stream upload URL and create a pending asset. */
+    public function videoUpload(Request $request): JsonResponse
+    {
+        [$center, , $lesson] = $this->resolveLessonContext($request);
+
+        $maximumBytes = max(
+            1,
+            min(
+                53687091200,
+                (int) config('services.cloudflare_stream.max_upload_bytes', 5368709120)
+            )
+        );
+
+        $validated = $request->validate([
+            'title' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'original_filename' => ['required', 'string', 'max:255'],
+            'mime_type' => [
+                'required',
+                'string',
+                'max:127',
+                'regex:/^video\/[A-Za-z0-9.+-]+$/',
+            ],
+            'size_bytes' => ['required', 'integer', 'min:1', 'max:'.$maximumBytes],
+            'resumable' => ['sometimes', 'boolean'],
+
+            'asset_type' => ['prohibited'],
+            'status' => ['prohibited'],
+            'duration_seconds' => ['prohibited'],
+            'video_provider' => ['prohibited'],
+            'provider_asset_id' => ['prohibited'],
+            'storage_disk' => ['prohibited'],
+            'storage_key' => ['prohibited'],
+            'maxDurationSeconds' => ['prohibited'],
+            'expiry' => ['prohibited'],
+            'allowedOrigins' => ['prohibited'],
+            'requireSignedURLs' => ['prohibited'],
+            'upload_url' => ['prohibited'],
+            'uid' => ['prohibited'],
+        ]);
+
+        $filename = $this->safeVideoFilename($validated['original_filename']);
+        $title = trim((string) ($validated['title'] ?? ''));
+        $title = $title !== ''
+            ? mb_substr($title, 0, 255)
+            : mb_substr(pathinfo($filename, PATHINFO_FILENAME), 0, 255);
+        $sizeBytes = (int) $validated['size_bytes'];
+        $useTus = $sizeBytes > 209715200
+            || filter_var($validated['resumable'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        $upload = $useTus
+            ? $this->cloudflareStream->createTusUploadEndpoint(
+                $center,
+                $lesson,
+                $title,
+                $filename,
+                $validated['mime_type'],
+                $sizeBytes
+            )
+            : $this->cloudflareStream->createDirectUpload(
+                $center,
+                $lesson,
+                $title
+            );
+
+        try {
+            $asset = DB::transaction(function () use (
+                $center,
+                $lesson,
+                $title,
+                $filename,
+                $validated,
+                $sizeBytes,
+                $upload
+            ): LessonAsset {
+                $lockedLesson = Lesson::query()
+                    ->forCenter($center->id)
+                    ->whereKey($lesson->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                return LessonAsset::query()->create([
+                    'center_id' => $center->id,
+                    'lesson_id' => $lockedLesson->id,
+                    'title' => $title,
+                    'asset_type' => LessonAsset::TYPE_VIDEO,
+                    'storage_disk' => null,
+                    'storage_key' => null,
+                    'original_filename' => $filename,
+                    'mime_type' => $validated['mime_type'],
+                    'size_bytes' => $sizeBytes,
+                    'video_provider' => 'cloudflare_stream',
+                    'provider_asset_id' => $upload['uid'],
+                    'external_url' => null,
+                    'duration_seconds' => null,
+                    'alt_text' => null,
+                    'caption' => null,
+                    'is_downloadable' => false,
+                    'sort_order' => ((int) $lockedLesson->assets()->max('sort_order')) + 1,
+                    'status' => LessonAsset::STATUS_PROCESSING,
+                ]);
+            }, 3);
+        } catch (Throwable $exception) {
+            if (! $this->cloudflareStream->deleteVideo($upload['uid'])) {
+                Log::warning('Cloudflare Stream upload cleanup failed after asset persistence error.', [
+                    'provider_asset_id' => $upload['uid'],
+                    'center_id' => $center->id,
+                    'lesson_id' => $lesson->id,
+                ]);
+            }
+
+            throw $exception;
+        }
+
+        return response()->json([
+            'message' => 'Video upload endpoint is ready.',
+            'data' => [
+                'asset' => $this->assetPayload($asset),
+                'upload_url' => $upload['upload_url'],
+                'protocol' => $useTus ? 'tus' : 'basic',
+                'expires_at' => $upload['expires_at'],
+                'chunk_size_bytes' => $upload['chunk_size'] ?? null,
+            ],
+        ], 201);
+    }
+
+    /** Poll and synchronize the canonical Cloudflare processing state. */
+    public function videoStatus(Request $request): JsonResponse
+    {
+        [, , $lesson] = $this->resolveLessonContext($request);
+        $asset = $this->resolveAsset($lesson, (string) $request->route('asset'));
+
+        abort_unless(
+            $asset->asset_type === LessonAsset::TYPE_VIDEO
+                && $asset->video_provider === 'cloudflare_stream'
+                && $asset->isProviderVideo(),
+            404,
+            'Video asset not found.'
+        );
+
+        $details = $this->cloudflareStream->getVideoDetails(
+            $asset->provider_asset_id
+        );
+        $status = $this->cloudflareStream->synchronizeAssetStatus(
+            $asset,
+            $details
+        );
+
+        return response()->json([
+            'data' => [
+                'asset' => $this->assetPayload($status['asset']),
+                'status' => $status['status'],
+                'progress' => $status['progress'],
+                'error_code' => $status['error_code'],
+            ],
+        ]);
+    }
+
+    /** Cancel a pending Cloudflare upload and archive its local asset record. */
+    public function cancelVideoUpload(Request $request): JsonResponse
+    {
+        [, , $lesson] = $this->resolveLessonContext($request);
+        $asset = $this->resolveAsset($lesson, (string) $request->route('asset'));
+        $asset = $this->cloudflareStream->cancelPendingUpload($asset);
+
+        return response()->json([
+            'message' => 'Video upload cancelled.',
+            'data' => $this->assetPayload($asset),
+        ]);
+    }
+
     /**
      * Update an asset's presentation and download metadata.
      */
@@ -373,11 +546,17 @@ class LessonAssetManagementController extends Controller
             (string) $request->route('asset')
         );
 
-        $this->ensureAssetStorageExists($asset);
+        $this->lessonRevisionService->assertAssetCanBeModified($asset);
 
-        $asset->update([
-            'status' => LessonAsset::STATUS_ACTIVE,
-        ]);
+        if ($asset->asset_type === LessonAsset::TYPE_VIDEO) {
+            $asset = $this->cloudflareStream->restoreReadyVideo($asset);
+        } else {
+            $this->ensureAssetStorageExists($asset);
+
+            $asset->update([
+                'status' => LessonAsset::STATUS_ACTIVE,
+            ]);
+        }
 
         return response()->json([
             'message' => 'Learning resource restored successfully.',
@@ -528,6 +707,19 @@ class LessonAssetManagementController extends Controller
                 'The video provider reference is invalid.'
             );
 
+            $details = $this->cloudflareStream->getVideoDetails(
+                $asset->provider_asset_id
+            );
+
+            abort_unless(
+                data_get($details, 'readyToStream') === true
+                    && strtolower((string) data_get($details, 'status.state')) === 'ready'
+                    && is_numeric(data_get($details, 'status.pctComplete'))
+                    && (float) data_get($details, 'status.pctComplete') >= 100,
+                409,
+                'The video is not ready to be restored.'
+            );
+
             return;
         }
 
@@ -596,5 +788,13 @@ class LessonAssetManagementController extends Controller
             0,
             255
         );
+    }
+
+    private function safeVideoFilename(string $filename): string
+    {
+        $filename = basename(str_replace('\\', '/', $filename));
+        $filename = preg_replace('/[\x00-\x1F\x7F]/u', '_', $filename);
+
+        return mb_substr($filename ?: 'learning-video', 0, 255);
     }
 }

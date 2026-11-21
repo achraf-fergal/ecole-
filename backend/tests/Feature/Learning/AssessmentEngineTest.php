@@ -20,10 +20,12 @@ use App\Models\QuestionOption;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\Learning\ExerciseAttemptService;
 use App\Services\Learning\LessonRevisionService;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use PHPOpenSourceSaver\JWTAuth\JWTGuard;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Tests\TestCase;
 
 class AssessmentEngineTest extends TestCase
@@ -928,6 +930,71 @@ class AssessmentEngineTest extends TestCase
         // Must be the same attempt
         $this->assertSame($attemptId1, $attemptId2);
         $this->assertSame(1, ExerciseAttempt::count());
+    }
+
+    public function test_attempt_start_rechecks_current_published_revision_inside_transaction(): void
+    {
+        $context = $this->createAdminContext();
+        $exercise = $this->createPublishedExercise($context, true);
+        $context['lesson'] = $context['lesson']->fresh();
+        $student = $this->createStudentContext(
+            $context['center'],
+            $context['course'],
+            $context['lesson']
+        );
+
+        $attemptService = app(ExerciseAttemptService::class);
+        [$authorizedExercise, $authorizedProfile] = $attemptService
+            ->resolveAuthorizedExercise(
+                $student['studentUser'],
+                $context['center'],
+                $context['course'],
+                $context['lesson'],
+                $exercise->id
+            );
+
+        // Simulate publication completing after the first authorization check.
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft(
+            $context['lesson'],
+            $context['user']
+        );
+        $exerciseBlock = $draft->blocks->firstWhere(
+            'exercise_id',
+            $exercise->id
+        );
+        $this->assertNotNull($exerciseBlock);
+
+        $revisionService->deleteBlock($draft, $exerciseBlock->id);
+        $revisionService->addTextBlock($draft, [
+            'type' => 'doc',
+            'content' => [
+                [
+                    'type' => 'paragraph',
+                    'content' => [
+                        ['type' => 'text', 'text' => 'Updated lesson content.'],
+                    ],
+                ],
+            ],
+        ]);
+        $revisionService->publish($context['lesson'], $context['user']);
+
+        try {
+            $attemptService->startOrResumeAttempt(
+                $student['studentUser'],
+                $context['course'],
+                $context['lesson'],
+                $authorizedExercise,
+                $authorizedProfile,
+                $context['center']
+            );
+
+            $this->fail('An attempt must not start for an exercise removed from the published revision.');
+        } catch (NotFoundHttpException) {
+            // The transaction sees the newly published revision and rejects the stale context.
+        }
+
+        $this->assertDatabaseCount('exercise_attempts', 0);
     }
 
     public function test_max_attempts_limit_and_submitting_twice_are_enforced(): void

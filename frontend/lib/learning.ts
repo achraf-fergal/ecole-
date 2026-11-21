@@ -194,7 +194,7 @@ export interface LearningLessonAsset {
   caption: string | null;
   is_downloadable: boolean;
   sort_order: number;
-  status: "active" | "archived";
+  status: "processing" | "active" | "failed" | "archived";
 }
 
 /*

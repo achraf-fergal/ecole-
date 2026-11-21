@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAdminLessonContent,
   createAdminDraft,
@@ -16,6 +16,10 @@ import {
   publishAdminLesson,
   getAdminLessonAssets,
   uploadAdminLessonAsset,
+  requestAdminVideoUpload,
+  uploadVideoBasic,
+  getAdminVideoStatus,
+  cancelAdminVideoUpload,
   type AdminLessonContent,
   type AdminLessonRevision,
 } from "@/lib/admin-learning";
@@ -70,7 +74,19 @@ export default function UnifiedLessonEditor({
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadAltText, setUploadAltText] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadType, setUploadType] = useState<"image" | "file">("image");
+  const [uploadType, setUploadType] = useState<"image" | "file" | "video">("image");
+  const [useResumableVideoUpload, setUseResumableVideoUpload] = useState(false);
+  const [videoUploadState, setVideoUploadState] = useState<{
+    assetId: number;
+    protocol: "basic" | "tus";
+    phase: "waiting_url" | "uploading" | "interrupted" | "processing" | "ready" | "failed" | "cancelled";
+    status: LearningLessonAsset["status"];
+    progress: number | null;
+    errorCode: string | null;
+  } | null>(null);
+  const videoAbortController = useRef<AbortController | null>(null);
+  const tusUploadRef = useRef<import("tus-js-client").Upload | null>(null);
+  const videoSessionKeyRef = useRef<string | null>(null);
 
   // Exercise selection & creation
   const [selectedExerciseId, setSelectedExerciseId] = useState<number | "">("");
@@ -144,6 +160,41 @@ export default function UnifiedLessonEditor({
       void loadData();
     });
   }, [loadData]);
+
+  useEffect(() => {
+    const current = videoUploadState;
+    if (!current || current.assetId < 1 || current.status !== "processing" || current.phase === "uploading") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void getAdminVideoStatus(centerSlug, courseSlug, lessonId, current.assetId)
+        .then((status) => {
+          setAssets((previous) => previous.map((asset) =>
+            asset.id === current.assetId ? status.asset : asset
+          ));
+          if (status.status === "active") {
+            setSelectedAssetId(current.assetId);
+          }
+          setVideoUploadState((previous) => previous?.assetId === current.assetId
+            ? {
+                ...previous,
+                status: status.status,
+                phase: status.status === "active"
+                  ? "ready"
+                  : status.status === "failed"
+                    ? "failed"
+                    : previous.phase === "waiting_url" ? "processing" : previous.phase,
+                progress: status.progress,
+                errorCode: status.error_code,
+              }
+            : previous);
+        })
+        .catch(() => undefined);
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [centerSlug, courseSlug, lessonId, videoUploadState]);
 
   // Flash messages helper
   const showSuccess = (msg: string) => {
@@ -307,9 +358,265 @@ export default function UnifiedLessonEditor({
     }
   };
 
+  const checkVideoStatus = async (assetId: number) => {
+    const status = await getAdminVideoStatus(centerSlug, courseSlug, lessonId, assetId);
+    setAssets((previous) => previous.map((asset) =>
+      asset.id === assetId ? status.asset : asset
+    ));
+    if (status.status === "active") {
+      setSelectedAssetId(assetId);
+    }
+    setVideoUploadState((previous) => previous?.assetId === assetId
+      ? {
+          ...previous,
+          status: status.status,
+          phase: status.status === "active"
+            ? "ready"
+            : status.status === "failed"
+              ? "failed"
+              : "processing",
+          progress: status.progress,
+          errorCode: status.error_code,
+        }
+      : previous);
+  };
+
+  const handleCheckVideoStatus = async (assetId: number) => {
+    setError(null);
+    try {
+      await checkVideoStatus(assetId);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to retrieve video status.");
+    }
+  };
+
+  const handleVideoUpload = async () => {
+    if (!uploadFile) return;
+
+    setIsUploadingAsset(true);
+    setError(null);
+    setVideoUploadState({
+      assetId: 0,
+      protocol: uploadFile.size > 200 * 1024 * 1024 || useResumableVideoUpload ? "tus" : "basic",
+      phase: "waiting_url",
+      status: "processing",
+      progress: 0,
+      errorCode: null,
+    });
+
+    let tusStarted = false;
+
+    try {
+      const useTus = uploadFile.size > 200 * 1024 * 1024 || useResumableVideoUpload;
+      let provision: Awaited<ReturnType<typeof requestAdminVideoUpload>> | null = null;
+      let resumableAssetId: number | null = null;
+
+      if (useTus) {
+        const sessionKey = [
+          "cloudflare-tus",
+          centerSlug,
+          courseSlug,
+          lessonId,
+          uploadFile.name,
+          uploadFile.size,
+          uploadFile.lastModified,
+        ].join(":");
+        videoSessionKeyRef.current = sessionKey;
+
+        const saved = window.sessionStorage.getItem(sessionKey);
+        if (saved) {
+          try {
+            const previous = JSON.parse(saved) as {
+              asset_id?: number;
+              upload_url?: string;
+              expires_at?: string;
+            };
+            const savedAsset = assets.find((asset) =>
+              asset.id === previous.asset_id
+                && asset.asset_type === "video"
+                && asset.status === "processing"
+            );
+
+            if (
+              savedAsset
+              && typeof previous.upload_url === "string"
+              && typeof previous.expires_at === "string"
+              && Date.parse(previous.expires_at) > Date.now()
+            ) {
+              resumableAssetId = savedAsset.id;
+              provision = {
+                asset: savedAsset,
+                upload_url: previous.upload_url,
+                protocol: "tus",
+                expires_at: previous.expires_at,
+                chunk_size_bytes: 50 * 1024 * 1024,
+              };
+            } else {
+              window.sessionStorage.removeItem(sessionKey);
+            }
+          } catch {
+            window.sessionStorage.removeItem(sessionKey);
+          }
+        }
+      }
+
+      if (!provision) {
+        const createdProvision = await requestAdminVideoUpload(centerSlug, courseSlug, lessonId, {
+          title: uploadTitle.trim(),
+          original_filename: uploadFile.name,
+          mime_type: uploadFile.type || "video/mp4",
+          size_bytes: uploadFile.size,
+          resumable: useTus,
+        });
+        provision = createdProvision;
+
+        setAssets((previous) => [
+          ...previous.filter((asset) => asset.id !== createdProvision.asset.id),
+          createdProvision.asset,
+        ]);
+      }
+
+      const uploadProvision = provision;
+      if (!uploadProvision) {
+        throw new Error("Failed to prepare the video upload.");
+      }
+
+      const assetId = resumableAssetId ?? uploadProvision.asset.id;
+      setVideoUploadState({
+        assetId,
+        protocol: uploadProvision.protocol,
+        phase: "waiting_url",
+        status: uploadProvision.asset.status,
+        progress: 0,
+        errorCode: null,
+      });
+
+      if (uploadProvision.protocol === "basic") {
+        const abortController = new AbortController();
+        videoAbortController.current = abortController;
+        setVideoUploadState((previous) => previous
+          ? { ...previous, phase: "uploading" }
+          : previous);
+
+        await uploadVideoBasic(
+          uploadProvision.upload_url,
+          uploadFile,
+          (progress) => setVideoUploadState((previous) => previous
+            ? { ...previous, progress }
+            : previous),
+          abortController.signal
+        );
+
+        videoAbortController.current = null;
+        setVideoUploadState((previous) => previous
+          ? { ...previous, phase: "processing", status: "processing", progress: 100 }
+          : previous);
+        setUploadFile(null);
+        showSuccess("Upload complete. Cloudflare is processing the video.");
+        void getAdminLessonAssets(centerSlug, courseSlug, lessonId).then(setAssets).catch(() => undefined);
+        return;
+      }
+
+      const tus = await import("tus-js-client");
+      const upload = new tus.Upload(uploadFile, {
+        uploadUrl: uploadProvision.upload_url,
+        chunkSize: uploadProvision.chunk_size_bytes ?? 50 * 1024 * 1024,
+        retryDelays: [0, 1000, 3000, 5000, 10000],
+        metadata: {
+          name: uploadFile.name,
+          filetype: uploadFile.type || "video/mp4",
+        },
+        onProgress: (uploaded, total) => {
+          setVideoUploadState((previous) => previous
+            ? { ...previous, progress: total > 0 ? Math.min(100, (uploaded / total) * 100) : 0 }
+            : previous);
+        },
+        onError: () => {
+          setIsUploadingAsset(false);
+          setVideoUploadState((previous) => previous
+            ? { ...previous, phase: "interrupted" }
+            : previous);
+          setError("Video upload was interrupted. Resume it or cancel the pending upload.");
+        },
+        onSuccess: () => {
+          setIsUploadingAsset(false);
+          setVideoUploadState((previous) => previous
+            ? { ...previous, phase: "processing", status: "processing", progress: 100 }
+            : previous);
+          if (videoSessionKeyRef.current) {
+            window.sessionStorage.removeItem(videoSessionKeyRef.current);
+          }
+          setUploadFile(null);
+          showSuccess("Upload complete. Cloudflare is processing the video.");
+          void getAdminLessonAssets(centerSlug, courseSlug, lessonId).then(setAssets).catch(() => undefined);
+        },
+      });
+
+      tusUploadRef.current = upload;
+      if (useTus && videoSessionKeyRef.current) {
+        window.sessionStorage.setItem(videoSessionKeyRef.current, JSON.stringify({
+          asset_id: assetId,
+          upload_url: uploadProvision.upload_url,
+          expires_at: uploadProvision.expires_at,
+        }));
+      }
+      setVideoUploadState((previous) => previous
+        ? { ...previous, phase: "uploading" }
+        : previous);
+      tusStarted = true;
+      upload.start();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to upload video.");
+      setVideoUploadState((previous) => previous
+        ? { ...previous, phase: "interrupted" }
+        : previous);
+    } finally {
+      if (!tusStarted) {
+        setIsUploadingAsset(false);
+      }
+    }
+  };
+
+  const handleResumeVideoUpload = () => {
+    if (!tusUploadRef.current) return;
+    setError(null);
+    setIsUploadingAsset(true);
+    setVideoUploadState((previous) => previous
+      ? { ...previous, phase: "uploading" }
+      : previous);
+    tusUploadRef.current.start();
+  };
+
+  const handleCancelVideoUpload = async (assetId: number) => {
+    setError(null);
+    try {
+      videoAbortController.current?.abort();
+      await tusUploadRef.current?.abort(false);
+      const archived = await cancelAdminVideoUpload(centerSlug, courseSlug, lessonId, assetId);
+      setAssets((previous) => previous.map((asset) => asset.id === assetId ? archived : asset));
+      if (videoSessionKeyRef.current) {
+        window.sessionStorage.removeItem(videoSessionKeyRef.current);
+      }
+      tusUploadRef.current = null;
+      videoAbortController.current = null;
+      setVideoUploadState((previous) => previous?.assetId === assetId
+        ? { ...previous, phase: "cancelled", status: "archived" }
+        : previous);
+      setIsUploadingAsset(false);
+      setUploadFile(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to cancel video upload.");
+      void getAdminLessonAssets(centerSlug, courseSlug, lessonId).then(setAssets).catch(() => undefined);
+    }
+  };
+
   // Handle Asset Upload
   const handleUploadAsset = async () => {
     if (!uploadFile) return;
+    if (uploadType === "video") {
+      await handleVideoUpload();
+      return;
+    }
 
     setIsUploadingAsset(true);
     setError(null);
@@ -652,6 +959,7 @@ export default function UnifiedLessonEditor({
   const published = content.published_revision;
   const activeBlocks = draft?.blocks ?? published?.blocks ?? [];
   const hasDraft = Boolean(draft);
+  const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 pb-20">
@@ -930,6 +1238,105 @@ export default function UnifiedLessonEditor({
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4 space-y-4">
             <h4 className="text-xs font-black text-[#102b4c]">Add Media Block</h4>
 
+            {assets.some((asset) => asset.asset_type === "video") && (
+              <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
+                <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-600">Video Uploads</h5>
+                {assets.filter((asset) => asset.asset_type === "video").map((asset) => (
+                  <div key={asset.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-bold text-[#102b4c]">
+                        {asset.title || asset.original_filename || `Video #${asset.id}`}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {asset.status === "processing" ? "Processing" : asset.status}
+                        {asset.id === videoUploadState?.assetId && videoUploadState.progress !== null
+                          ? ` · ${Math.round(videoUploadState.progress)}%`
+                          : ""}
+                        {asset.id === videoUploadState?.assetId && videoUploadState.errorCode
+                          ? ` · ${videoUploadState.errorCode}`
+                          : ""}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      {asset.status === "processing" && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleCheckVideoStatus(asset.id)}
+                            className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                          >
+                            Check status
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isUploadingAsset && asset.id !== videoUploadState?.assetId}
+                            onClick={() => void handleCancelVideoUpload(asset.id)}
+                            className="rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {videoUploadState && (
+              <div className="rounded-xl border border-sky-200 bg-sky-50 p-3">
+                <p className="text-xs font-bold text-sky-900">
+                  {videoUploadState.phase === "waiting_url" && "Waiting for upload URL"}
+                  {videoUploadState.phase === "uploading" && `Uploading with ${videoUploadState.protocol.toUpperCase()}`}
+                  {videoUploadState.phase === "interrupted" && "Upload interrupted"}
+                  {videoUploadState.phase === "processing" && "Upload complete; processing"}
+                  {videoUploadState.phase === "ready" && "Ready to insert"}
+                  {videoUploadState.phase === "failed" && "Video processing failed"}
+                  {videoUploadState.phase === "cancelled" && "Upload cancelled"}
+                </p>
+                {(videoUploadState.phase === "uploading" || videoUploadState.phase === "processing") && (
+                  <progress
+                    className="mt-2 h-2 w-full accent-[#0e8988]"
+                    max={100}
+                    value={videoUploadState.progress ?? 0}
+                  />
+                )}
+                {videoUploadState.errorCode && (
+                  <p className="mt-1 text-[11px] text-red-700">Provider code: {videoUploadState.errorCode}</p>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {videoUploadState.phase === "interrupted" && videoUploadState.protocol === "tus" && (
+                    <button
+                      type="button"
+                      disabled={isUploadingAsset}
+                      onClick={handleResumeVideoUpload}
+                      className="rounded-lg bg-[#0e8988] px-3 py-1 text-[11px] font-bold text-white disabled:opacity-50"
+                    >
+                      Resume upload
+                    </button>
+                  )}
+                  {videoUploadState.status === "processing" && videoUploadState.assetId > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleCheckVideoStatus(videoUploadState.assetId)}
+                      className="rounded-lg border border-sky-300 px-3 py-1 text-[11px] font-bold text-sky-900"
+                    >
+                      Retry status check
+                    </button>
+                  )}
+                  {videoUploadState.status === "processing" && videoUploadState.assetId > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleCancelVideoUpload(videoUploadState.assetId)}
+                      className="rounded-lg border border-red-200 px-3 py-1 text-[11px] font-bold text-red-600"
+                    >
+                      Cancel upload
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Select existing */}
             <div>
               <label className="block text-xs font-bold text-slate-700">Select Existing Asset</label>
@@ -941,7 +1348,7 @@ export default function UnifiedLessonEditor({
                 <option value="">-- Choose an uploaded asset --</option>
                 {assets.map((a) => (
                   <option key={a.id} value={a.id}>
-                    #{a.id} - {a.title || a.original_filename} ({a.asset_type})
+                    #{a.id} - {a.title || a.original_filename} ({a.asset_type}, {a.status})
                   </option>
                 ))}
               </select>
@@ -951,11 +1358,11 @@ export default function UnifiedLessonEditor({
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || selectedAsset?.status !== "active"}
                   onClick={() => void handleAddMedia()}
-                  className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83]"
+                  className="rounded-xl bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white hover:bg-[#087b83] disabled:opacity-50"
                 >
-                  Insert Selected Media
+                  {selectedAsset?.status === "active" ? "Insert Selected Media" : "Available after processing"}
                 </button>
               </div>
             )}
@@ -970,11 +1377,12 @@ export default function UnifiedLessonEditor({
                   <label className="block text-[11px] font-bold text-slate-600">Type</label>
                   <select
                     value={uploadType}
-                    onChange={(e) => setUploadType(e.target.value as "image" | "file")}
+                    onChange={(e) => setUploadType(e.target.value as "image" | "file" | "video")}
                     className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
                   >
                     <option value="image">Image (JPG, PNG, WebP)</option>
                     <option value="file">Document (PDF, Word, etc.)</option>
+                    <option value="video">Video (Cloudflare Stream)</option>
                   </select>
                 </div>
 
@@ -1007,10 +1415,27 @@ export default function UnifiedLessonEditor({
                   <label className="block text-[11px] font-bold text-slate-600">Choose File</label>
                   <input
                     type="file"
+                    accept={uploadType === "video" ? "video/*" : uploadType === "image" ? "image/jpeg,image/png,image/webp" : ".pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx"}
                     onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
                     className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-1 text-xs"
                   />
                 </div>
+
+                {uploadType === "video" && (
+                  <div className="sm:col-span-2 rounded-lg bg-white p-3">
+                    <label className="flex items-center gap-2 text-[11px] font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={useResumableVideoUpload}
+                        onChange={(e) => setUseResumableVideoUpload(e.target.checked)}
+                      />
+                      Use resumable TUS upload for this video
+                    </label>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      Files over 200 MB use TUS automatically. Video bytes upload directly to Cloudflare.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="mt-3 flex justify-end gap-2">
@@ -1020,7 +1445,9 @@ export default function UnifiedLessonEditor({
                   onClick={() => void handleUploadAsset()}
                   className="rounded-xl bg-[#092443] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#123b64] disabled:opacity-50"
                 >
-                  {isUploadingAsset ? "Uploading..." : "Upload Resource"}
+                  {isUploadingAsset
+                    ? "Uploading..."
+                    : uploadType === "video" ? "Start Video Upload" : "Upload Resource"}
                 </button>
               </div>
             </div>

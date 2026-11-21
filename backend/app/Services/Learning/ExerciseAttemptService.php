@@ -11,6 +11,7 @@ use App\Models\ExerciseAttempt;
 use App\Models\ExerciseAttemptAnswer;
 use App\Models\Lesson;
 use App\Models\LessonBlock;
+use App\Models\LessonRevision;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -158,32 +159,137 @@ class ExerciseAttemptService
 
     /**
      * Start a new attempt or resume an active in-progress attempt.
-     * Uses parent-row locking (student profile) for safe concurrent attempt creation.
+     * Revalidates lesson publication and enrollment under locks before creating an attempt.
      */
     public function startOrResumeAttempt(
+        User $user,
+        Course $course,
+        Lesson $lesson,
         Exercise $exercise,
         StudentProfile $studentProfile,
         Center $center
     ): ExerciseAttempt {
         return DB::transaction(function () use (
+            $user,
+            $course,
+            $lesson,
             $exercise,
             $studentProfile,
             $center
         ): ExerciseAttempt {
-            // Lock parent row (student profile) inside transaction in consistent order
-            // to serialize concurrent requests when no attempt exists yet.
+            // Match publication and exercise-authoring lock order: Lesson -> Exercise.
+            $lockedLesson = Lesson::query()
+                ->forCenter($center->id)
+                ->whereKey($lesson->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            abort_unless(
+                $user->isActive()
+                    && $center->isActive()
+                    && $lockedLesson->isPublished()
+                    && (int) $lockedLesson->center_id === (int) $center->id,
+                404,
+                'Published lesson not found.'
+            );
+
+            $lockedCourse = Course::query()
+                ->forCenter($center->id)
+                ->whereKey($course->id)
+                ->firstOrFail();
+
+            abort_unless(
+                $lockedCourse->isPublished()
+                    && $lockedLesson->courseModule()
+                        ->where('center_id', $center->id)
+                        ->where('course_id', $lockedCourse->id)
+                        ->published()
+                        ->exists(),
+                404,
+                'Published course lesson not found.'
+            );
+
+            $lockedExercise = Exercise::query()
+                ->forCenter($center->id)
+                ->where('lesson_id', $lockedLesson->id)
+                ->whereKey($exercise->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            abort_unless(
+                $lockedExercise->isPublished(),
+                404,
+                'Exercise not found or not published.'
+            );
+
+            $publishedRevision = $lockedLesson->published_revision_id === null
+                ? null
+                : LessonRevision::query()
+                    ->forCenter($center->id)
+                    ->forLesson($lockedLesson->id)
+                    ->whereKey($lockedLesson->published_revision_id)
+                    ->where('status', LessonRevision::STATUS_PUBLISHED)
+                    ->first();
+
+            abort_unless(
+                $publishedRevision !== null
+                    && LessonBlock::query()
+                        ->where('center_id', $center->id)
+                        ->where('lesson_id', $lockedLesson->id)
+                        ->where('lesson_revision_id', $publishedRevision->id)
+                        ->where('block_type', LessonBlock::TYPE_EXERCISE)
+                        ->where('exercise_id', $lockedExercise->id)
+                        ->exists(),
+                404,
+                'Exercise is not included in the current published lesson.'
+            );
+
+            abort_unless(
+                $user->hasRoleInCenter($center, 'student'),
+                403,
+                'Student assessment requires a student role in this center.'
+            );
+
+            // Lock the student parent row after lesson and exercise, matching the
+            // serialization order used by lesson publication and exercise edits.
             $lockedStudentProfile = StudentProfile::query()
                 ->where('center_id', $center->id)
+                ->where('user_id', $user->id)
                 ->where('status', StudentProfile::STATUS_ACTIVE)
                 ->whereKey($studentProfile->id)
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            $hasActiveEnrollment = Enrollment::query()
+                ->forCenter($center->id)
+                ->forStudentProfile($lockedStudentProfile->id)
+                ->activeAt()
+                ->whereHas(
+                    'cohort',
+                    static function (Builder $query) use ($center, $lockedCourse): void {
+                        $query
+                            ->where('center_id', $center->id)
+                            ->where('course_id', $lockedCourse->id)
+                            ->whereIn('status', [
+                                Cohort::STATUS_OPEN,
+                                Cohort::STATUS_IN_PROGRESS,
+                                Cohort::STATUS_COMPLETED,
+                            ]);
+                    }
+                )
+                ->exists();
+
+            abort_unless(
+                $hasActiveEnrollment,
+                403,
+                'Active course enrollment required.'
+            );
+
             // Lock active in-progress attempt if present.
             $activeAttempt = ExerciseAttempt::query()
                 ->where('center_id', $center->id)
                 ->where('student_profile_id', $lockedStudentProfile->id)
-                ->where('exercise_id', $exercise->id)
+                ->where('exercise_id', $lockedExercise->id)
                 ->where('status', ExerciseAttempt::STATUS_IN_PROGRESS)
                 ->lockForUpdate()
                 ->first();
@@ -193,18 +299,18 @@ class ExerciseAttemptService
             }
 
             // Check maximum attempts limit.
-            if ($exercise->max_attempts !== null) {
+            if ($lockedExercise->max_attempts !== null) {
                 $completedCount = ExerciseAttempt::query()
                     ->where('center_id', $center->id)
                     ->where('student_profile_id', $lockedStudentProfile->id)
-                    ->where('exercise_id', $exercise->id)
+                    ->where('exercise_id', $lockedExercise->id)
                     ->whereIn('status', [
                         ExerciseAttempt::STATUS_SUBMITTED,
                         ExerciseAttempt::STATUS_GRADED,
                     ])
                     ->count();
 
-                if ($completedCount >= (int) $exercise->max_attempts) {
+                if ($completedCount >= (int) $lockedExercise->max_attempts) {
                     throw ValidationException::withMessages([
                         'attempt' => ['Maximum number of attempts reached for this exercise.'],
                     ]);
@@ -215,13 +321,13 @@ class ExerciseAttemptService
             $maxAttemptNumber = ExerciseAttempt::query()
                 ->where('center_id', $center->id)
                 ->where('student_profile_id', $lockedStudentProfile->id)
-                ->where('exercise_id', $exercise->id)
+                ->where('exercise_id', $lockedExercise->id)
                 ->lockForUpdate()
                 ->max('attempt_number');
 
             $nextAttemptNumber = ($maxAttemptNumber !== null) ? ((int) $maxAttemptNumber + 1) : 1;
 
-            $questions = $exercise->questions()
+            $questions = $lockedExercise->questions()
                 ->with('options')
                 ->get();
 
@@ -235,12 +341,12 @@ class ExerciseAttemptService
 
             $attempt = ExerciseAttempt::query()->create([
                 'center_id' => $center->id,
-                'exercise_id' => $exercise->id,
+                'exercise_id' => $lockedExercise->id,
                 'student_profile_id' => $lockedStudentProfile->id,
                 'attempt_number' => $nextAttemptNumber,
                 'status' => ExerciseAttempt::STATUS_IN_PROGRESS,
-                'passing_score_snapshot' => $exercise->passing_score,
-                'show_correct_answers_after_submission_snapshot' => (bool) $exercise->show_correct_answers_after_submission,
+                'passing_score_snapshot' => $lockedExercise->passing_score,
+                'show_correct_answers_after_submission_snapshot' => (bool) $lockedExercise->show_correct_answers_after_submission,
                 'score' => null,
                 'max_score' => $maxScore,
                 'percentage' => null,
@@ -267,7 +373,7 @@ class ExerciseAttemptService
 
                 ExerciseAttemptAnswer::query()->create([
                     'center_id' => $center->id,
-                    'exercise_id' => $exercise->id,
+                    'exercise_id' => $lockedExercise->id,
                     'exercise_attempt_id' => $attempt->id,
                     'question_id' => $question->id,
                     'selected_option_id' => null,
