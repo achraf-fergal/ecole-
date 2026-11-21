@@ -10,6 +10,7 @@ use App\Models\Exercise;
 use App\Models\Language;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
+use App\Models\LessonBlock;
 use App\Models\LessonRevision;
 use App\Models\Level;
 use App\Models\PlatformAdmin;
@@ -104,6 +105,31 @@ class LessonContentApiTest extends TestCase
                 'ver' => (int) $user->token_version,
             ])
             ->login($user);
+    }
+
+    private function assertJsonDocumentSame(
+        array $expected,
+        array $actual
+    ): void {
+        $this->assertSame(
+            $this->normalizeJsonObjectKeys($expected),
+            $this->normalizeJsonObjectKeys($actual)
+        );
+    }
+
+    private function normalizeJsonObjectKeys(array $value): array
+    {
+        foreach ($value as $key => $child) {
+            if (is_array($child)) {
+                $value[$key] = $this->normalizeJsonObjectKeys($child);
+            }
+        }
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return $value;
     }
 
     private function contentRouteParameters(array $context): array
@@ -1062,7 +1088,7 @@ class LessonContentApiTest extends TestCase
 
         $created->assertCreated();
         $blockId = (int) $created->json('data.id');
-        $this->assertSame($document, $created->json('data.content_json'));
+        $this->assertJsonDocumentSame($document, $created->json('data.content_json'));
 
         $updatedDocument = $document;
         $updatedDocument['content'][0]['content'][0]['text'] = 'Updated without losing marks';
@@ -1079,7 +1105,7 @@ class LessonContentApiTest extends TestCase
         );
 
         $updated->assertOk();
-        $this->assertSame($updatedDocument, $updated->json('data.content_json'));
+        $this->assertJsonDocumentSame($updatedDocument, $updated->json('data.content_json'));
 
         $reloaded = $this->withHeader(
             'Authorization',
@@ -1091,7 +1117,7 @@ class LessonContentApiTest extends TestCase
         $reloaded->assertOk();
         $reloadedBlock = collect($reloaded->json('data.draft_revision.blocks'))
             ->firstWhere('id', $blockId);
-        $this->assertSame($updatedDocument, $reloadedBlock['content_json']);
+        $this->assertJsonDocumentSame($updatedDocument, $reloadedBlock['content_json']);
     }
 
     public function test_empty_and_unsupported_tiptap_documents_are_rejected(): void
@@ -1441,7 +1467,7 @@ class LessonContentApiTest extends TestCase
         $reloaded->assertOk();
         $reloadedBlock = collect($reloaded->json('data.draft_revision.blocks'))
             ->firstWhere('id', $blockId);
-        $this->assertSame($validDocument, $reloadedBlock['content_json']);
+        $this->assertJsonDocumentSame($validDocument, $reloadedBlock['content_json']);
     }
 
     public function test_admin_can_inspect_history_and_restore_as_a_new_draft(): void
@@ -1476,7 +1502,10 @@ class LessonContentApiTest extends TestCase
             $this->revisionRouteParameters($context, $published->id)
         ));
         $inspection->assertOk();
-        $this->assertSame($document, $inspection->json('data.blocks.0.content_json'));
+        $this->assertJsonDocumentSame(
+            $document,
+            $inspection->json('data.blocks.0.content_json')
+        );
 
         $restored = $this->withHeader(
             'Authorization',
@@ -1489,17 +1518,24 @@ class LessonContentApiTest extends TestCase
         $restored->assertJsonPath('data.status', LessonRevision::STATUS_DRAFT);
         $this->assertNotSame($published->id, $restored->json('data.id'));
         $this->assertSame($published->version_number + 1, $restored->json('data.version_number'));
-        $this->assertSame($document, $restored->json('data.blocks.0.content_json'));
+        $this->assertJsonDocumentSame(
+            $document,
+            $restored->json('data.blocks.0.content_json')
+        );
 
         $this->assertDatabaseHas('lesson_revisions', [
             'id' => $published->id,
             'status' => LessonRevision::STATUS_PUBLISHED,
         ]);
-        $this->assertDatabaseHas('lesson_blocks', [
-            'id' => $sourceBlock->id,
-            'lesson_revision_id' => $published->id,
-            'content_json' => json_encode($document),
-        ]);
+        $storedSourceBlock = LessonBlock::query()
+            ->whereKey($sourceBlock->id)
+            ->where('lesson_revision_id', $published->id)
+            ->firstOrFail();
+
+        $this->assertJsonDocumentSame(
+            $document,
+            $storedSourceBlock->content_json
+        );
 
         $secondRestore = $this->withHeader(
             'Authorization',

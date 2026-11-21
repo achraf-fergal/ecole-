@@ -112,37 +112,51 @@ function renderNode(
       );
 
     case "heading": {
-      const level = Number(node.attrs?.level) || 2;
+      const rawLevel = Number(node.attrs?.level);
+      const level = Number.isInteger(rawLevel) && rawLevel >= 1 && rawLevel <= 6
+        ? rawLevel
+        : 1;
       const children = node.content?.map((child, i) => renderNode(child, i));
 
       if (level === 1) {
         return (
-          <h2 key={key} className="mt-8 text-2xl font-black text-[#102b4c] first:mt-0">
-            {children}
-          </h2>
-        );
-      }
-
-      if (level === 2) {
-        return (
-          <h3 key={key} className="mt-6 text-xl font-extrabold text-[#102b4c] first:mt-0">
+          <h3 key={key} className="mt-8 text-2xl font-black text-[#102b4c] first:mt-0">
             {children}
           </h3>
         );
       }
 
-      if (level === 3) {
+      if (level === 2) {
         return (
-          <h4 key={key} className="mt-5 text-lg font-bold text-[#102b4c] first:mt-0">
+          <h4 key={key} className="mt-6 text-xl font-extrabold text-[#102b4c] first:mt-0">
             {children}
           </h4>
         );
       }
 
+      if (level === 3) {
+        return (
+          <h5 key={key} className="mt-5 text-lg font-bold text-[#102b4c] first:mt-0">
+            {children}
+          </h5>
+        );
+      }
+
+      const className = "mt-4 text-base font-bold text-[#102b4c] first:mt-0";
+
+      if (level === 4) {
+        return <h6 key={key} className={className}>{children}</h6>;
+      }
+
       return (
-        <h5 key={key} className="mt-4 text-base font-bold text-[#102b4c] first:mt-0">
+        <div
+          key={key}
+          role="heading"
+          aria-level={level + 2}
+          className={className}
+        >
           {children}
-        </h5>
+        </div>
       );
     }
 

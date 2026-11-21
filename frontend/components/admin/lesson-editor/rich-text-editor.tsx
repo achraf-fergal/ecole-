@@ -462,7 +462,7 @@ export default function RichTextEditor({
             className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50 p-2"
             role="toolbar"
           >
-            {[1, 2, 3].map((level) => (
+            {[1, 2, 3, 4, 5, 6].map((level) => (
               <button
                 key={level}
                 type="button"
@@ -470,7 +470,7 @@ export default function RichTextEditor({
                 aria-pressed={editor.isActive("heading", { level })}
                 disabled={isEditorSaving}
                 className={toolbarButtonClass(editor.isActive("heading", { level }), isEditorSaving)}
-                onClick={() => editor.chain().focus().toggleHeading({ level: level as 1 | 2 | 3 }).run()}
+                onClick={() => editor.chain().focus().toggleHeading({ level: level as 1 | 2 | 3 | 4 | 5 | 6 }).run()}
               >
                 H{level}
               </button>

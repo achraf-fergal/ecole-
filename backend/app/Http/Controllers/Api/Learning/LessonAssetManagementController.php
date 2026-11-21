@@ -514,20 +514,37 @@ class LessonAssetManagementController extends Controller
             (string) $request->route('asset')
         );
 
-        $this->lessonRevisionService
-            ->assertAssetCanBeModified($asset);
+        $asset = DB::transaction(function () use ($asset): LessonAsset {
+            Lesson::query()
+                ->forCenter((int) $asset->center_id)
+                ->whereKey($asset->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        abort_unless(
-            ! $asset->isProviderVideo()
-                || $asset->video_provider !== 'cloudflare_stream'
-                || $asset->status !== LessonAsset::STATUS_PROCESSING,
-            409,
-            'Cancel the Cloudflare upload before archiving this video.'
-        );
+            $lockedAsset = LessonAsset::query()
+                ->forCenter((int) $asset->center_id)
+                ->where('lesson_id', $asset->lesson_id)
+                ->whereKey($asset->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        $asset->update([
-            'status' => LessonAsset::STATUS_ARCHIVED,
-        ]);
+            $this->lessonRevisionService
+                ->assertAssetCanBeModified($lockedAsset);
+
+            abort_unless(
+                ! $lockedAsset->isProviderVideo()
+                    || $lockedAsset->video_provider !== 'cloudflare_stream'
+                    || $lockedAsset->status !== LessonAsset::STATUS_PROCESSING,
+                409,
+                'Cancel the Cloudflare upload before archiving this video.'
+            );
+
+            $lockedAsset->update([
+                'status' => LessonAsset::STATUS_ARCHIVED,
+            ]);
+
+            return $lockedAsset->refresh();
+        }, 3);
 
         return response()->json([
             'message' => 'Learning resource archived successfully.',
