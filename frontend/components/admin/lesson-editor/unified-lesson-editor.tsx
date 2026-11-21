@@ -425,7 +425,7 @@ export default function UnifiedLessonEditor({
 
   const handleCloseComposer = () => {
     const composerDirty = isExerciseDirty
-      || (composerMode === "text" && isTextDirty)
+      || isTextDirty
       || mediaComposerIsDirty;
 
     if (composerDirty && !window.confirm("Discard the unsaved composer changes?")) {
@@ -433,6 +433,7 @@ export default function UnifiedLessonEditor({
     }
 
     setIsTextDirty(false);
+    setEditingBlockId(null);
     setUploadFile(null);
     setUploadTitle("");
     setUploadAltText("");
@@ -450,13 +451,14 @@ export default function UnifiedLessonEditor({
     }
 
     const composerDirty = isExerciseDirty
-      || (composerMode === "text" && isTextDirty)
+      || isTextDirty
       || mediaComposerIsDirty;
     if (composerDirty && !window.confirm("Discard the current composer changes?")) {
       return;
     }
 
     setIsTextDirty(false);
+    setEditingBlockId(null);
     setUploadFile(null);
     setUploadTitle("");
     setUploadAltText("");
@@ -1156,20 +1158,6 @@ export default function UnifiedLessonEditor({
     } finally {
       setIsReorderSaving(false);
       setIsSubmitting(false);
-    }
-  };
-
-  const handleMoveBlock = (
-    blockIndex: number,
-    direction: "up" | "down"
-  ) => {
-    const blocks = content?.draft_revision?.blocks;
-    if (!blocks) return;
-
-    const targetIndex = direction === "up" ? blockIndex - 1 : blockIndex + 1;
-    const block = blocks[blockIndex];
-    if (block) {
-      void handleReorderBlock(block.id, blockIndex, targetIndex);
     }
   };
 
@@ -2133,8 +2121,6 @@ export default function UnifiedLessonEditor({
             <div className="space-y-4">
             {activeBlocks.map((block, index) => {
               const blockLabel = blockTypeName(block);
-              const isFirst = index === 0;
-              const isLast = index === activeBlocks.length - 1;
 
               return (
                 <SortableBlockCard
@@ -2178,24 +2164,6 @@ export default function UnifiedLessonEditor({
 
                     {hasDraft && (
                       <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={isFirst || isSubmitting || hasUnsavedChanges}
-                          onClick={() => void handleMoveBlock(index, "up")}
-                          aria-label="Move block up"
-                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-30"
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isLast || isSubmitting || hasUnsavedChanges}
-                          onClick={() => void handleMoveBlock(index, "down")}
-                          aria-label="Move block down"
-                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-30"
-                        >
-                          ↓
-                        </button>
                         {block.block_type === "text" && (
                           <button
                             type="button"
