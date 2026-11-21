@@ -142,18 +142,29 @@ function renderNode(
         );
       }
 
-      const className = "mt-4 text-base font-bold text-[#102b4c] first:mt-0";
-
       if (level === 4) {
-        return <h6 key={key} className={className}>{children}</h6>;
+        return <h6 key={key} className="mt-4 text-base font-bold text-[#102b4c] first:mt-0">{children}</h6>;
+      }
+
+      if (level === 5) {
+        return (
+          <div
+            key={key}
+            role="heading"
+            aria-level={6}
+            className="mt-3 text-sm font-bold text-[#102b4c] first:mt-0"
+          >
+            {children}
+          </div>
+        );
       }
 
       return (
         <div
           key={key}
           role="heading"
-          aria-level={level + 2}
-          className={className}
+          aria-level={6}
+          className="mt-3 text-xs font-bold uppercase tracking-wider text-[#102b4c] first:mt-0"
         >
           {children}
         </div>

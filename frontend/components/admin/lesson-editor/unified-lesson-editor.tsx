@@ -1478,7 +1478,7 @@ export default function UnifiedLessonEditor({
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-black text-[#102b4c]">Content Composer</h3>
+            <h2 className="text-sm font-black text-[#102b4c]">Content Composer</h2>
             <p className="mt-0.5 text-xs text-slate-500">
               Add rich text, media assets, or assessment exercises to this revision.
             </p>
@@ -1527,7 +1527,7 @@ export default function UnifiedLessonEditor({
         {composerMode === "text" && (
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4">
             <div className="mb-3">
-              <h4 className="text-xs font-black text-[#102b4c]">Add Text Block</h4>
+              <h3 className="text-xs font-black text-[#102b4c]">Add Text Block</h3>
               <p className="mt-1 text-[11px] text-slate-500">
                 Format the content here. It is saved as structured Tiptap JSON.
               </p>
@@ -1547,11 +1547,11 @@ export default function UnifiedLessonEditor({
         {/* Composer: Media Form */}
         {composerMode === "media" && (
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4 space-y-4">
-            <h4 className="text-xs font-black text-[#102b4c]">Add Media Block</h4>
+            <h3 className="text-xs font-black text-[#102b4c]">Add Media Block</h3>
 
             {assets.some((asset) => asset.asset_type === "video") && (
               <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
-                <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-600">Video Uploads</h5>
+                <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-600">Video Uploads</h4>
                 {assets.filter((asset) => asset.asset_type === "video").map((asset) => (
                   <div key={asset.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2">
                     <div className="min-w-0">
@@ -1770,7 +1770,7 @@ export default function UnifiedLessonEditor({
           <div className="mt-5 rounded-xl border border-teal-100 bg-teal-50/30 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-teal-100/60 pb-3">
               <div>
-                <h4 className="text-xs font-black text-[#102b4c]">Add Assessment Exercise</h4>
+                <h3 className="text-xs font-black text-[#102b4c]">Add Assessment Exercise</h3>
                 <p className="mt-0.5 text-[11px] text-slate-500">
                   Select an existing exercise or create and author a new one directly in this lesson.
                 </p>
@@ -2081,9 +2081,9 @@ export default function UnifiedLessonEditor({
       {/* Ordered curriculum timeline */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-black uppercase tracking-wider text-[#102b4c]">
+          <h2 className="text-sm font-black uppercase tracking-wider text-[#102b4c]">
             Curriculum Timeline ({activeBlocks.length} {activeBlocks.length === 1 ? "Block" : "Blocks"})
-          </h3>
+          </h2>
           <span className="text-xs text-slate-500">
             {hasDraft ? "Draft · drag blocks by the handle to reorder" : "Published revision · read only"}
           </span>
@@ -2230,7 +2230,7 @@ export default function UnifiedLessonEditor({
       <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-black text-[#102b4c]">Revision History</h3>
+            <h2 className="text-sm font-black text-[#102b4c]">Revision History</h2>
             <p className="mt-1 text-xs text-slate-500">
               Inspect prior versions read-only. Restoring copies content into a new draft.
             </p>
@@ -2307,9 +2307,9 @@ export default function UnifiedLessonEditor({
                     ? "Read-only draft preview"
                     : "Read-only historical preview"} · v{selectedHistoricalRevision.version_number}
                 </p>
-                <h4 className="mt-1 text-base font-black text-[#102b4c]">
+                <h3 className="mt-1 text-base font-black text-[#102b4c]">
                   {selectedHistoricalRevision.title}
-                </h4>
+                </h3>
                 {selectedHistoricalRevision.description && (
                   <p className="mt-1 text-xs text-slate-600">
                     {selectedHistoricalRevision.description}

@@ -492,8 +492,28 @@ class LessonAssetManagementController extends Controller
             );
         }
 
-        $asset->fill($validated);
-        $asset->save();
+        $asset = DB::transaction(function () use ($asset, $validated): LessonAsset {
+            Lesson::query()
+                ->forCenter((int) $asset->center_id)
+                ->whereKey($asset->lesson_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $lockedAsset = LessonAsset::query()
+                ->forCenter((int) $asset->center_id)
+                ->where('lesson_id', $asset->lesson_id)
+                ->whereKey($asset->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->lessonRevisionService
+                ->assertAssetCanBeModified($lockedAsset);
+
+            $lockedAsset->fill($validated);
+            $lockedAsset->save();
+
+            return $lockedAsset->refresh();
+        }, 3);
 
         return response()->json([
             'message' => 'Learning resource updated successfully.',
@@ -570,11 +590,36 @@ class LessonAssetManagementController extends Controller
         if ($asset->asset_type === LessonAsset::TYPE_VIDEO) {
             $asset = $this->cloudflareStream->restoreReadyVideo($asset);
         } else {
-            $this->ensureAssetStorageExists($asset);
+            $asset = DB::transaction(function () use ($asset): LessonAsset {
+                Lesson::query()
+                    ->forCenter((int) $asset->center_id)
+                    ->whereKey($asset->lesson_id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
-            $asset->update([
-                'status' => LessonAsset::STATUS_ACTIVE,
-            ]);
+                $lockedAsset = LessonAsset::query()
+                    ->forCenter((int) $asset->center_id)
+                    ->where('lesson_id', $asset->lesson_id)
+                    ->whereKey($asset->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                abort_unless(
+                    $lockedAsset->status === LessonAsset::STATUS_ARCHIVED,
+                    409,
+                    'Only archived resources can be restored.'
+                );
+
+                $this->lessonRevisionService->assertAssetCanBeModified($lockedAsset);
+
+                $this->ensureAssetStorageExists($lockedAsset);
+
+                $lockedAsset->update([
+                    'status' => LessonAsset::STATUS_ACTIVE,
+                ]);
+
+                return $lockedAsset->refresh();
+            }, 3);
         }
 
         return response()->json([

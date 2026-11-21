@@ -40,6 +40,20 @@
   font-size: 1.15rem;
 }
 
+.surface .proseMirror h4 {
+  font-size: 1rem;
+}
+
+.surface .proseMirror h5 {
+  font-size: 0.875rem;
+}
+
+.surface .proseMirror h6 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .surface .proseMirror ul,
 .surface .proseMirror ol {
   padding-inline-start: 1.5rem;
