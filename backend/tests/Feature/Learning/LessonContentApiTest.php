@@ -947,7 +947,7 @@ class LessonContentApiTest extends TestCase
         $showResponse->assertForbidden();
     }
 
-    public function test_tiptap_json_marks_and_nested_lists_round_trip_through_the_api(): void
+    public function test_all_supported_tiptap_json_round_trips_through_the_api(): void
     {
         $context = $this->createContext();
         $token = $this->tokenFor($context['user']);
@@ -964,6 +964,7 @@ class LessonContentApiTest extends TestCase
                         'marks' => [
                             ['type' => 'bold'],
                             ['type' => 'italic'],
+                            ['type' => 'strike'],
                             ['type' => 'link', 'attrs' => [
                                 'href' => 'https://example.test/lesson',
                                 'title' => 'Lesson reference',
@@ -1008,6 +1009,32 @@ class LessonContentApiTest extends TestCase
                         ],
                     ]],
                 ],
+                [
+                    'type' => 'paragraph',
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => 'Inline code',
+                            'marks' => [['type' => 'code']],
+                        ],
+                        ['type' => 'hardBreak'],
+                        [
+                            'type' => 'text',
+                            'text' => 'After the hard break',
+                        ],
+                    ],
+                ],
+                [
+                    'type' => 'blockquote',
+                    'content' => [[
+                        'type' => 'paragraph',
+                        'content' => [[
+                            'type' => 'text',
+                            'text' => 'Quoted content',
+                        ]],
+                    ]],
+                ],
+                ['type' => 'horizontalRule'],
                 [
                     'type' => 'codeBlock',
                     'attrs' => ['language' => 'javascript'],
@@ -1100,6 +1127,171 @@ class LessonContentApiTest extends TestCase
         ]);
         $unsupported->assertUnprocessable();
         $unsupported->assertJsonValidationErrors(['content_json']);
+    }
+
+    public function test_tiptap_schema_rejects_unsupported_attributes_and_marks(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $revisionId = $this->createDraftThroughApi($context, $token);
+        $route = route(
+            'api.centers.admin.learning.content.blocks.text.store',
+            $this->revisionRouteParameters($context, $revisionId)
+        );
+
+        $validParagraph = [
+            'type' => 'paragraph',
+            'content' => [[
+                'type' => 'text',
+                'text' => 'Validation probe',
+            ]],
+        ];
+        $tooDeepNode = $validParagraph;
+        for ($depth = 0; $depth < 21; $depth++) {
+            $tooDeepNode = [
+                'type' => 'blockquote',
+                'content' => [$tooDeepNode],
+            ];
+        }
+
+        $invalidDocuments = [
+            'unexpected root key' => [
+                'type' => 'doc',
+                'custom' => true,
+                'content' => [$validParagraph],
+            ],
+            'heading level type' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'heading',
+                    'attrs' => ['level' => '2'],
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Invalid heading',
+                    ]],
+                ]],
+            ],
+            'ordered list start' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'orderedList',
+                    'attrs' => ['start' => 0, 'type' => null],
+                    'content' => [[
+                        'type' => 'listItem',
+                        'content' => [$validParagraph],
+                    ]],
+                ]],
+            ],
+            'ordered list style type' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'orderedList',
+                    'attrs' => ['start' => 1, 'type' => 1],
+                    'content' => [[
+                        'type' => 'listItem',
+                        'content' => [$validParagraph],
+                    ]],
+                ]],
+            ],
+            'code language type' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'codeBlock',
+                    'attrs' => ['language' => 42],
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'let value = true;',
+                    ]],
+                ]],
+            ],
+            'unknown node attribute' => [
+                'type' => 'doc',
+                'content' => [[
+                    ...$validParagraph,
+                    'attrs' => ['alignment' => 'center'],
+                ]],
+            ],
+            'node attributes type' => [
+                'type' => 'doc',
+                'content' => [[
+                    ...$validParagraph,
+                    'attrs' => 'center',
+                ]],
+            ],
+            'unknown mark' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Unknown mark',
+                        'marks' => [['type' => 'customMark']],
+                    ]],
+                ]],
+            ],
+            'unknown mark attribute' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Invalid bold attributes',
+                        'marks' => [[
+                            'type' => 'bold',
+                            'attrs' => ['class' => 'custom'],
+                        ]],
+                    ]],
+                ]],
+            ],
+            'mark attribute type' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Bad highlight',
+                        'marks' => [[
+                            'type' => 'highlight',
+                            'attrs' => ['color' => false],
+                        ]],
+                    ]],
+                ]],
+            ],
+            'link protocol' => [
+                'type' => 'doc',
+                'content' => [[
+                    'type' => 'paragraph',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => 'Unsafe link',
+                        'marks' => [[
+                            'type' => 'link',
+                            'attrs' => ['href' => 'javascript:alert(1)'],
+                        ]],
+                    ]],
+                ]],
+            ],
+            'excessive nesting' => [
+                'type' => 'doc',
+                'content' => [$tooDeepNode],
+            ],
+        ];
+
+        foreach ($invalidDocuments as $case => $document) {
+            $response = $this->withHeader(
+                'Authorization',
+                "Bearer {$token}"
+            )->postJson($route, [
+                'content_json' => $document,
+            ]);
+
+            $this->assertSame(
+                422,
+                $response->status(),
+                "The {$case} case should be rejected."
+            );
+            $response->assertJsonValidationErrors(['content_json']);
+        }
     }
 
     public function test_admin_can_inspect_history_and_restore_as_a_new_draft(): void

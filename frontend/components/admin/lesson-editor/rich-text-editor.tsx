@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import Link from "@tiptap/extension-link";
 import Highlight from "@tiptap/extension-highlight";
@@ -14,7 +14,7 @@ interface RichTextEditorProps {
   saveLabel: string;
   onCancel: () => boolean | void;
   onDirtyChange: (dirty: boolean) => void;
-  onSave: (document: TipTapDocument) => void;
+  onSave: (document: TipTapDocument) => Promise<void> | void;
 }
 
 const EMPTY_DOCUMENT: TipTapDocument = {
@@ -59,6 +59,10 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
   const type = node.type;
   if (typeof type !== "string" || !Object.hasOwn(NODE_ATTRIBUTES, type)) {
     return "This text block uses a node the editor does not support. Its content was left untouched.";
+  }
+
+  if (type === "doc" && depth !== 0) {
+    return "This text block contains a nested document the editor cannot preserve.";
   }
 
   if (
@@ -107,7 +111,10 @@ function validateDocumentShape(value: unknown, depth = 0): string | null {
       type === "orderedList"
       && attrs.type !== undefined
       && attrs.type !== null
-      && !["1", "a", "A", "i", "I"].includes(String(attrs.type))
+      && (
+        typeof attrs.type !== "string"
+        || !["1", "a", "A", "i", "I"].includes(attrs.type)
+      )
     ) {
       return "This text block contains an unsupported ordered list style.";
     }
@@ -238,7 +245,9 @@ export default function RichTextEditor({
   onSave,
 }: RichTextEditorProps) {
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isSavePending, setIsSavePending] = useState(false);
   const dirtyRef = useRef(false);
+  const isEditorSaving = isSubmitting || isSavePending;
   const compatibilityError = validateDocumentShape(initialDocument);
   const editor = useEditor({
     extensions: [
@@ -280,6 +289,10 @@ export default function RichTextEditor({
     },
   });
 
+  useEffect(() => {
+    editor?.setEditable(!isEditorSaving);
+  }, [editor, isEditorSaving]);
+
   const handleCancel = useCallback(() => {
     if (onCancel() === false) return;
 
@@ -287,19 +300,29 @@ export default function RichTextEditor({
     onDirtyChange(false);
   }, [onCancel, onDirtyChange]);
 
-  const handleSave = useCallback(() => {
-    if (!editor || compatibilityError) return;
+  const handleSave = useCallback(async () => {
+    if (!editor || compatibilityError || isEditorSaving) return;
 
     if (editor.isEmpty) {
       setValidationError("Add some text before saving this block.");
       return;
     }
 
-    onSave(editor.getJSON() as TipTapDocument);
-  }, [compatibilityError, editor, onSave]);
+    setIsSavePending(true);
+    editor.setEditable(false);
+    try {
+      await onSave(editor.getJSON() as TipTapDocument);
+    } catch (error: unknown) {
+      setValidationError(
+        error instanceof Error ? error.message : "Failed to save this text block."
+      );
+    } finally {
+      setIsSavePending(false);
+    }
+  }, [compatibilityError, editor, isEditorSaving, onSave]);
 
   const applyLink = useCallback(() => {
-    if (!editor) return;
+    if (!editor || isEditorSaving) return;
 
     const currentHref = editor.getAttributes("link").href as string | undefined;
     const input = window.prompt("Link URL (https://, http://, or mailto:)", currentHref ?? "");
@@ -318,7 +341,7 @@ export default function RichTextEditor({
 
     setValidationError(null);
     editor.chain().focus().setLink({ href }).run();
-  }, [editor]);
+  }, [editor, isEditorSaving]);
 
   if (!editor) {
     return (
@@ -347,7 +370,8 @@ export default function RichTextEditor({
                 type="button"
                 aria-label={`Heading ${level}`}
                 aria-pressed={editor.isActive("heading", { level })}
-                className={toolbarButtonClass(editor.isActive("heading", { level }))}
+                disabled={isEditorSaving}
+                className={toolbarButtonClass(editor.isActive("heading", { level }), isEditorSaving)}
                 onClick={() => editor.chain().focus().toggleHeading({ level: level as 1 | 2 | 3 }).run()}
               >
                 H{level}
@@ -358,7 +382,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Bold"
               aria-pressed={editor.isActive("bold")}
-              className={toolbarButtonClass(editor.isActive("bold"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("bold"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleBold().run()}
             >
               <strong>B</strong>
@@ -367,7 +392,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Italic"
               aria-pressed={editor.isActive("italic")}
-              className={toolbarButtonClass(editor.isActive("italic"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("italic"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleItalic().run()}
             >
               <em>I</em>
@@ -376,7 +402,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Underline"
               aria-pressed={editor.isActive("underline")}
-              className={toolbarButtonClass(editor.isActive("underline"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("underline"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleUnderline().run()}
             >
               <u>U</u>
@@ -385,7 +412,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Highlight"
               aria-pressed={editor.isActive("highlight")}
-              className={toolbarButtonClass(editor.isActive("highlight"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("highlight"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleHighlight().run()}
             >
               <span className="bg-yellow-200 px-0.5">Mark</span>
@@ -394,7 +422,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Insert link"
               aria-pressed={editor.isActive("link")}
-              className={toolbarButtonClass(editor.isActive("link"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("link"), isEditorSaving)}
               onClick={applyLink}
             >
               Link
@@ -404,7 +433,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Bulleted list"
               aria-pressed={editor.isActive("bulletList")}
-              className={toolbarButtonClass(editor.isActive("bulletList"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("bulletList"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleBulletList().run()}
             >
               • List
@@ -413,7 +443,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Numbered list"
               aria-pressed={editor.isActive("orderedList")}
-              className={toolbarButtonClass(editor.isActive("orderedList"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("orderedList"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleOrderedList().run()}
             >
               1. List
@@ -422,7 +453,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Block quote"
               aria-pressed={editor.isActive("blockquote")}
-              className={toolbarButtonClass(editor.isActive("blockquote"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("blockquote"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleBlockquote().run()}
             >
               Quote
@@ -431,7 +463,8 @@ export default function RichTextEditor({
               type="button"
               aria-label="Code block"
               aria-pressed={editor.isActive("codeBlock")}
-              className={toolbarButtonClass(editor.isActive("codeBlock"))}
+              disabled={isEditorSaving}
+              className={toolbarButtonClass(editor.isActive("codeBlock"), isEditorSaving)}
               onClick={() => editor.chain().focus().toggleCodeBlock().run()}
             >
               Code
@@ -440,8 +473,8 @@ export default function RichTextEditor({
             <button
               type="button"
               aria-label="Undo"
-              disabled={!editor.can().undo()}
-              className={toolbarButtonClass(false, !editor.can().undo())}
+              disabled={isEditorSaving || !editor.can().undo()}
+              className={toolbarButtonClass(false, isEditorSaving || !editor.can().undo())}
               onClick={() => editor.chain().focus().undo().run()}
             >
               Undo
@@ -449,8 +482,8 @@ export default function RichTextEditor({
             <button
               type="button"
               aria-label="Redo"
-              disabled={!editor.can().redo()}
-              className={toolbarButtonClass(false, !editor.can().redo())}
+              disabled={isEditorSaving || !editor.can().redo()}
+              className={toolbarButtonClass(false, isEditorSaving || !editor.can().redo())}
               onClick={() => editor.chain().focus().redo().run()}
             >
               Redo
@@ -474,7 +507,7 @@ export default function RichTextEditor({
         <div className="flex gap-2">
           <button
             type="button"
-            disabled={isSubmitting}
+            disabled={isEditorSaving}
             onClick={handleCancel}
             className="min-h-10 rounded-lg border border-slate-200 px-4 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
           >
@@ -482,11 +515,11 @@ export default function RichTextEditor({
           </button>
           <button
             type="button"
-            disabled={isSubmitting || Boolean(compatibilityError)}
+            disabled={isEditorSaving || Boolean(compatibilityError)}
             onClick={handleSave}
             className="min-h-10 rounded-lg bg-[#0e8988] px-4 text-xs font-bold text-white hover:bg-[#087b83] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {isSubmitting ? "Saving…" : saveLabel}
+            {isEditorSaving ? "Saving…" : saveLabel}
           </button>
         </div>
       </div>

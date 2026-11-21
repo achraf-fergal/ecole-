@@ -1539,7 +1539,7 @@ export default function UnifiedLessonEditor({
               saveLabel="Insert Text Block"
               onCancel={handleCancelTextEditor}
               onDirtyChange={setIsTextDirty}
-              onSave={(document) => void handleAddText(document)}
+              onSave={(document) => handleAddText(document)}
             />
           </div>
         )}
@@ -2203,7 +2203,7 @@ export default function UnifiedLessonEditor({
                         saveLabel="Save Text Block"
                         onCancel={handleCancelTextEditor}
                         onDirtyChange={setIsTextDirty}
-                        onSave={(document) => void handleUpdateTextBlock(block.id, document)}
+                        onSave={(document) => handleUpdateTextBlock(block.id, document)}
                       />
                     ) : (
                       <>

@@ -1084,16 +1084,33 @@ class LessonRevisionService
 
     private function validateDocument(array $document): void
     {
+        $unexpectedKeys = array_diff(
+            array_keys($document),
+            ['type', 'attrs', 'content']
+        );
+
+        if ($unexpectedKeys !== []) {
+            $this->fail(
+                'content_json',
+                'The document contains unsupported attributes.'
+            );
+        }
+
         if (
             ($document['type'] ?? null) !== 'doc'
             || ! isset($document['content'])
             || ! is_array($document['content'])
+            || ! array_is_list($document['content'])
             || $document['content'] === []
         ) {
             $this->fail(
                 'content_json',
                 'A valid TipTap document with at least one block is required.'
             );
+        }
+
+        if (array_key_exists('attrs', $document)) {
+            $this->validateNodeAttributes('doc', $document['attrs']);
         }
 
         try {
@@ -1130,7 +1147,7 @@ class LessonRevisionService
                 );
             }
 
-            $this->validateNode($node);
+            $this->validateNode($node, 1);
         }
 
         if (! $this->hasMeaningfulContent($document['content'])) {
@@ -1170,7 +1187,7 @@ class LessonRevisionService
     /**
      * Validate supported TipTap nodes and marks recursively.
      */
-    private function validateNode(array $node, int $depth = 0): void
+    private function validateNode(array $node, int $depth): void
     {
         if ($depth > 20) {
             $this->fail(
@@ -1201,14 +1218,37 @@ class LessonRevisionService
             );
         }
 
+        $unexpectedKeys = array_diff(
+            array_keys($node),
+            ['type', 'attrs', 'content', 'text', 'marks']
+        );
+
+        if ($unexpectedKeys !== []) {
+            $this->fail(
+                'content_json',
+                'A content node contains unsupported attributes.'
+            );
+        }
+
+        if (array_key_exists('attrs', $node)) {
+            $this->validateNodeAttributes($type, $node['attrs']);
+        }
+
         if ($type === 'text') {
             if (
-                ! isset($node['text'])
+                ! array_key_exists('text', $node)
                 || ! is_string($node['text'])
             ) {
                 $this->fail(
                     'content_json',
                     'Text nodes must contain a valid string.'
+                );
+            }
+
+            if (array_key_exists('content', $node)) {
+                $this->fail(
+                    'content_json',
+                    'Text nodes cannot contain child nodes.'
                 );
             }
 
@@ -1218,13 +1258,35 @@ class LessonRevisionService
                     'A single text node is too long.'
                 );
             }
+        } elseif (
+            array_key_exists('text', $node)
+            || array_key_exists('marks', $node)
+        ) {
+            $this->fail(
+                'content_json',
+                'Only text nodes can contain text or marks.'
+            );
         }
 
-        if (isset($node['content'])) {
-            if (! is_array($node['content'])) {
+        if (array_key_exists('content', $node)) {
+            $contentNodeTypes = [
+                'paragraph',
+                'heading',
+                'blockquote',
+                'bulletList',
+                'orderedList',
+                'listItem',
+                'codeBlock',
+            ];
+
+            if (
+                ! in_array($type, $contentNodeTypes, true)
+                || ! is_array($node['content'])
+                || ! array_is_list($node['content'])
+            ) {
                 $this->fail(
                     'content_json',
-                    'Node content must be an array.'
+                    'This node cannot contain the supplied child content.'
                 );
             }
 
@@ -1240,11 +1302,15 @@ class LessonRevisionService
             }
         }
 
-        if (isset($node['marks'])) {
-            if (! is_array($node['marks'])) {
+        if (array_key_exists('marks', $node)) {
+            if (
+                $type !== 'text'
+                || ! is_array($node['marks'])
+                || ! array_is_list($node['marks'])
+            ) {
                 $this->fail(
                     'content_json',
-                    'Invalid text marks.'
+                    'Only text nodes can contain a list of marks.'
                 );
             }
 
@@ -1259,42 +1325,192 @@ class LessonRevisionService
             ];
 
             foreach ($node['marks'] as $mark) {
-                if (
-                    ! is_array($mark)
-                    || ! in_array(
-                        $mark['type'] ?? null,
-                        $allowedMarks,
-                        true
-                    )
-                ) {
+                if (! is_array($mark)) {
                     $this->fail(
                         'content_json',
                         'Unsupported text mark.'
                     );
                 }
 
-                if (($mark['type'] ?? null) === 'link') {
-                    $href = $mark['attrs']['href'] ?? null;
-                    $scheme = is_string($href)
-                        ? parse_url($href, PHP_URL_SCHEME)
-                        : null;
-
-                    if (
-                        ! is_string($href)
-                        || ! in_array(
-                            strtolower((string) $scheme),
-                            ['https', 'http', 'mailto'],
-                            true
-                        )
-                    ) {
-                        $this->fail(
-                            'content_json',
-                            'Links must use HTTP, HTTPS or mailto.'
-                        );
-                    }
-                }
+                $this->validateMark($mark, $allowedMarks);
             }
         }
+    }
+
+    /**
+     * Validate attributes emitted by the configured TipTap node extensions.
+     */
+    private function validateNodeAttributes(
+        string $type,
+        mixed $attributes
+    ): void {
+        if (! is_array($attributes)) {
+            $this->fail(
+                'content_json',
+                'Node attributes must be an object.'
+            );
+        }
+
+        $allowedAttributes = match ($type) {
+            'heading' => ['level'],
+            'orderedList' => ['start', 'type'],
+            'codeBlock' => ['language'],
+            default => [],
+        };
+
+        if (array_diff(array_keys($attributes), $allowedAttributes) !== []) {
+            $this->fail(
+                'content_json',
+                'This node contains attributes the editor cannot preserve.'
+            );
+        }
+
+        if ($type === 'heading' && array_key_exists('level', $attributes)) {
+            $level = $attributes['level'];
+
+            if (
+                ! $this->isIntegerAttribute($level)
+                || $level < 1
+                || $level > 6
+            ) {
+                $this->fail(
+                    'content_json',
+                    'Heading levels must be integers from 1 to 6.'
+                );
+            }
+        }
+
+        if (
+            $type === 'orderedList'
+            && array_key_exists('start', $attributes)
+            && (
+                ! $this->isIntegerAttribute($attributes['start'])
+                || $attributes['start'] < 1
+            )
+        ) {
+            $this->fail(
+                'content_json',
+                'Ordered list start values must be positive integers.'
+            );
+        }
+
+        if (
+            $type === 'orderedList'
+            && array_key_exists('type', $attributes)
+            && $attributes['type'] !== null
+            && (
+                ! is_string($attributes['type'])
+                || ! in_array(
+                    $attributes['type'],
+                    ['1', 'a', 'A', 'i', 'I'],
+                    true
+                )
+            )
+        ) {
+            $this->fail(
+                'content_json',
+                'Ordered list styles must use a supported string value.'
+            );
+        }
+
+        if (
+            $type === 'codeBlock'
+            && array_key_exists('language', $attributes)
+            && $attributes['language'] !== null
+            && ! is_string($attributes['language'])
+        ) {
+            $this->fail(
+                'content_json',
+                'Code block languages must be strings or null.'
+            );
+        }
+    }
+
+    /**
+     * Validate one supported TipTap mark and its attributes.
+     *
+     * @param  array<string, mixed>  $mark
+     * @param  array<int, string>  $allowedMarks
+     */
+    private function validateMark(array $mark, array $allowedMarks): void
+    {
+        if (
+            array_diff(array_keys($mark), ['type', 'attrs']) !== []
+            || ! is_string($mark['type'] ?? null)
+            || ! in_array($mark['type'], $allowedMarks, true)
+        ) {
+            $this->fail(
+                'content_json',
+                'Unsupported text mark.'
+            );
+        }
+
+        $type = $mark['type'];
+        $allowedAttributes = match ($type) {
+            'highlight' => ['color'],
+            'link' => ['href', 'target', 'rel', 'class', 'title'],
+            default => [],
+        };
+
+        if ($type === 'link' && ! array_key_exists('attrs', $mark)) {
+            $this->fail(
+                'content_json',
+                'Links must include a destination.'
+            );
+        }
+
+        if (! array_key_exists('attrs', $mark)) {
+            return;
+        }
+
+        if (! is_array($mark['attrs'])) {
+            $this->fail(
+                'content_json',
+                'Mark attributes must be an object.'
+            );
+        }
+
+        $attributes = $mark['attrs'];
+
+        if (array_diff(array_keys($attributes), $allowedAttributes) !== []) {
+            $this->fail(
+                'content_json',
+                'This mark contains attributes the editor cannot preserve.'
+            );
+        }
+
+        foreach ($attributes as $value) {
+            if ($value !== null && ! is_string($value)) {
+                $this->fail(
+                    'content_json',
+                    'Mark attributes must be strings or null.'
+                );
+            }
+        }
+
+        if ($type === 'link') {
+            $href = $attributes['href'] ?? null;
+
+            if (
+                ! is_string($href)
+                || preg_match('/^(https?:\/\/|mailto:)/i', $href) !== 1
+            ) {
+                $this->fail(
+                    'content_json',
+                    'Links must use HTTP, HTTPS or mailto.'
+                );
+            }
+        }
+    }
+
+    private function isIntegerAttribute(mixed $value): bool
+    {
+        return is_int($value)
+            || (
+                is_float($value)
+                && is_finite($value)
+                && floor($value) === $value
+            );
     }
 
     /*
