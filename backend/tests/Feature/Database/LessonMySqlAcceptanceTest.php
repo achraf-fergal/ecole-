@@ -38,6 +38,9 @@ class LessonMySqlAcceptanceTest extends TestCase
     /** @var array<int> Tracked user IDs created during tests for deterministic cleanup. */
     protected array $trackedUserIds = [];
 
+    /** @var array Database connection configuration for workers. */
+    protected array $acceptanceDbConfig = [];
+
     /** @var string Previous default DB connection to restore in tearDown. */
     protected string $previousDefaultConnection = 'sqlite';
 
@@ -59,11 +62,13 @@ class LessonMySqlAcceptanceTest extends TestCase
             $this->fail("SAFETY VIOLATION: Acceptance tests must never execute against database '{$database}'. Use dedicated acceptance database.");
         }
 
+        $this->acceptanceDbConfig = compact('host', 'port', 'database', 'username', 'password');
+
         config([
             'database.connections.mysql_acceptance' => [
                 'driver' => 'mysql',
                 'host' => $host,
-                'port' => $port,
+                'port' => (int) $port,
                 'database' => $database,
                 'username' => $username,
                 'password' => $password,
@@ -88,25 +93,84 @@ class LessonMySqlAcceptanceTest extends TestCase
 
     protected function tearDown(): void
     {
-        // Deterministically clean every fixture created by this test, even after assertion failure
-        if (! empty($this->trackedCenterIds)) {
-            foreach ($this->trackedCenterIds as $centerId) {
-                $this->cleanCenterFixtures($centerId);
+        try {
+            // Safety enforcement: Reject production environment and development database
+            if (app()->environment('production')) {
+                throw new \RuntimeException('SAFETY VIOLATION: Acceptance tests must never run in production.');
             }
-            $this->trackedCenterIds = [];
+
+            $currentDb = config('database.connections.mysql_acceptance.database');
+            if ($currentDb === 'school_saas' || (! str_contains($currentDb, 'acceptance') && ! str_contains($currentDb, 'test'))) {
+                throw new \RuntimeException("SAFETY VIOLATION: Teardown forbidden on non-acceptance database '{$currentDb}'.");
+            }
+
+            // Wrap fixture cleanup in an explicit transaction
+            DB::transaction(function () {
+                if (! empty($this->trackedCenterIds)) {
+                    foreach ($this->trackedCenterIds as $centerId) {
+                        $this->cleanCenterFixtures($centerId);
+                    }
+                    $this->trackedCenterIds = [];
+                }
+
+                if (! empty($this->trackedUserIds)) {
+                    DB::table('users')->whereIn('id', $this->trackedUserIds)->delete();
+                    $this->trackedUserIds = [];
+                }
+            });
+        } finally {
+            // Always restore previous default database connection
+            DB::purge('mysql_acceptance');
+            config(['database.default' => $this->previousDefaultConnection]);
+            DB::setDefaultConnection($this->previousDefaultConnection);
+
+            parent::tearDown();
+        }
+    }
+
+    /** Build environment array passing complete ACCEPTANCE_DB_* variables to workers. */
+    private function getWorkerEnv(): array
+    {
+        return array_merge(getenv(), [
+            'ACCEPTANCE_DB_HOST' => $this->acceptanceDbConfig['host'],
+            'ACCEPTANCE_DB_PORT' => (string) $this->acceptanceDbConfig['port'],
+            'ACCEPTANCE_DB_DATABASE' => $this->acceptanceDbConfig['database'],
+            'ACCEPTANCE_DB_USERNAME' => $this->acceptanceDbConfig['username'],
+            'ACCEPTANCE_DB_PASSWORD' => (string) $this->acceptanceDbConfig['password'],
+        ]);
+    }
+
+    /**
+     * Deterministically wait until both workers signal ready via their marker files.
+     * Throws an exception if workers terminate prematurely or timeout.
+     */
+    private function waitForWorkersReady(string $ready1, string $ready2, $p1, $p2, int $timeoutSeconds = 10): void
+    {
+        $iterations = $timeoutSeconds * 20; // 50ms intervals
+        while ((! file_exists($ready1) || ! file_exists($ready2)) && $iterations > 0) {
+            $s1 = proc_get_status($p1);
+            $s2 = proc_get_status($p2);
+            if (! $s1['running'] || ! $s2['running']) {
+                break;
+            }
+            usleep(50000);
+            $iterations--;
         }
 
-        if (! empty($this->trackedUserIds)) {
-            DB::table('users')->whereIn('id', $this->trackedUserIds)->delete();
-            $this->trackedUserIds = [];
+        if (! file_exists($ready1) || ! file_exists($ready2)) {
+            $s1 = proc_get_status($p1);
+            $s2 = proc_get_status($p2);
+            throw new \RuntimeException(sprintf(
+                'Workers failed to reach ready state within %ds. Worker1 ready: %s (running: %s, exit: %s), Worker2 ready: %s (running: %s, exit: %s)',
+                $timeoutSeconds,
+                file_exists($ready1) ? 'yes' : 'no',
+                $s1['running'] ? 'yes' : 'no',
+                $s1['exitcode'],
+                file_exists($ready2) ? 'yes' : 'no',
+                $s2['running'] ? 'yes' : 'no',
+                $s2['exitcode']
+            ));
         }
-
-        // Restore previous default database connection
-        DB::purge('mysql_acceptance');
-        config(['database.default' => $this->previousDefaultConnection]);
-        DB::setDefaultConnection($this->previousDefaultConnection);
-
-        parent::tearDown();
     }
 
     /**
@@ -512,12 +576,13 @@ class LessonMySqlAcceptanceTest extends TestCase
         ]);
 
         $workerScript = base_path('tests/fixtures/concurrent_publish_worker.php');
-        $barrierFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'publish_barrier_'.uniqid().'.lock';
-        touch($barrierFile);
+        $ready1File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pub_w1_ready_'.uniqid().'.tmp';
+        $ready2File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pub_w2_ready_'.uniqid().'.tmp';
+        $releaseSignalFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'pub_release_'.uniqid().'.tmp';
 
         $php = PHP_BINARY ?: 'php';
-        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($barrierFile);
-        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($barrierFile);
+        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($ready1File).' '.escapeshellarg($releaseSignalFile);
+        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($ready2File).' '.escapeshellarg($releaseSignalFile);
 
         $descriptors = [
             0 => ['pipe', 'r'],
@@ -525,11 +590,7 @@ class LessonMySqlAcceptanceTest extends TestCase
             2 => ['pipe', 'w'],
         ];
 
-        $env = array_merge(getenv(), [
-            'DB_CONNECTION' => 'mysql',
-            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-        ]);
+        $env = $this->getWorkerEnv();
 
         $p1 = proc_open($cmd1, $descriptors, $pipes1, base_path(), $env);
         $p2 = proc_open($cmd2, $descriptors, $pipes2, base_path(), $env);
@@ -540,23 +601,30 @@ class LessonMySqlAcceptanceTest extends TestCase
         fclose($pipes1[0]);
         fclose($pipes2[0]);
 
-        // Let both processes boot, connect to MySQL and start polling the barrier
-        usleep(300000); // 300ms
+        try {
+            // Deterministically wait for both workers to connect and load models
+            $this->waitForWorkersReady($ready1File, $ready2File, $p1, $p2, 10);
 
-        // Release barrier -> Both processes fire simultaneously
-        unlink($barrierFile);
+            // Release barrier -> Both processes fire simultaneously
+            touch($releaseSignalFile);
 
-        $out1 = stream_get_contents($pipes1[1]);
-        $err1 = stream_get_contents($pipes1[2]);
-        $out2 = stream_get_contents($pipes2[1]);
-        $err2 = stream_get_contents($pipes2[2]);
-        fclose($pipes1[1]);
-        fclose($pipes2[1]);
-        fclose($pipes1[2]);
-        fclose($pipes2[2]);
+            $out1 = stream_get_contents($pipes1[1]);
+            $err1 = stream_get_contents($pipes1[2]);
+            $out2 = stream_get_contents($pipes2[1]);
+            $err2 = stream_get_contents($pipes2[2]);
+        } finally {
+            fclose($pipes1[1]);
+            fclose($pipes2[1]);
+            fclose($pipes1[2]);
+            fclose($pipes2[2]);
 
-        $exit1 = proc_close($p1);
-        $exit2 = proc_close($p2);
+            $exit1 = proc_close($p1);
+            $exit2 = proc_close($p2);
+
+            @unlink($ready1File);
+            @unlink($ready2File);
+            @unlink($releaseSignalFile);
+        }
 
         $res1 = json_decode(trim($out1), true);
         $res2 = json_decode(trim($out2), true);
@@ -569,6 +637,9 @@ class LessonMySqlAcceptanceTest extends TestCase
         $this->assertContains('success', $statuses, 'Exactly one concurrent publication worker must succeed');
         $this->assertContains('validation_error', $statuses, 'Losing concurrent publication worker must fail cleanly with validation error');
 
+        $successRes = $res1['status'] === 'success' ? $res1 : $res2;
+        $this->assertSame(1, (int) $successRes['version_number'], 'Published revision must be version 1');
+
         // Database consistency verification
         $publishedRevisions = DB::table('lesson_revisions')
             ->where('lesson_id', $lesson->id)
@@ -576,6 +647,12 @@ class LessonMySqlAcceptanceTest extends TestCase
             ->get();
 
         $this->assertCount(1, $publishedRevisions, 'Database consistency: exactly one revision is published');
+        $this->assertSame((int) $publishedRevisions->first()->id, (int) $successRes['revision_id']);
+
+        $dbLesson = DB::table('lessons')->where('id', $lesson->id)->first();
+        $this->assertNotNull($dbLesson->published_revision_id);
+        $this->assertNull($dbLesson->draft_revision_id, 'Draft pointer must be null after publication');
+        $this->assertSame((int) $publishedRevisions->first()->id, (int) $dbLesson->published_revision_id);
 
         $dbLesson = DB::table('lessons')->where('id', $lesson->id)->first();
         $this->assertNotNull($dbLesson->published_revision_id);
@@ -715,13 +792,14 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         // Run two concurrent worker processes calling startOrResumeAttempt
         $workerScript = base_path('tests/fixtures/concurrent_attempt_worker.php');
-        $barrierFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'attempt_barrier_'.uniqid().'.lock';
-        touch($barrierFile);
+        $ready1File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'att_w1_ready_'.uniqid().'.tmp';
+        $ready2File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'att_w2_ready_'.uniqid().'.tmp';
+        $releaseSignalFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'att_release_'.uniqid().'.tmp';
 
         $php = PHP_BINARY ?: 'php';
-        $args = "{$studentUser->id} {$course->id} {$lesson->id} {$exercise->id} {$profile->id} {$center->id} ".escapeshellarg($barrierFile);
-        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args;
-        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args;
+        $args = "{$studentUser->id} {$course->id} {$lesson->id} {$exercise->id} {$profile->id} {$center->id}";
+        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args.' '.escapeshellarg($ready1File).' '.escapeshellarg($releaseSignalFile);
+        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args.' '.escapeshellarg($ready2File).' '.escapeshellarg($releaseSignalFile);
 
         $descriptors = [
             0 => ['pipe', 'r'],
@@ -729,11 +807,7 @@ class LessonMySqlAcceptanceTest extends TestCase
             2 => ['pipe', 'w'],
         ];
 
-        $env = array_merge(getenv(), [
-            'DB_CONNECTION' => 'mysql',
-            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-        ]);
+        $env = $this->getWorkerEnv();
 
         $p1 = proc_open($cmd1, $descriptors, $pipes1, base_path(), $env);
         $p2 = proc_open($cmd2, $descriptors, $pipes2, base_path(), $env);
@@ -744,21 +818,28 @@ class LessonMySqlAcceptanceTest extends TestCase
         fclose($pipes1[0]);
         fclose($pipes2[0]);
 
-        usleep(300000); // 300ms for workers to boot and wait at barrier
+        try {
+            $this->waitForWorkersReady($ready1File, $ready2File, $p1, $p2, 10);
 
-        unlink($barrierFile); // Trigger concurrent execution
+            touch($releaseSignalFile); // Trigger simultaneous execution
 
-        $out1 = stream_get_contents($pipes1[1]);
-        $err1 = stream_get_contents($pipes1[2]);
-        $out2 = stream_get_contents($pipes2[1]);
-        $err2 = stream_get_contents($pipes2[2]);
-        fclose($pipes1[1]);
-        fclose($pipes2[1]);
-        fclose($pipes1[2]);
-        fclose($pipes2[2]);
+            $out1 = stream_get_contents($pipes1[1]);
+            $err1 = stream_get_contents($pipes1[2]);
+            $out2 = stream_get_contents($pipes2[1]);
+            $err2 = stream_get_contents($pipes2[2]);
+        } finally {
+            fclose($pipes1[1]);
+            fclose($pipes2[1]);
+            fclose($pipes1[2]);
+            fclose($pipes2[2]);
 
-        $exit1 = proc_close($p1);
-        $exit2 = proc_close($p2);
+            $exit1 = proc_close($p1);
+            $exit2 = proc_close($p2);
+
+            @unlink($ready1File);
+            @unlink($ready2File);
+            @unlink($releaseSignalFile);
+        }
 
         $res1 = json_decode(trim($out1), true);
         $res2 = json_decode(trim($out2), true);
@@ -771,8 +852,8 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         // Both concurrent requests must have resolved to the EXACT same attempt ID
         $this->assertSame($res1['attempt_id'], $res2['attempt_id'], 'Both concurrent workers must receive the exact same attempt ID');
-        $this->assertSame(1, $res1['attempt_number']);
-        $this->assertSame(1, $res2['attempt_number']);
+        $this->assertSame(1, (int) $res1['attempt_number'], 'Attempt number must be exactly 1');
+        $this->assertSame(1, (int) $res2['attempt_number'], 'Attempt number must be exactly 1');
         $this->assertSame('in_progress', $res1['attempt_status']);
 
         // In the database, exactly one attempt must exist
@@ -820,69 +901,78 @@ class LessonMySqlAcceptanceTest extends TestCase
             2 => ['pipe', 'w'],
         ];
 
-        $env = array_merge(getenv(), [
-            'DB_CONNECTION' => 'mysql',
-            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
-        ]);
+        $env = $this->getWorkerEnv();
 
         $proc = proc_open($cmd, $descriptors, $pipes, base_path(), $env);
         $this->assertIsResource($proc);
 
         fclose($pipes[0]);
 
-        // Wait for Worker to lock Lesson B (Step 1)
-        $waitLimit = 100;
-        while (! file_exists($step1File) && $waitLimit > 0) {
-            usleep(25000);
-            $waitLimit--;
-        }
-
-        $pdo1 = DB::connection()->getPdo();
-        $pdo1->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-        $pdo1->exec('SET SESSION innodb_lock_wait_timeout = 5');
-
         $deadlockCaught = false;
         try {
-            $pdo1->beginTransaction();
-
-            // Parent locks Lesson A
-            $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
-            $stmt->execute([$lessonA->id]);
-            $stmt->fetch();
-
-            // Signal Step 2 to Worker (Parent has locked Lesson A)
-            touch($step2File);
-
-            // Small delay to let worker issue its query for Lesson A
-            usleep(50000);
-
-            // Parent attempts to lock Lesson B (which Worker already holds) -> Deadlock cycle!
-            $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
-            $stmt->execute([$lessonB->id]);
-            $stmt->fetch();
-
-            $pdo1->commit();
-        } catch (\PDOException $e) {
-            $deadlockCaught = true;
-            // Verify MySQL Error 1213 / SQLSTATE 40001
-            $this->assertStringContainsString('Deadlock found', $e->getMessage());
-            if ($pdo1->inTransaction()) {
-                $pdo1->rollBack();
+            // Wait for Worker to lock Lesson B (Step 1)
+            $waitLimit = 100;
+            while (! file_exists($step1File) && $waitLimit > 0) {
+                usleep(25000);
+                $waitLimit--;
             }
+
+            $pdo1 = DB::connection()->getPdo();
+            $pdo1->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo1->exec('SET SESSION innodb_lock_wait_timeout = 5');
+
+            try {
+                $pdo1->beginTransaction();
+
+                // Parent locks Lesson A
+                $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+                $stmt->execute([$lessonA->id]);
+                $stmt->fetch();
+
+                // Signal Step 2 to Worker (Parent has locked Lesson A)
+                touch($step2File);
+
+                // Small delay to let worker issue its query for Lesson A
+                usleep(50000);
+
+                // Parent attempts to lock Lesson B (which Worker already holds) -> Deadlock cycle!
+                $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+                $stmt->execute([$lessonB->id]);
+                $stmt->fetch();
+
+                $pdo1->commit();
+            } catch (\PDOException $e) {
+                $deadlockCaught = true;
+                // Verify MySQL Error 1213 / SQLSTATE 40001
+                $this->assertStringContainsString('Deadlock found', $e->getMessage());
+                $this->assertSame('40001', (string) $e->getCode());
+                if (isset($e->errorInfo[1])) {
+                    $this->assertSame(1213, (int) $e->errorInfo[1]);
+                }
+                if ($pdo1->inTransaction()) {
+                    $pdo1->rollBack();
+                }
+            }
+
+            $workerOut = stream_get_contents($pipes[1]);
+            $workerErr = stream_get_contents($pipes[2]);
+        } finally {
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $exitCode = proc_close($proc);
+
+            @unlink($step1File);
+            @unlink($step2File);
         }
-
-        $workerOut = stream_get_contents($pipes[1]);
-        $workerErr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($proc);
-
-        @unlink($step1File);
-        @unlink($step2File);
 
         $workerRes = json_decode($workerOut, true);
         $workerDeadlocked = isset($workerRes['status']) && $workerRes['status'] === 'pdo_exception' && str_contains($workerRes['message'] ?? '', 'Deadlock');
+        if ($workerDeadlocked) {
+            $this->assertSame('40001', (string) ($workerRes['sqlstate'] ?? ''));
+            if (isset($workerRes['error_info'][1])) {
+                $this->assertSame(1213, (int) $workerRes['error_info'][1]);
+            }
+        }
 
         // At least one of the two connections must have received error 1213 from MySQL InnoDB
         $this->assertTrue(
@@ -890,7 +980,8 @@ class LessonMySqlAcceptanceTest extends TestCase
             'Real MySQL InnoDB deadlock detection succeeded: either connection 1 or connection 2 received Error 1213 / 40001'
         );
 
-        // --- Part 2: Laravel Transaction Retry and Rollback Integrity ---
+        // --- Part 2: Simulated Retry Classification (validates Laravel DB::transaction deadlock retry logic) ---
+        // Note: This is an explicit simulated retry classification test to verify Laravel's transaction deadlock recovery logic, not a retry of the live InnoDB deadlock.
         $retryAttempts = 0;
         $result = DB::transaction(function () use (&$retryAttempts, $lessonA) {
             $retryAttempts++;

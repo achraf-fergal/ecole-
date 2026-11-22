@@ -20,6 +20,7 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -155,16 +156,38 @@ class E2EFixtureManager
                     'status' => 'active',
                 ]);
 
-            // 6. Pre-create an active LessonAsset for media block testing
-            $asset = LessonAsset::create([
+            // 6. Pre-create active LessonAssets (Image and PDF) with real files in isolated storage
+            $imageKey = 'e2e_fixtures/centers/'.$center->id.'/diagram.png';
+            $imageBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==');
+            Storage::disk('private')->put($imageKey, $imageBytes);
+
+            $imageAsset = LessonAsset::create([
                 'center_id' => $center->id,
                 'lesson_id' => $lesson->id,
                 'title' => 'E2E Diagram Asset',
                 'asset_type' => LessonAsset::TYPE_IMAGE,
-                'storage_disk' => 'public',
-                'storage_key' => 'centers/'.$center->id.'/e2e_image.jpg',
-                'mime_type' => 'image/jpeg',
-                'size_bytes' => 2048,
+                'storage_disk' => 'private',
+                'storage_key' => $imageKey,
+                'original_filename' => 'diagram.png',
+                'mime_type' => 'image/png',
+                'size_bytes' => strlen($imageBytes),
+                'status' => LessonAsset::STATUS_ACTIVE,
+            ]);
+
+            $pdfKey = 'e2e_fixtures/centers/'.$center->id.'/handout.pdf';
+            $pdfBytes = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000108 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF";
+            Storage::disk('private')->put($pdfKey, $pdfBytes);
+
+            $pdfAsset = LessonAsset::create([
+                'center_id' => $center->id,
+                'lesson_id' => $lesson->id,
+                'title' => 'E2E Study Guide PDF',
+                'asset_type' => LessonAsset::TYPE_FILE,
+                'storage_disk' => 'private',
+                'storage_key' => $pdfKey,
+                'original_filename' => 'handout.pdf',
+                'mime_type' => 'application/pdf',
+                'size_bytes' => strlen($pdfBytes),
                 'status' => LessonAsset::STATUS_ACTIVE,
             ]);
 
@@ -213,7 +236,13 @@ class E2EFixtureManager
                 'lessonId' => $lesson->id,
                 'cohortId' => $cohort->id,
                 'enrollmentId' => $enrollment->id,
-                'assetId' => $asset->id,
+                'assetId' => $imageAsset->id,
+                'imageAssetId' => $imageAsset->id,
+                'imageStorageKey' => $imageKey,
+                'imageDisk' => 'private',
+                'pdfAssetId' => $pdfAsset->id,
+                'pdfStorageKey' => $pdfKey,
+                'pdfDisk' => 'private',
                 'exerciseId' => $exercise->id,
                 'questionId' => $question->id,
                 'optionIds' => [$opt1->id, $opt2->id],
@@ -275,7 +304,18 @@ class E2EFixtureManager
                 'published_revision_id' => null,
             ]);
 
-            // 5. Lesson blocks, revisions, assets
+            // 5. Lesson blocks, revisions, assets (and clean actual files from storage)
+            $assets = DB::table('lesson_assets')->where('center_id', $center->id)->get();
+            foreach ($assets as $a) {
+                if (! empty($a->storage_disk) && ! empty($a->storage_key)) {
+                    try {
+                        Storage::disk($a->storage_disk)->delete($a->storage_key);
+                    } catch (\Throwable) {
+                        // Suppress storage disk deletion errors during database teardown
+                    }
+                }
+            }
+
             DB::table('lesson_blocks')->where('center_id', $center->id)->delete();
             DB::table('lesson_revisions')->where('center_id', $center->id)->delete();
             DB::table('lesson_assets')->where('center_id', $center->id)->delete();
@@ -291,7 +331,7 @@ class E2EFixtureManager
                 DB::table('exercises')->where('center_id', $center->id)->delete();
             }
 
-            // 7. Lessons, modules, courses, languages, levels
+            // 7. Lessons, modules, courses, languages, levels (level_templates are global reference records and preserved)
             DB::table('lessons')->where('center_id', $center->id)->delete();
             DB::table('course_modules')->where('center_id', $center->id)->delete();
 
@@ -303,7 +343,6 @@ class E2EFixtureManager
             DB::table('courses')->where('center_id', $center->id)->delete();
             DB::table('languages')->where('center_id', $center->id)->delete();
             DB::table('levels')->where('center_id', $center->id)->delete();
-            DB::table('level_templates')->where('center_id', $center->id)->delete();
 
             // 8. User memberships and strictly verified E2E users
             $memberships = DB::table('center_user')->where('center_id', $center->id)->get();
@@ -315,14 +354,17 @@ class E2EFixtureManager
                 DB::table('center_user')->where('center_id', $center->id)->delete();
             }
 
-            // Strictly verify ownership: Only delete users that belong solely to this fixture
+            // Strictly verify ownership: Only delete users that match exact fixture token and belong solely to this fixture
             if (! empty($userIds)) {
+                $fixtureToken = Str::after($center->slug, self::FIXTURE_SLUG_PREFIX);
+                $exactEmails = [
+                    "admin_{$fixtureToken}@example.test",
+                    "student_{$fixtureToken}@example.test",
+                ];
+
                 $fixtureUsers = DB::table('users')
                     ->whereIn('id', $userIds)
-                    ->where(function ($q) {
-                        $q->where('email', 'like', 'admin_e2e_%@example.test')
-                          ->orWhere('email', 'like', 'student_e2e_%@example.test');
-                    })
+                    ->whereIn('email', $exactEmails)
                     ->get();
 
                 $userIdsToDelete = [];

@@ -4,9 +4,12 @@ namespace Tests\Unit;
 
 use App\Models\Center;
 use App\Models\CenterUser;
+use App\Models\Lesson;
+use App\Models\LevelTemplate;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use Tests\Fixtures\E2EFixtureManager;
 use Tests\TestCase;
@@ -20,6 +23,8 @@ class E2EFixtureManagerTest extends TestCase
      */
     public function test_successful_setup(): void
     {
+        Storage::fake('private');
+
         $fixture = E2EFixtureManager::setup();
 
         $this->assertArrayHasKey('centerId', $fixture);
@@ -27,6 +32,10 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertArrayHasKey('courseId', $fixture);
         $this->assertArrayHasKey('lessonId', $fixture);
         $this->assertArrayHasKey('assetId', $fixture);
+        $this->assertArrayHasKey('imageAssetId', $fixture);
+        $this->assertArrayHasKey('imageStorageKey', $fixture);
+        $this->assertArrayHasKey('pdfAssetId', $fixture);
+        $this->assertArrayHasKey('pdfStorageKey', $fixture);
         $this->assertArrayHasKey('exerciseId', $fixture);
         $this->assertArrayHasKey('adminEmail', $fixture);
         $this->assertArrayHasKey('studentEmail', $fixture);
@@ -37,63 +46,76 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertDatabaseHas('courses', ['id' => $fixture['courseId']]);
         $this->assertDatabaseHas('lessons', ['id' => $fixture['lessonId']]);
         $this->assertDatabaseHas('exercises', ['id' => $fixture['exerciseId']]);
-        $this->assertDatabaseHas('lesson_assets', ['id' => $fixture['assetId']]);
+        $this->assertDatabaseHas('lesson_assets', ['id' => $fixture['imageAssetId']]);
+        $this->assertDatabaseHas('lesson_assets', ['id' => $fixture['pdfAssetId']]);
+
+        // Physical file creation verified
+        Storage::disk('private')->assertExists($fixture['imageStorageKey']);
+        Storage::disk('private')->assertExists($fixture['pdfStorageKey']);
 
         // Cleanup
         E2EFixtureManager::teardown($fixture['centerId']);
     }
 
     /**
-     * Test 2: Failed setup rolls back all partial creation atomically.
+     * Test 2: Failed setup actually invokes E2EFixtureManager::setup() with injected failure
+     * and rolls back all entities atomically.
      */
     public function test_failed_setup_rollback(): void
     {
+        Storage::fake('private');
+
         $initialCenters = DB::table('centers')->count();
         $initialUsers = DB::table('users')->count();
+        $initialMemberships = DB::table('center_user')->count();
+        $initialCourses = DB::table('courses')->count();
+        $initialModules = DB::table('course_modules')->count();
+        $initialLessons = DB::table('lessons')->count();
+        $initialAssets = DB::table('lesson_assets')->count();
+        $initialExercises = DB::table('exercises')->count();
 
-        // Simulate failure during transactional setup by intercepting an event or creating duplicate unique key
+        // Inject a controlled failure during real Lesson creation inside E2EFixtureManager::setup()
+        Lesson::saving(function ($lesson) {
+            if (str_starts_with($lesson->title, 'E2E Lesson')) {
+                throw new \RuntimeException('Controlled failure during Lesson creation');
+            }
+        });
+
         try {
-            DB::transaction(function () {
-                $uniq = 'failed_e2e_'.uniqid();
-                Center::create([
-                    'name' => E2EFixtureManager::FIXTURE_NAME_PREFIX.$uniq,
-                    'slug' => E2EFixtureManager::FIXTURE_SLUG_PREFIX.$uniq,
-                    'status' => 'active',
-                    'timezone' => 'UTC',
-                    'default_locale' => 'en',
-                ]);
-
-                User::create([
-                    'name' => 'E2E Admin',
-                    'email' => 'admin_'.$uniq.'@example.test',
-                    'password' => 'Password123!',
-                    'status' => User::STATUS_ACTIVE,
-                    'token_version' => 1,
-                ]);
-
-                // Intentionally throw exception to trigger rollback
-                throw new \RuntimeException('Simulated setup failure midway');
-            });
-            $this->fail('Should have thrown RuntimeException');
+            E2EFixtureManager::setup();
+            $this->fail('Expected RuntimeException was not thrown by E2EFixtureManager::setup()');
         } catch (\RuntimeException $e) {
-            $this->assertSame('Simulated setup failure midway', $e->getMessage());
+            $this->assertSame('Controlled failure during Lesson creation', $e->getMessage());
+        } finally {
+            // Unregister the model event dispatcher callback to avoid contaminating subsequent tests
+            Lesson::flushEventListeners();
         }
 
-        // Verify full rollback: counts unchanged
-        $this->assertSame($initialCenters, DB::table('centers')->count());
-        $this->assertSame($initialUsers, DB::table('users')->count());
+        // Verify complete transactional rollback: Every table count remains completely unchanged
+        $this->assertSame($initialCenters, DB::table('centers')->count(), 'Centers must roll back');
+        $this->assertSame($initialUsers, DB::table('users')->count(), 'Users must roll back');
+        $this->assertSame($initialMemberships, DB::table('center_user')->count(), 'Memberships must roll back');
+        $this->assertSame($initialCourses, DB::table('courses')->count(), 'Courses must roll back');
+        $this->assertSame($initialModules, DB::table('course_modules')->count(), 'Modules must roll back');
+        $this->assertSame($initialLessons, DB::table('lessons')->count(), 'Lessons must roll back');
+        $this->assertSame($initialAssets, DB::table('lesson_assets')->count(), 'Assets must roll back');
+        $this->assertSame($initialExercises, DB::table('exercises')->count(), 'Exercises must roll back');
     }
 
     /**
-     * Test 3: Successful teardown deletes all fixture records in foreign-key order.
+     * Test 3: Successful teardown deletes all fixture records in foreign-key order and removes storage files.
      */
     public function test_successful_teardown(): void
     {
+        Storage::fake('private');
+
         $fixture = E2EFixtureManager::setup();
         $centerId = $fixture['centerId'];
         $adminId = $fixture['adminUserId'];
         $studentId = $fixture['studentUserId'];
         $lessonId = $fixture['lessonId'];
+        $imageKey = $fixture['imageStorageKey'];
+        $pdfKey = $fixture['pdfStorageKey'];
 
         E2EFixtureManager::teardown($centerId);
 
@@ -102,10 +124,50 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertDatabaseMissing('users', ['id' => $studentId]);
         $this->assertDatabaseMissing('lessons', ['id' => $lessonId]);
         $this->assertDatabaseMissing('courses', ['id' => $fixture['courseId']]);
+        $this->assertDatabaseMissing('lesson_assets', ['id' => $fixture['imageAssetId']]);
+        $this->assertDatabaseMissing('lesson_assets', ['id' => $fixture['pdfAssetId']]);
+
+        // Physical storage files deleted during teardown
+        Storage::disk('private')->assertMissing($imageKey);
+        Storage::disk('private')->assertMissing($pdfKey);
     }
 
     /**
-     * Test 4: Repeated teardown is idempotent.
+     * Test 4: Global level_templates are preserved and unchanged across fixture setup and teardown.
+     */
+    public function test_global_level_templates_preserved_across_setup_and_teardown(): void
+    {
+        // Ensure baseline global LevelTemplates exist
+        $template1 = LevelTemplate::firstOrCreate(
+            ['code' => 'TEST_A1'],
+            ['name' => 'Template A1', 'sort_order' => 1, 'is_active' => true]
+        );
+        $template2 = LevelTemplate::firstOrCreate(
+            ['code' => 'TEST_B1'],
+            ['name' => 'Template B1', 'sort_order' => 2, 'is_active' => true]
+        );
+
+        $initialTemplateIds = LevelTemplate::query()->orderBy('id')->pluck('id')->all();
+        $this->assertNotEmpty($initialTemplateIds);
+
+        // Run fixture setup and teardown
+        $fixture = E2EFixtureManager::setup();
+        $this->assertDatabaseHas('centers', ['id' => $fixture['centerId']]);
+
+        E2EFixtureManager::teardown($fixture['centerId']);
+        $this->assertDatabaseMissing('centers', ['id' => $fixture['centerId']]);
+
+        // Verify that global level templates are 100% unchanged
+        $afterTemplateIds = LevelTemplate::query()->orderBy('id')->pluck('id')->all();
+        $this->assertSame(
+            $initialTemplateIds,
+            $afterTemplateIds,
+            'Global level_templates reference records must remain completely intact after fixture teardown.'
+        );
+    }
+
+    /**
+     * Test 5: Repeated teardown is idempotent.
      */
     public function test_repeated_teardown_is_idempotent(): void
     {
@@ -122,7 +184,7 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 5: Rejection of real / ordinary center ID.
+     * Test 6: Rejection of real / ordinary center ID.
      */
     public function test_rejection_of_real_center_id(): void
     {
@@ -147,7 +209,7 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 6: Preservation of unrelated users and centers.
+     * Test 7: Preservation of unrelated users and centers.
      */
     public function test_preservation_of_unrelated_users_and_centers(): void
     {

@@ -59,28 +59,30 @@ function setupFixture() {
 
 /**
  * Teardown the isolated fixture in backend.
+ * Propagates any teardown failure and asserts status is 'cleaned'.
  */
 function teardownFixture(centerId) {
   if (!centerId) return;
-  try {
-    console.log(`Tearing down isolated fixture Center ID ${centerId}...`);
-    const stdout = execSync(`php "${FIXTURE_PHP}" teardown ${centerId}`, {
-      encoding: "utf8",
-      timeout: 30000,
-    });
-    console.log(`✓ Teardown complete:`, stdout.trim());
-  } catch (err) {
-    console.error(`⚠️ Teardown error for Center ID ${centerId}:`, err.message);
+  console.log(`Tearing down isolated fixture Center ID ${centerId}...`);
+  const stdout = execSync(`php "${FIXTURE_PHP}" teardown ${centerId}`, {
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  const data = JSON.parse(stdout.trim());
+  if (data.status !== "cleaned" || Number(data.centerId) !== Number(centerId)) {
+    throw new Error(`Teardown validation failed: status=${data.status}, centerId=${data.centerId}`);
   }
+  console.log(`✓ Teardown complete: Center ID ${data.centerId} cleanly removed.`);
 }
 
 async function main() {
   console.log("=================================================");
-  console.log("G5.2 Production-Grade Reliable Browser Acceptance Suite");
+  console.log("G5.2.1 Production-Grade Reliable Browser Acceptance Suite");
   console.log("=================================================");
 
   let fixture = null;
   let browser = null;
+  let primaryError = null;
   const consoleErrors = [];
   const failedRequests = [];
 
@@ -171,7 +173,7 @@ async function main() {
     await adminPage.waitForSelector(".ProseMirror", { state: "visible" });
     const editor = adminPage.locator(".ProseMirror");
     await editor.click();
-    await editor.fill("G5.2 Rigorous Production Acceptance: Verifying persisted TipTap formatting.");
+    await editor.fill("G5.2.1 Rigorous Production Acceptance: Verifying persisted TipTap formatting.");
 
     // Select text and apply Bold formatting
     await adminPage.keyboard.press("Control+A");
@@ -208,7 +210,7 @@ async function main() {
     await adminPage.waitForSelector("main", { state: "visible" });
     const timelineAfterReload = await adminPage.locator("main").innerText();
     assert.ok(
-      timelineAfterReload.includes("G5.2 Rigorous Production Acceptance"),
+      timelineAfterReload.includes("G5.2.1 Rigorous Production Acceptance"),
       "Persisted text block formatting survived reload!"
     );
 
@@ -227,7 +229,7 @@ async function main() {
 
     const assetSelect = adminPage.locator('select').filter({ hasText: 'Choose an uploaded asset' });
     await assetSelect.waitFor({ state: "visible" });
-    await assetSelect.selectOption(String(fixture.assetId));
+    await assetSelect.selectOption(String(fixture.imageAssetId || fixture.assetId));
 
     const attachMediaBtn = adminPage.locator('button:has-text("Insert Selected Media")');
     await attachMediaBtn.waitFor({ state: "visible" });
@@ -262,14 +264,14 @@ async function main() {
     console.log("✓ Exercise block attached via API.");
 
     // -----------------------------------------------------------------------
-    // ASSERTION 10: Reordering Blocks via UI and Verifying Persisted Order
+    // ASSERTION 10: Reordering Blocks via UI and Verifying Persisted Order (No API Fallback)
     // -----------------------------------------------------------------------
-    console.log("\n[Assertion 10] Testing Block Reordering in Timeline...");
+    console.log("\n[Assertion 10] Testing Block Reordering in Timeline via Accessible UI...");
     const dragHandles = adminPage.locator('button[aria-label^="Reorder"]');
     const dragCount = await dragHandles.count();
     assert.ok(dragCount >= 2, `Timeline has ${dragCount} blocks ready for reordering`);
 
-    // Fetch current draft blocks to know existing order
+    // Fetch current draft blocks to know existing canonical order
     const draftBeforeReorder = await adminPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
       const res = await fetch(
         `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content`,
@@ -285,13 +287,18 @@ async function main() {
 
     assert.ok(draftBeforeReorder && draftBeforeReorder.blocks.length >= 2, "Draft has multiple blocks");
     const originalBlockIds = draftBeforeReorder.blocks.map((b) => b.id);
-    const reversedBlockIds = [...originalBlockIds].reverse();
 
-    // Perform accessible keyboard or mouse reordering via UI interaction
+    // Compute expected order: moving element 0 down to index 1
+    const expectedOrderedIds = [...originalBlockIds];
+    const [movedId] = expectedOrderedIds.splice(0, 1);
+    expectedOrderedIds.splice(1, 0, movedId);
+
+    // Reorder block 0 down to index 1 via accessible keyboard operation:
+    // Focus first handle, press Space (pick up), ArrowDown (move down), Space (drop)
     const reorderResponsePromise = adminPage.waitForResponse(
       (resp) => resp.url().includes("/blocks/order") && resp.status() === 200,
-      { timeout: 7000 }
-    ).catch(() => null);
+      { timeout: 10000 }
+    );
 
     const firstHandle = dragHandles.first();
     await firstHandle.focus();
@@ -300,43 +307,10 @@ async function main() {
     await adminPage.keyboard.press("Space");
 
     const capturedReorder = await reorderResponsePromise;
-    if (capturedReorder) {
-      console.log("✓ UI keyboard reordering triggered block order API request.");
-    } else {
-      // Direct order API fallback verification
-      const reorderResult = await adminPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, revisionId, blockIds }) => {
-        const xsrfCookie = document.cookie.split("; ").find((c) => c.startsWith("XSRF-TOKEN="));
-        const xsrfToken = xsrfCookie ? decodeURIComponent(xsrfCookie.split("=")[1]) : "";
+    assert.ok(capturedReorder, "UI operation must trigger HTTP 200 PUT /blocks/order request");
+    console.log("✓ UI keyboard reordering triggered block order API request.");
 
-        const res = await fetch(
-          `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content/revisions/${revisionId}/blocks/order`,
-          {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-              "X-XSRF-TOKEN": xsrfToken,
-            },
-            credentials: "include",
-            body: JSON.stringify({ ordered_block_ids: blockIds }),
-          }
-        );
-        const json = await res.json();
-        return { status: res.status, data: json };
-      }, {
-        apiUrl: API_URL,
-        centerSlug: fixture.centerSlug,
-        courseSlug: fixture.courseSlug,
-        lessonId: fixture.lessonId,
-        revisionId: draftBeforeReorder.id,
-        blockIds: reversedBlockIds,
-      });
-
-      assert.equal(reorderResult.status, 200, "Reorder API returned HTTP 200 OK");
-      console.log("✓ Block reordered and verified via order API.");
-    }
-
-    // Reload page and verify persisted order matches reversed order
+    // Reload page and verify persisted order strictly matches expected sequence
     await adminPage.reload({ waitUntil: "networkidle" });
     const draftAfterReorder = await adminPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
       const res = await fetch(
@@ -351,8 +325,13 @@ async function main() {
       return payload.draft_revision;
     }, { apiUrl: API_URL, centerSlug: fixture.centerSlug, courseSlug: fixture.courseSlug, lessonId: fixture.lessonId });
 
-    assert.ok(draftAfterReorder && draftAfterReorder.blocks.length >= 2, "Persisted block order verified in database & API.");
-    console.log("✓ Persisted order across reload verified in database & API.");
+    const persistedBlockIds = draftAfterReorder.blocks.map((b) => b.id);
+    assert.deepEqual(
+      persistedBlockIds,
+      expectedOrderedIds,
+      `Persisted block IDs (${persistedBlockIds.join(",")}) must exactly equal expected sequence (${expectedOrderedIds.join(",")})`
+    );
+    console.log("✓ Persisted order across reload verified in database & API strictly matching UI operation.");
 
     // -----------------------------------------------------------------------
     // ASSERTION 11: Opening Student Preview
@@ -367,7 +346,7 @@ async function main() {
 
     const previewBody = await adminPage.locator("main").innerText();
     assert.ok(
-      previewBody.includes("G5.2 Rigorous Production Acceptance"),
+      previewBody.includes("G5.2.1 Rigorous Production Acceptance"),
       "Draft content rendered accurately in Live Student Preview"
     );
     console.log("✓ Live Student Preview verified.");
@@ -462,50 +441,134 @@ async function main() {
     console.log("✓ Enrolled student authenticated. Current URL:", studentPage.url());
 
     // -----------------------------------------------------------------------
-    // ASSERTION 16: Student View & Assessment Lifecycle Verification
+    // ASSERTION 16: Mandatory Student Assessment Lifecycle & Media Retrieval
     // -----------------------------------------------------------------------
-    console.log("\n[Assertion 16] Student Lesson View & Assessment Lifecycle Verification...");
+    console.log("\n[Assertion 16] Student Lesson View, Media Retrieval, and Assessment Lifecycle Verification...");
     const studentLessonUrl = `${BASE_URL}/courses/${fixture.courseSlug}/learn/lessons/${fixture.lessonId}?center=${fixture.centerSlug}`;
     const studentRes = await studentPage.goto(studentLessonUrl, { waitUntil: "networkidle" });
     assert.equal(studentRes.status(), 200, "Student lesson page returned HTTP 200");
 
     const studentMain = await studentPage.locator("main").innerText();
     assert.ok(
-      studentMain.includes("G5.2 Rigorous Production Acceptance"),
-      "Student sees the published revision content!"
+      studentMain.includes("G5.2.1 Rigorous Production Acceptance"),
+      "Student sees the published revision text content!"
     );
 
-    // Verify assessment block rendered and perform student attempt lifecycle
-    const startAssessmentBtn = studentPage.locator('button:has-text("Start Assessment")');
-    if (await startAssessmentBtn.isVisible()) {
-      console.log("Starting student assessment attempt in browser...");
-      const startAttemptPromise = studentPage.waitForResponse(
-        (resp) => resp.url().includes("/attempts") && (resp.status() === 201 || resp.status() === 200)
+    // 16a. Verify Media Retrieval
+    const imgElement = studentPage.locator('img[alt*="Diagram"], img[alt*="Asset"], img').first();
+    await imgElement.waitFor({ state: "visible", timeout: 5000 });
+    const imgSrc = await imgElement.getAttribute("src");
+    assert.ok(imgSrc && imgSrc.length > 0, "Image asset has valid src attribute in student view");
+    console.log("✓ Student media image rendered successfully in DOM.");
+
+    // 16b. Authorized Student PDF Download Verification
+    const authorizedPdfDownload = await studentPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, pdfAssetId }) => {
+      const res = await fetch(
+        `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/assets/${pdfAssetId}/download`,
+        { credentials: "include" }
       );
-      await startAssessmentBtn.click();
-      await startAttemptPromise;
-      console.log("✓ Assessment attempt started.");
+      const text = await res.text();
+      return {
+        status: res.status,
+        isPdfHeader: text.startsWith("%PDF"),
+      };
+    }, {
+      apiUrl: API_URL,
+      centerSlug: fixture.centerSlug,
+      courseSlug: fixture.courseSlug,
+      lessonId: fixture.lessonId,
+      pdfAssetId: fixture.pdfAssetId,
+    });
+    assert.equal(authorizedPdfDownload.status, 200, "Authorized student PDF download returns HTTP 200");
+    assert.ok(authorizedPdfDownload.isPdfHeader, "Authorized student PDF starts with %PDF header");
+    console.log("✓ Authorized student PDF download verified with valid %PDF payload.");
 
-      // Select an answer option
-      const optionBtn = studentPage.locator('input[type="radio"], input[type="checkbox"], button[role="radio"]').first();
-      if (await optionBtn.isVisible()) {
-        await optionBtn.click();
-        console.log("✓ Selected assessment option.");
-      }
+    // 16c. Unenrolled User PDF Access Rejection
+    const anonContext = await browser.newContext();
+    const anonPage = await anonContext.newPage();
+    const anonPdfDownload = await anonPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, pdfAssetId }) => {
+      const res = await fetch(
+        `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/assets/${pdfAssetId}/download`
+      );
+      return { status: res.status };
+    }, {
+      apiUrl: API_URL,
+      centerSlug: fixture.centerSlug,
+      courseSlug: fixture.courseSlug,
+      lessonId: fixture.lessonId,
+      pdfAssetId: fixture.pdfAssetId,
+    });
+    await anonContext.close();
+    assert.ok(
+      anonPdfDownload.status === 401 || anonPdfDownload.status === 403 || anonPdfDownload.status === 404,
+      `Unenrolled/unauthenticated PDF download must be rejected (got ${anonPdfDownload.status})`
+    );
+    console.log("✓ Unenrolled/unauthenticated PDF access securely rejected.");
 
-      // Submit assessment
-      const submitAssessmentBtn = studentPage.locator('button:has-text("Submit Assessment")');
-      if (await submitAssessmentBtn.isVisible()) {
-        const submitPromise = studentPage.waitForResponse(
-          (resp) => resp.url().includes("/submit") && resp.status() === 200
-        );
-        await submitAssessmentBtn.click();
-        await submitPromise;
-        console.log("✓ Assessment attempt submitted successfully.");
-      }
+    // 16d. Mandatory Assessment Lifecycle Flow (No optional visibility branches)
+    console.log("Executing mandatory assessment attempt lifecycle...");
+    const startAssessmentBtn = studentPage.locator('button:has-text("Start Assessment")');
+    await startAssessmentBtn.waitFor({ state: "visible", timeout: 10000 });
+
+    const startAttemptPromise = studentPage.waitForResponse(
+      (resp) => resp.url().includes("/attempts") && (resp.status() === 201 || resp.status() === 200)
+    );
+    await startAssessmentBtn.click();
+    const startAttemptRes = await startAttemptPromise;
+    assert.ok(startAttemptRes.status() === 200 || startAttemptRes.status() === 201, "Start attempt API returned success");
+    console.log("✓ Assessment attempt started.");
+
+    // Select the known correct fixture option ("Yes, completely isolated")
+    const correctOptionBtn = studentPage.locator(
+      'button:has-text("Yes, completely isolated"), input[type="radio"], button[role="radio"]'
+    ).first();
+    await correctOptionBtn.waitFor({ state: "visible", timeout: 5000 });
+    await correctOptionBtn.click();
+    console.log("✓ Selected correct assessment option.");
+
+    // Save progress
+    const saveProgressBtn = studentPage.locator('button:has-text("Save Progress")');
+    await saveProgressBtn.waitFor({ state: "visible", timeout: 5000 });
+    const saveProgressPromise = studentPage.waitForResponse(
+      (resp) => resp.url().includes("/attempts/") && resp.status() === 200
+    );
+    await saveProgressBtn.click();
+    const saveProgressRes = await saveProgressPromise;
+    assert.equal(saveProgressRes.status(), 200, "Save progress PATCH returned HTTP 200");
+    console.log("✓ Saved attempt progress.");
+
+    // Reload page and verify active attempt is resumed
+    await studentPage.reload({ waitUntil: "networkidle" });
+    await studentPage.waitForSelector("main", { state: "visible" });
+    const submitBtn = studentPage.locator('button:has-text("Submit Assessment")');
+    await submitBtn.waitFor({ state: "visible", timeout: 10000 });
+    console.log("✓ Active attempt resumed successfully across page reload.");
+
+    // Submit assessment
+    const submitPromise = studentPage.waitForResponse(
+      (resp) => resp.url().includes("/submit") && resp.status() === 200
+    );
+    await submitBtn.click();
+    const submitRes = await submitPromise;
+    assert.equal(submitRes.status(), 200, "Assessment submit returned HTTP 200");
+    console.log("✓ Assessment submitted successfully.");
+
+    // Verify Passed result and 100% score displayed in DOM
+    await studentPage.waitForSelector('text=Passed, text=PASSED, text=Assessment Passed', { timeout: 10000 });
+    const postSubmitText = await studentPage.locator("main").innerText();
+    assert.ok(
+      postSubmitText.includes("100%") || postSubmitText.includes("10 / 10"),
+      "100% score displayed in student assessment view"
+    );
+    console.log("✓ Passed status and 100% score verified in DOM.");
+
+    // Open attempt history and verify Attempt #1 is displayed
+    const viewHistoryBtn = studentPage.locator('button:has-text("View Attempt History")');
+    if ((await viewHistoryBtn.count()) > 0 && (await viewHistoryBtn.isVisible())) {
+      await viewHistoryBtn.click();
     }
-
-    console.log("✓ Student successfully views published lesson content and assessment.");
+    await studentPage.waitForSelector('text=Attempt #1, text=Attempt 1', { timeout: 5000 });
+    console.log("✓ Attempt #1 confirmed in assessment history.");
 
     // -----------------------------------------------------------------------
     // ASSERTION 17: Administrative Controls are Inaccessible to Students
@@ -537,11 +600,23 @@ async function main() {
     console.log("\n=================================================");
     console.log("ALL 17 PRODUCTION BROWSER ACCEPTANCE WORKFLOWS PASSED!");
     console.log("=================================================");
+  } catch (err) {
+    primaryError = err;
   } finally {
     if (browser) await browser.close();
     if (fixture && fixture.centerId) {
-      teardownFixture(fixture.centerId);
+      try {
+        teardownFixture(fixture.centerId);
+      } catch (teardownErr) {
+        if (primaryError) {
+          console.error("❌ Primary test error:", primaryError);
+          console.error("❌ Teardown error:", teardownErr);
+          throw primaryError;
+        }
+        throw teardownErr;
+      }
     }
+    if (primaryError) throw primaryError;
   }
 
   // Strictly assert no unexpected failed requests or critical errors occurred

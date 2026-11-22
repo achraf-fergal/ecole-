@@ -9,19 +9,49 @@ $app = require __DIR__.'/../../bootstrap/app.php';
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
 
-$dbName = getenv('ACCEPTANCE_DB_DATABASE') ?: 'school_saas_g5_acceptance_20261121_a7f3';
-config(['database.default' => 'mysql']);
-config(['database.connections.mysql.database' => $dbName]);
-DB::purge('mysql');
-DB::reconnect('mysql');
+// Strict connection configuration from parent acceptance environment
+$host = getenv('ACCEPTANCE_DB_HOST');
+$port = getenv('ACCEPTANCE_DB_PORT') ?: '3306';
+$database = getenv('ACCEPTANCE_DB_DATABASE');
+$username = getenv('ACCEPTANCE_DB_USERNAME');
+$password = getenv('ACCEPTANCE_DB_PASSWORD') !== false ? getenv('ACCEPTANCE_DB_PASSWORD') : '';
+
+if (! $host || ! $database || ! $username) {
+    echo json_encode([
+        'status' => 'error',
+        'message' => 'Missing ACCEPTANCE_DB_* environment variables for deadlock worker.',
+    ]);
+    exit(1);
+}
+
+config([
+    'database.connections.mysql_acceptance' => [
+        'driver' => 'mysql',
+        'host' => $host,
+        'port' => (int) $port,
+        'database' => $database,
+        'username' => $username,
+        'password' => $password,
+        'charset' => 'utf8mb4',
+        'collation' => 'utf8mb4_unicode_ci',
+        'prefix' => '',
+        'prefix_indexes' => true,
+        'strict' => true,
+        'engine' => null,
+    ],
+    'database.default' => 'mysql_acceptance',
+]);
+
+DB::purge('mysql_acceptance');
+DB::setDefaultConnection('mysql_acceptance');
 
 $rowA = (int) ($argv[1] ?? 0);
 $rowB = (int) ($argv[2] ?? 0);
-$step1File = $argv[3] ?? '';
-$step2File = $argv[4] ?? '';
+$workerLockedBFile = $argv[3] ?? '';
+$parentLockedAFile = $argv[4] ?? '';
 
-if (! $rowA || ! $rowB || ! $step1File || ! $step2File) {
-    echo json_encode(['status' => 'error', 'message' => 'Missing arguments']);
+if (! $rowA || ! $rowB || ! $workerLockedBFile || ! $parentLockedAFile) {
+    echo json_encode(['status' => 'error', 'message' => 'Missing arguments for deadlock_worker']);
     exit(1);
 }
 
@@ -38,11 +68,11 @@ try {
     $stmt->fetch();
 
     // Signal Step 1 complete (Row B locked)
-    touch($step1File);
+    touch($workerLockedBFile);
 
     // Wait until Parent has locked Row A and signaled Step 2
     $waitLimit = 200;
-    while (! file_exists($step2File) && $waitLimit > 0) {
+    while (! file_exists($parentLockedAFile) && $waitLimit > 0) {
         usleep(25000);
         $waitLimit--;
     }
@@ -64,7 +94,7 @@ try {
     }
     echo json_encode([
         'status' => 'pdo_exception',
-        'code' => $e->getCode(),
+        'sqlstate' => $e->getCode(),
         'error_info' => $e->errorInfo ?? null,
         'message' => $e->getMessage(),
     ]);

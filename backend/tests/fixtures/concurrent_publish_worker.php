@@ -13,18 +13,49 @@ $app = require __DIR__.'/../../bootstrap/app.php';
 $kernel = $app->make(Kernel::class);
 $kernel->bootstrap();
 
-$dbName = getenv('ACCEPTANCE_DB_DATABASE') ?: 'school_saas_g5_acceptance_20261121_a7f3';
-config(['database.default' => 'mysql']);
-config(['database.connections.mysql.database' => $dbName]);
-DB::purge('mysql');
-DB::reconnect('mysql');
+// Strict connection configuration from parent acceptance environment
+$host = getenv('ACCEPTANCE_DB_HOST');
+$port = getenv('ACCEPTANCE_DB_PORT') ?: '3306';
+$database = getenv('ACCEPTANCE_DB_DATABASE');
+$username = getenv('ACCEPTANCE_DB_USERNAME');
+$password = getenv('ACCEPTANCE_DB_PASSWORD') !== false ? getenv('ACCEPTANCE_DB_PASSWORD') : '';
+
+if (! $host || ! $database || ! $username) {
+    echo json_encode([
+        'status' => 'error',
+        'message' => 'Missing ACCEPTANCE_DB_* environment variables for worker connection.',
+    ]);
+    exit(1);
+}
+
+config([
+    'database.connections.mysql_acceptance' => [
+        'driver' => 'mysql',
+        'host' => $host,
+        'port' => (int) $port,
+        'database' => $database,
+        'username' => $username,
+        'password' => $password,
+        'charset' => 'utf8mb4',
+        'collation' => 'utf8mb4_unicode_ci',
+        'prefix' => '',
+        'prefix_indexes' => true,
+        'strict' => true,
+        'engine' => null,
+    ],
+    'database.default' => 'mysql_acceptance',
+]);
+
+DB::purge('mysql_acceptance');
+DB::setDefaultConnection('mysql_acceptance');
 
 $lessonId = isset($argv[1]) ? (int) $argv[1] : 0;
 $userId = isset($argv[2]) ? (int) $argv[2] : 0;
-$barrierFile = isset($argv[3]) ? $argv[3] : '';
+$readyMarkerFile = isset($argv[3]) ? $argv[3] : '';
+$releaseSignalFile = isset($argv[4]) ? $argv[4] : '';
 
-if (! $lessonId || ! $userId) {
-    echo json_encode(['status' => 'error', 'message' => 'Missing arguments']);
+if (! $lessonId || ! $userId || ! $readyMarkerFile || ! $releaseSignalFile) {
+    echo json_encode(['status' => 'error', 'message' => 'Missing arguments for concurrent_publish_worker']);
     exit(1);
 }
 
@@ -33,15 +64,22 @@ try {
     $lesson = Lesson::findOrFail($lessonId);
     $user = User::findOrFail($userId);
 
-    // Coordinate start using barrier file right before publishing
-    if (! empty($barrierFile)) {
-        $waitLimit = 200; // max 10 seconds (50ms interval)
-        while (file_exists($barrierFile) && $waitLimit > 0) {
-            usleep(25000); // 25ms
-            $waitLimit--;
-        }
+    // 1. Signal Ready to Parent
+    touch($readyMarkerFile);
+
+    // 2. Await Release Signal from Parent
+    $waitLimit = 200; // max 10 seconds (50ms interval)
+    while (! file_exists($releaseSignalFile) && $waitLimit > 0) {
+        usleep(25000);
+        $waitLimit--;
     }
 
+    if (! file_exists($releaseSignalFile)) {
+        echo json_encode(['status' => 'error', 'message' => 'Timed out waiting for release signal']);
+        exit(1);
+    }
+
+    // 3. Simultaneously invoke real publication service
     $published = $service->publish($lesson, $user);
 
     echo json_encode([
