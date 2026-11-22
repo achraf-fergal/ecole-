@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const FIXTURE_PHP = path.join(REPO_ROOT, "backend/tests/fixtures/E2EFixtureManager.php");
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
+const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:3000";
 const API_URL = process.env.API_URL || "http://127.0.0.1:8000";
 
 /**
@@ -164,13 +164,33 @@ async function main() {
     await adminPage.fill('input[name="password"]', fixture.adminPassword);
 
     const loginResponsePromise = adminPage.waitForResponse(
-      (resp) => resp.url().includes("/api/auth/login") && resp.status() === 200
-    );
-    await adminPage.click('button[type="submit"]');
-    const loginResponse = await loginResponsePromise;
-    assert.equal(loginResponse.status(), 200, "Auth API returned HTTP 200 OK");
+      (resp) => {
+        const url = new URL(resp.url());
 
-    await adminPage.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 10000 });
+        return (
+          url.pathname === "/api/auth/login" &&
+          resp.request().method() === "POST"
+        );
+      },
+      { timeout: 15000 }
+    );
+
+    await adminPage.click('button[type="submit"]');
+
+    const loginResponse = await loginResponsePromise;
+
+    const loginBody = await loginResponse.text();
+
+    assert.equal(
+      loginResponse.status(),
+      200,
+      `Login failed: HTTP ${loginResponse.status()}\n${loginBody}`
+    );
+
+    await adminPage.waitForURL(
+      (url) => url.pathname === "/admin/users",
+      { timeout: 10000 }
+    );
     console.log("✓ Center admin authenticated successfully. Landed at:", adminPage.url());
 
     // -----------------------------------------------------------------------
@@ -976,12 +996,45 @@ async function main() {
   } catch (err) {
     primaryError = err;
   } finally {
+    const cleanupErrors = [];
+
     if (browser) {
-      await browser.close();
-    }    if (fixture) {
-      teardownFixture(fixture.centerId);
+      try {
+        await browser.close();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
     }
-    if (primaryError) throw primaryError;
+
+    if (fixture) {
+      try {
+        teardownFixture(fixture.centerId);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+
+    if (primaryError && cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        "Browser acceptance failed and cleanup also reported errors."
+      );
+    }
+
+    if (primaryError) {
+      throw primaryError;
+    }
+
+    if (cleanupErrors.length === 1) {
+      throw cleanupErrors[0];
+    }
+
+    if (cleanupErrors.length > 1) {
+      throw new AggregateError(
+        cleanupErrors,
+        "Browser acceptance cleanup reported multiple errors."
+      );
+    }
   }
 
   // Strictly assert no unexpected failed requests or critical errors occurred

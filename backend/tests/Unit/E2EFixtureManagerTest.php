@@ -21,11 +21,10 @@ class E2EFixtureManagerTest extends TestCase
 
     /**
      * Test 1: Successful setup creates all required fixture entities and returns expected keys.
-
-    */
+     */
     public function test_successful_setup(): void
     {
-        Storage::fake('private');
+        $privateDisk = Storage::fake('private');
 
         $fixture = E2EFixtureManager::setup();
 
@@ -53,8 +52,8 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertDatabaseHas('lesson_assets', ['id' => $fixture['pdfAssetId']]);
 
         // Physical file creation verified
-        Storage::disk('private')->assertExists($fixture['imageStorageKey']);
-        Storage::disk('private')->assertExists($fixture['pdfStorageKey']);
+        $privateDisk->assertExists($fixture['imageStorageKey']);
+        $privateDisk->assertExists($fixture['pdfStorageKey']);
 
         // Cleanup
         E2EFixtureManager::teardown($fixture['centerId']);
@@ -62,14 +61,10 @@ class E2EFixtureManagerTest extends TestCase
 
     /**
      * Test 2: Failed setup actually invokes E2EFixtureManager::setup() with injected failure
-     * 
-     * 
+     *
+     *
      * and rolls back all entities atomically.
-
-    */
-    
-    
-    
+     */
     public function test_failed_setup_rollback(): void
     {
         Storage::fake('private');
@@ -224,24 +219,25 @@ class E2EFixtureManagerTest extends TestCase
             'Failed fixture setup must remove its physical storage files.'
         );
     }
+
     public function test_setup_generates_pdf_with_correct_xref_offsets(): void
     {
         Storage::fake('private');
-    
+
         $fixture = E2EFixtureManager::setup();
-    
+
         try {
             $pdf = Storage::disk('private')->get(
                 $fixture['pdfStorageKey']
             );
-    
+
             $this->assertIsString($pdf);
-    
+
             $this->assertStringStartsWith(
                 "%PDF-1.4\n",
                 $pdf
             );
-    
+
             // Read the XRef offset from startxref.
             $this->assertSame(
                 1,
@@ -251,15 +247,15 @@ class E2EFixtureManagerTest extends TestCase
                     $startxrefMatches
                 )
             );
-    
+
             $xrefOffset = (int) $startxrefMatches[1];
-    
+
             $this->assertSame(
-                "xref",
+                'xref',
                 substr($pdf, $xrefOffset, 4),
                 'startxref must point to the actual XRef section.'
             );
-    
+
             // Extract all XRef entries.
             $this->assertSame(
                 1,
@@ -269,20 +265,20 @@ class E2EFixtureManagerTest extends TestCase
                     $xrefMatches
                 )
             );
-    
+
             $entries = preg_split(
                 '/\r\n|\n|\r/',
                 trim($xrefMatches[1])
             );
-    
+
             $this->assertCount(4, $entries);
-    
+
             // Object 0 must be the free object.
             $this->assertStringContainsString(
                 '65535 f',
                 $entries[0]
             );
-    
+
             // Verify that every XRef entry points to its real object.
             for ($objectNumber = 1; $objectNumber <= 3; $objectNumber++) {
                 $offset = (int) substr(
@@ -290,22 +286,22 @@ class E2EFixtureManagerTest extends TestCase
                     0,
                     10
                 );
-    
+
                 $expectedHeader = $objectNumber.' 0 obj';
-    
+
                 $actualHeader = substr(
                     $pdf,
                     $offset,
                     strlen($expectedHeader)
                 );
-    
+
                 $this->assertSame(
                     $expectedHeader,
                     $actualHeader,
                     "Incorrect XRef offset for PDF object {$objectNumber}."
                 );
             }
-    
+
             $this->assertGreaterThan(
                 100,
                 strlen($pdf)
@@ -316,12 +312,13 @@ class E2EFixtureManagerTest extends TestCase
             );
         }
     }
+
     /**
      * Test 4: Successful teardown deletes all fixture records in foreign-key order and removes storage files.
      */
     public function test_successful_teardown(): void
     {
-        Storage::fake('private');
+        $privateDisk = Storage::fake('private');
 
         $fixture = E2EFixtureManager::setup();
         $centerId = $fixture['centerId'];
@@ -342,8 +339,8 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertDatabaseMissing('lesson_assets', ['id' => $fixture['pdfAssetId']]);
 
         // Physical storage files deleted during teardown
-        Storage::disk('private')->assertMissing($imageKey);
-        Storage::disk('private')->assertMissing($pdfKey);
+        $privateDisk->assertMissing($imageKey);
+        $privateDisk->assertMissing($pdfKey);
     }
 
     /**
@@ -351,7 +348,7 @@ class E2EFixtureManagerTest extends TestCase
      */
     public function test_teardown_transaction_failure_preserves_storage_files(): void
     {
-        Storage::fake('private');
+        $privateDisk = Storage::fake('private');
 
         $fixture = E2EFixtureManager::setup();
 
@@ -402,8 +399,8 @@ class E2EFixtureManagerTest extends TestCase
         ]);
 
         // Files must still exist because DB deletion failed.
-        Storage::disk('private')->assertExists($imageKey);
-        Storage::disk('private')->assertExists($pdfKey);
+        $privateDisk->assertExists($imageKey);
+        $privateDisk->assertExists($pdfKey);
 
         // Retry must now work.
         E2EFixtureManager::teardown($centerId);
@@ -412,8 +409,8 @@ class E2EFixtureManagerTest extends TestCase
             'id' => $centerId,
         ]);
 
-        Storage::disk('private')->assertMissing($imageKey);
-        Storage::disk('private')->assertMissing($pdfKey);
+        $privateDisk->assertMissing($imageKey);
+        $privateDisk->assertMissing($pdfKey);
 
         // A further retry must also be safe.
         E2EFixtureManager::teardown($centerId);

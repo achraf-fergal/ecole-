@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Learning\AdminExerciseService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -41,6 +42,14 @@ class LessonContentController extends Controller
             'publishedRevision.blocks.exercise.questions.options',
         ]);
 
+        /** @var Collection<int, Exercise> $availableExercises */
+        $availableExercises = Exercise::query()
+            ->forCenter($center->id)
+            ->where('lesson_id', $lesson->id)
+            ->orderBy('sort_order')
+            ->orderBy('id')
+            ->get();
+
         return response()->json([
             'data' => [
                 'course' => [
@@ -65,17 +74,12 @@ class LessonContentController extends Controller
                     $lesson->publishedRevision
                 ),
 
-                'available_exercises' => Exercise::query()
-                    ->forCenter($center->id)
-                    ->where('lesson_id', $lesson->id)
-                    ->orderBy('sort_order')
-                    ->orderBy('id')
-                    ->get()
-                    ->map(fn (Exercise $e): array => [
-                        'id' => $e->id,
-                        'title' => $e->title,
-                        'instructions' => $e->instructions,
-                        'status' => $e->status,
+                'available_exercises' => $availableExercises
+                    ->map(fn (Exercise $exercise): array => [
+                        'id' => $exercise->id,
+                        'title' => $exercise->title,
+                        'instructions' => $exercise->instructions,
+                        'status' => $exercise->status,
                     ])->values(),
             ],
         ]);
@@ -86,12 +90,15 @@ class LessonContentController extends Controller
     {
         [$center, , $lesson] = $this->resolveLessonContext($request);
 
-        $revisions = LessonRevision::query()
+        /** @var Collection<int, LessonRevision> $revisionModels */
+        $revisionModels = LessonRevision::query()
             ->forCenter($center->id)
             ->forLesson($lesson->id)
             ->with('createdBy:id,name')
             ->orderByDesc('version_number')
-            ->get()
+            ->get();
+
+        $revisions = $revisionModels
             ->map(fn (LessonRevision $revision): array => [
                 'id' => $revision->id,
                 'version_number' => $revision->version_number,
@@ -112,7 +119,9 @@ class LessonContentController extends Controller
     /** Retrieve one historical revision for read-only inspection. */
     public function showHistoricalRevision(Request $request): JsonResponse
     {
-        [, , $lesson] = $this->resolveLessonContext($request);
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
+
         $revision = $this->resolveRevision(
             $lesson,
             (string) $request->route('revision')
@@ -131,7 +140,9 @@ class LessonContentController extends Controller
     /** Restore historical content into a new draft revision. */
     public function restoreHistoricalRevision(Request $request): JsonResponse
     {
-        [, , $lesson] = $this->resolveLessonContext($request);
+        $lessonContext = $this->resolveLessonContext($request);
+        $lesson = $lessonContext[2];
+
         $revision = $this->resolveRevision(
             $lesson,
             (string) $request->route('revision')
