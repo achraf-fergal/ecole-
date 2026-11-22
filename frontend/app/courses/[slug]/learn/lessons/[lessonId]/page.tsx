@@ -18,6 +18,9 @@ interface PageProps {
     slug: string;
     lessonId: string;
   }>;
+  searchParams?: Promise<{
+    center?: string;
+  }>;
 }
 
 function isValidCourseSlug(slug: string): boolean {
@@ -39,8 +42,10 @@ function isValidLessonId(value: string): boolean {
 
 export default async function LearningLessonPage({
   params,
+  searchParams,
 }: PageProps) {
   const { slug, lessonId } = await params;
+  const resolvedSearchParams = searchParams ? await searchParams : {};
 
   if (
     !isValidCourseSlug(slug) ||
@@ -49,8 +54,11 @@ export default async function LearningLessonPage({
     notFound();
   }
 
-  // Resolve the center from the existing server environment configuration.
-  const centerSlug = process.env.CENTER_SLUG?.trim() ?? "";
+  // Resolve the center from searchParams or existing server environment configuration.
+  const centerSlug =
+    resolvedSearchParams.center?.trim() ||
+    process.env.CENTER_SLUG?.trim() ||
+    "";
 
   if (!centerSlug) {
     return (

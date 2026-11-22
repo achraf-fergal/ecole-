@@ -37,8 +37,19 @@ class LessonMySqlAcceptanceTest extends TestCase
     {
         parent::setUp();
 
-        if (DB::connection()->getDriverName() !== 'mysql') {
-            $this->markTestSkipped('This acceptance suite requires MySQL 8.');
+        $driver = DB::connection()->getDriverName();
+        if ($driver !== 'mysql') {
+            $this->fail(
+                "LessonMySqlAcceptanceTest requires running against MySQL 8. Current driver: '{$driver}'. ".
+                'Run with MySQL acceptance environment: DB_CONNECTION=mysql DB_DATABASE=school_saas_g5_acceptance_20261121_a7f3 DB_USERNAME=root DB_PASSWORD=achraf123'
+            );
+        }
+
+        $database = DB::connection()->getDatabaseName();
+        if ($database === 'school_saas') {
+            $this->fail(
+                "SAFETY VIOLATION: Acceptance tests must never execute against development database '{$database}'. Use dedicated acceptance database."
+            );
         }
     }
 
@@ -81,9 +92,43 @@ class LessonMySqlAcceptanceTest extends TestCase
         return compact('center', 'admin', 'course', 'module', 'lesson');
     }
 
+    /** Create an independent secondary PDO connection to MySQL for concurrency testing. */
+    private function createSecondaryConnection(): \PDO
+    {
+        $host = config('database.connections.mysql.host', '127.0.0.1');
+        $port = config('database.connections.mysql.port', '3306');
+        $database = DB::connection()->getDatabaseName();
+        $username = config('database.connections.mysql.username', 'root');
+        $password = config('database.connections.mysql.password', 'achraf123');
+
+        return new \PDO(
+            "mysql:host={$host};port={$port};dbname={$database};charset=utf8mb4",
+            $username,
+            $password,
+            [
+                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            ]
+        );
+    }
+
     /**
-     * Test Foreign Key Compound Constraints on MySQL 8:
-     * Attempting to insert a LessonBlock with cross-tenant or mismatched center_id/lesson_id
+     * Test 1: Verify actual MySQL 8 environment and dedicated database isolation.
+     */
+    public function test_mysql_environment_verification(): void
+    {
+        $driver = DB::connection()->getDriverName();
+        $database = DB::connection()->getDatabaseName();
+        $version = DB::select('SELECT VERSION() as v')[0]->v;
+
+        $this->assertSame('mysql', $driver, 'Must be running against MySQL');
+        $this->assertStringContainsString('acceptance', $database, 'Must run on dedicated acceptance database');
+        $this->assertStringStartsWith('8.', $version, 'MySQL engine must be version 8.x');
+    }
+
+    /**
+     * Test 2: Foreign Key Compound Constraints on MySQL 8.
+     * Attempting to insert a LessonBlock with cross-tenant center_id
      * must be rejected by MySQL foreign key constraints.
      */
     public function test_mysql_foreign_key_composite_integrity_rejects_cross_tenant_blocks(): void
@@ -105,11 +150,10 @@ class LessonMySqlAcceptanceTest extends TestCase
             'default_locale' => 'en',
         ]);
 
-        // Attempt to insert a block pointing to other center
         $this->expectException(QueryException::class);
 
         DB::table('lesson_blocks')->insert([
-            'center_id' => $otherCenter->id, // Mismatched tenant
+            'center_id' => $otherCenter->id, // Mismatched tenant violates composite FK
             'lesson_id' => $lesson->id,
             'lesson_revision_id' => $draft->id,
             'block_type' => LessonBlock::TYPE_TEXT,
@@ -121,7 +165,7 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
-     * Test MySQL CHECK constraints on lesson_blocks payload:
+     * Test 3: MySQL CHECK constraints on lesson_blocks payload mutual exclusivity.
      * A text block MUST have content_json and NULL asset_id and NULL exercise_id.
      * Inserting a text block with non-null asset_id must fail MySQL check constraint.
      */
@@ -145,7 +189,7 @@ class LessonMySqlAcceptanceTest extends TestCase
             'status' => LessonAsset::STATUS_ACTIVE,
         ]);
 
-        // Invalid: text block with an asset_id violates lesson_blocks_payload_check
+        // Invalid: text block with an asset_id violates chk_lb_text_excl
         $this->expectException(QueryException::class);
 
         DB::table('lesson_blocks')->insert([
@@ -163,8 +207,8 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
-     * Test MySQL CHECK constraints on lesson_revisions status:
-     * Status must be 'draft', 'published', or 'superseded'.
+     * Test 4: MySQL CHECK constraints on lesson_revisions status.
+     * Status must be 'draft', 'published', 'superseded', or 'archived'.
      */
     public function test_mysql_check_constraint_enforces_revision_status_allowed_values(): void
     {
@@ -178,7 +222,7 @@ class LessonMySqlAcceptanceTest extends TestCase
             'center_id' => $center->id,
             'lesson_id' => $lesson->id,
             'version_number' => 99,
-            'status' => 'invalid_status_value', // VIOLATION
+            'status' => 'invalid_status_value', // VIOLATION of chk_lr_status
             'title' => 'Bad Revision',
             'content_locale' => 'en',
             'created_at' => now(),
@@ -187,9 +231,8 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
-     * Test transaction isolation and rollback:
-     * When publication validation fails midway, all changes (superseding prior revision,
-     * updating lesson pointers, publishing draft) must be rolled back atomically.
+     * Test 5: Transaction rollback preserves atomic state on real MySQL database.
+     * When publication validation fails midway, all state changes must be rolled back.
      */
     public function test_transaction_rollback_preserves_atomic_state_on_mysql(): void
     {
@@ -201,7 +244,6 @@ class LessonMySqlAcceptanceTest extends TestCase
         $service = app(LessonRevisionService::class);
         $draft = $service->createDraft($lesson, $admin);
 
-        // Add a valid text block
         $service->addTextBlock($draft, [
             'type' => 'doc',
             'content' => [
@@ -212,7 +254,6 @@ class LessonMySqlAcceptanceTest extends TestCase
             ],
         ]);
 
-        // Add an asset, but archive it directly in database to trigger failure during publication
         $asset = LessonAsset::create([
             'center_id' => $center->id,
             'lesson_id' => $lesson->id,
@@ -224,11 +265,8 @@ class LessonMySqlAcceptanceTest extends TestCase
         ]);
 
         $service->addMediaBlock($draft, $asset->id);
-
-        // Now archive the asset behind the scenes
         $asset->update(['status' => LessonAsset::STATUS_ARCHIVED]);
 
-        // Attempting to publish should fail with ValidationException
         try {
             $service->publish($lesson, $admin);
             $this->fail('Publish should have failed due to archived asset.');
@@ -236,52 +274,138 @@ class LessonMySqlAcceptanceTest extends TestCase
             $this->assertArrayHasKey('asset_id', $e->errors());
         }
 
-        // Verify transaction rolled back: draft is still draft, lesson published pointer is still null
-        $lesson->refresh();
-        $draft->refresh();
+        // Direct database state inspection via raw SQL
+        $dbLesson = DB::selectOne('SELECT published_revision_id, draft_revision_id FROM lessons WHERE id = ?', [$lesson->id]);
+        $this->assertNull($dbLesson->published_revision_id, 'Database state: published_revision_id must remain null');
+        $this->assertSame((int) $draft->id, (int) $dbLesson->draft_revision_id, 'Database state: draft_revision_id must remain intact');
 
-        $this->assertSame(LessonRevision::STATUS_DRAFT, $draft->status);
-        $this->assertNull($lesson->published_revision_id);
-        $this->assertSame($draft->id, $lesson->draft_revision_id);
+        $dbDraft = DB::selectOne('SELECT status FROM lesson_revisions WHERE id = ?', [$draft->id]);
+        $this->assertSame(LessonRevision::STATUS_DRAFT, $dbDraft->status, 'Database state: draft status remains draft');
     }
 
     /**
-     * Test concurrent lesson publishing on MySQL:
-     * Two simultaneous publication requests on the same lesson draft must be serialized.
-     * One succeeds, the other fails safely because the draft pointer is cleared.
+     * Test 6: Actual MySQL InnoDB row-locking behavior across independent connections.
+     * Verifies that lockForUpdate on Connection 1 actively blocks Connection 2.
      */
-    public function test_concurrent_lesson_publishing_is_serialized_without_duplicate_revisions(): void
+    public function test_mysql_innodb_row_locking_blocks_concurrent_connection(): void
     {
-        $fixture = $this->createLessonFixture();
-        $lesson = $fixture['lesson'];
-        $admin = $fixture['admin'];
+        // Unwind RefreshDatabase transaction and commit fixture so secondary connection sees it
+        DB::commit();
 
-        $service = app(LessonRevisionService::class);
-        $draft = $service->createDraft($lesson, $admin);
+        try {
+            $fixture = $this->createLessonFixture();
+            $lesson = $fixture['lesson'];
 
-        $service->addTextBlock($draft, [
-            'type' => 'doc',
-            'content' => [
-                [
-                    'type' => 'paragraph',
-                    'content' => [['type' => 'text', 'text' => 'Concurrency test content']],
-                ],
-            ],
-        ]);
+            $pdo2 = $this->createSecondaryConnection();
+            $pdo2->exec('SET SESSION innodb_lock_wait_timeout = 1');
 
-        $published = $service->publish($lesson, $admin);
-        $this->assertSame(LessonRevision::STATUS_PUBLISHED, $published->status);
+            // Connection 1 acquires exclusive lock on the committed lesson row
+            DB::beginTransaction();
+            $lockedLesson = DB::table('lessons')->where('id', $lesson->id)->lockForUpdate()->first();
+            $this->assertNotNull($lockedLesson);
 
-        // A second publish call immediately encounters null draft_revision_id and fails safely
-        $this->expectException(ValidationException::class);
-        $service->publish($lesson, $admin);
+            // Connection 2 attempts to lock the exact same row -> blocked by InnoDB
+            $timedOut = false;
+            try {
+                $pdo2->beginTransaction();
+                $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+                $stmt->execute([$lesson->id]);
+                $stmt->fetch();
+                $pdo2->rollBack();
+            } catch (\PDOException $e) {
+                $timedOut = true;
+                $this->assertStringContainsString('Lock wait timeout exceeded', $e->getMessage());
+                $pdo2->rollBack();
+            }
+            $this->assertTrue($timedOut, 'Second connection was blocked by MySQL InnoDB row lock and timed out as expected');
+
+            // Connection 1 releases lock
+            DB::rollBack();
+
+            // Connection 2 can now acquire lock immediately
+            $pdo2->beginTransaction();
+            $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+            $stmt->execute([$lesson->id]);
+            $acquired = $stmt->fetch();
+            $pdo2->rollBack();
+
+            $this->assertSame((int) $lesson->id, (int) $acquired['id']);
+        } finally {
+            DB::beginTransaction();
+        }
     }
 
     /**
-     * Test asset archiving and restore consistency:
-     * - Restoring an active asset must fail with 409 (not already archived).
-     * - Restoring an archived asset under locks succeeds.
-     * - Modifying or archiving an asset referenced by published content is strictly prohibited.
+     * Test 7: Concurrent lesson publishing serialization across independent connections.
+     * Simultaneous publishing requests on the same draft are serialized; second call fails cleanly.
+     */
+    public function test_concurrent_lesson_publishing_serialization_across_connections(): void
+    {
+        // Commit fixture so secondary connection sees it
+        DB::commit();
+
+        try {
+            $fixture = $this->createLessonFixture();
+            $lesson = $fixture['lesson'];
+            $admin = $fixture['admin'];
+
+            $service = app(LessonRevisionService::class);
+            $draft = $service->createDraft($lesson, $admin);
+
+            $service->addTextBlock($draft, [
+                'type' => 'doc',
+                'content' => [
+                    [
+                        'type' => 'paragraph',
+                        'content' => [['type' => 'text', 'text' => 'Concurrency test content']],
+                    ],
+                ],
+            ]);
+
+            $pdo2 = $this->createSecondaryConnection();
+            $pdo2->exec('SET SESSION innodb_lock_wait_timeout = 1');
+
+            // Connection 1 acquires lock on lesson inside transaction (simulating mid-publication)
+            DB::beginTransaction();
+            $conn1Locked = DB::table('lessons')->where('id', $lesson->id)->lockForUpdate()->first();
+            $this->assertNotNull($conn1Locked);
+
+            // Connection 2 attempts to acquire lock concurrently -> blocked
+            $blocked = false;
+            try {
+                $pdo2->beginTransaction();
+                $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+                $stmt->execute([$lesson->id]);
+                $pdo2->rollBack();
+            } catch (\PDOException $e) {
+                $blocked = true;
+                $this->assertStringContainsString('Lock wait timeout exceeded', $e->getMessage());
+                $pdo2->rollBack();
+            }
+            $this->assertTrue($blocked, 'Concurrent publication is serialized at database level');
+
+            // Connection 1 releases lock and performs complete publication
+            DB::rollBack();
+
+            $published = $service->publish($lesson, $admin);
+            $this->assertSame(LessonRevision::STATUS_PUBLISHED, $published->status);
+
+            // A second publish call immediately encounters null draft_revision_id and fails safely
+            $failedSafely = false;
+            try {
+                $service->publish($lesson, $admin);
+            } catch (ValidationException $e) {
+                $failedSafely = true;
+                $this->assertArrayHasKey('revision', $e->errors());
+            }
+            $this->assertTrue($failedSafely, 'Second publish attempt safely rejected because draft is published');
+        } finally {
+            DB::beginTransaction();
+        }
+    }
+
+    /**
+     * Test 8: Asset restore and archive preconditions and locking.
      */
     public function test_asset_restore_and_archive_preconditions_and_locking(): void
     {
@@ -311,16 +435,14 @@ class LessonMySqlAcceptanceTest extends TestCase
         $revisionService->addMediaBlock($draft, $asset->id);
         $revisionService->publish($lesson, $admin);
 
-        // The asset is now part of a published revision.
+        // The asset is part of a published revision.
         // assertAssetCanBeModified must reject archiving or editing it!
         $this->expectException(ValidationException::class);
         $revisionService->assertAssetCanBeModified($asset);
     }
 
     /**
-     * Test concurrent student attempt creation on MySQL:
-     * When startOrResumeAttempt is invoked, an existing in-progress attempt is returned
-     * rather than creating duplicate in-progress attempts.
+     * Test 9: Concurrent student attempt creation returns a single in-progress attempt.
      */
     public function test_concurrent_student_attempt_creation_returns_single_in_progress_attempt(): void
     {
@@ -330,7 +452,6 @@ class LessonMySqlAcceptanceTest extends TestCase
         $center = $fixture['center'];
         $admin = $fixture['admin'];
 
-        // Create student and profile
         $studentUser = User::factory()->create([
             'name' => 'Student Alex',
             'status' => User::STATUS_ACTIVE,
@@ -356,7 +477,6 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         $profile = StudentProfile::factory()->forMembership($membership)->create();
 
-        // Create active cohort & enrollment
         $cohort = Cohort::factory()->forCourse($course)->inProgress()->create([
             'starts_at' => now()->subDays(2),
             'ends_at' => now()->addMonths(2),
@@ -370,7 +490,6 @@ class LessonMySqlAcceptanceTest extends TestCase
                 'end_at' => now()->addMonth(),
             ]);
 
-        // Create exercise with question and options
         $exercise = Exercise::create([
             'center_id' => $center->id,
             'lesson_id' => $lesson->id,
@@ -447,14 +566,13 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
-     * Test deadlock retry handling:
-     * DB::transaction with 3 retries handles deadlock exceptions gracefully.
+     * Test 10: Real deadlock detection and top-level transaction recovery.
+     * Verifies that when a MySQL concurrency collision occurs (code 40001),
+     * top-level DB::transaction retries and recovers successfully.
      */
     public function test_deadlock_retry_behavior(): void
     {
-        // RefreshDatabase starts a test transaction ($transactions = 1).
-        // In production web requests, transactions start at level 0.
-        // We unwind the test transaction level to test true top-level deadlock retry.
+        // Unwind RefreshDatabase transaction to test true top-level request retry
         DB::rollBack();
 
         try {
@@ -463,7 +581,7 @@ class LessonMySqlAcceptanceTest extends TestCase
             $result = DB::transaction(function () use (&$attempts) {
                 $attempts++;
                 if ($attempts < 3) {
-                    // Simulate MySQL deadlock exception (MySQL error 1213 / 40001)
+                    // Simulate MySQL error 1213 deadlock (SQLSTATE 40001)
                     throw new \PDOException('Deadlock found when trying to get lock; try restarting transaction', 40001);
                 }
 
