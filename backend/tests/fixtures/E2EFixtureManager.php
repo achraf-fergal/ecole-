@@ -37,7 +37,54 @@ class E2EFixtureManager
             $kernel->bootstrap();
         }
     }
-
+    private static function buildPdfFixture(): string
+    {
+        $objects = [
+            '<< /Type /Catalog /Pages 2 0 R >>',
+            '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>',
+        ];
+    
+        $pdf = "%PDF-1.4\n";
+        $offsets = [];
+    
+        foreach ($objects as $index => $object) {
+            $offsets[] = strlen($pdf);
+    
+            $objectNumber = $index + 1;
+    
+            $pdf .= $objectNumber." 0 obj\n";
+            $pdf .= $object."\n";
+            $pdf .= "endobj\n";
+        }
+    
+        // XRef must point to its actual byte position.
+        $xrefOffset = strlen($pdf);
+    
+        $objectCount = count($objects);
+    
+        $pdf .= "xref\n";
+        $pdf .= "0 ".($objectCount + 1)."\n";
+    
+        // Free object 0.
+        $pdf .= "0000000000 65535 f \n";
+    
+        foreach ($offsets as $offset) {
+            $pdf .= sprintf(
+                "%010d 00000 n \n",
+                $offset
+            );
+        }
+    
+        $pdf .= "trailer\n";
+        $pdf .= "<< /Size ".($objectCount + 1)." /Root 1 0 R >>\n";
+    
+        $pdf .= "startxref\n";
+        $pdf .= $xrefOffset."\n";
+        $pdf .= "%%EOF\n";
+    
+        return $pdf;
+    }
     public static function setup(): array
     {
         self::bootstrap();
