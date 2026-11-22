@@ -40,6 +40,14 @@ function isValidLessonId(value: string): boolean {
   );
 }
 
+function isValidCenterSlug(slug: string): boolean {
+  return (
+    slug.length > 0 &&
+    slug.length <= 150 &&
+    /^[a-zA-Z0-9_\-]+$/.test(slug)
+  );
+}
+
 export default async function LearningLessonPage({
   params,
   searchParams,
@@ -55,10 +63,12 @@ export default async function LearningLessonPage({
   }
 
   // Resolve the center from searchParams or existing server environment configuration.
-  const centerSlug =
+  const rawCenter =
     resolvedSearchParams.center?.trim() ||
     process.env.CENTER_SLUG?.trim() ||
     "";
+
+  const centerSlug = isValidCenterSlug(rawCenter) ? rawCenter : "";
 
   if (!centerSlug) {
     return (

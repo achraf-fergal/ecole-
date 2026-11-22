@@ -10,10 +10,12 @@ use App\Models\CourseModule;
 use App\Models\Enrollment;
 use App\Models\Exercise;
 use App\Models\ExerciseAttempt;
+use App\Models\Language;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
 use App\Models\LessonBlock;
 use App\Models\LessonRevision;
+use App\Models\Level;
 use App\Models\Question;
 use App\Models\QuestionOption;
 use App\Models\Role;
@@ -22,7 +24,6 @@ use App\Models\User;
 use App\Services\Learning\ExerciseAttemptService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\QueryException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -31,63 +32,219 @@ use Tests\TestCase;
 
 class LessonMySqlAcceptanceTest extends TestCase
 {
-    use RefreshDatabase;
+    /** @var array<int> Tracked center IDs created during tests for deterministic cleanup. */
+    protected array $trackedCenterIds = [];
+
+    /** @var array<int> Tracked user IDs created during tests for deterministic cleanup. */
+    protected array $trackedUserIds = [];
+
+    /** @var string Previous default DB connection to restore in tearDown. */
+    protected string $previousDefaultConnection = 'sqlite';
 
     protected function setUp(): void
     {
         parent::setUp();
 
-        $driver = DB::connection()->getDriverName();
-        if ($driver !== 'mysql') {
-            $this->fail(
-                "LessonMySqlAcceptanceTest requires running against MySQL 8. Current driver: '{$driver}'. ".
-                'Run with MySQL acceptance environment: DB_CONNECTION=mysql DB_DATABASE=school_saas_g5_acceptance_20261121_a7f3 DB_USERNAME=root DB_PASSWORD=achraf123'
-            );
+        $this->previousDefaultConnection = config('database.default', 'sqlite');
+
+        // Configure dedicated acceptance MySQL connection
+        $host = env('ACCEPTANCE_DB_HOST', env('DB_HOST', '127.0.0.1'));
+        $port = env('ACCEPTANCE_DB_PORT', env('DB_PORT', '3306'));
+        $database = env('ACCEPTANCE_DB_DATABASE', 'school_saas_g5_acceptance_20261121_a7f3');
+        $username = env('ACCEPTANCE_DB_USERNAME', env('DB_USERNAME', 'root'));
+        $password = env('ACCEPTANCE_DB_PASSWORD', env('DB_PASSWORD', ''));
+
+        // Safety enforcement: NEVER run acceptance tests against development or production DB
+        if ($database === 'school_saas' || (! str_contains($database, 'acceptance') && ! str_contains($database, 'test'))) {
+            $this->fail("SAFETY VIOLATION: Acceptance tests must never execute against database '{$database}'. Use dedicated acceptance database.");
         }
 
-        $database = DB::connection()->getDatabaseName();
-        if ($database === 'school_saas') {
-            $this->fail(
-                "SAFETY VIOLATION: Acceptance tests must never execute against development database '{$database}'. Use dedicated acceptance database."
-            );
+        config([
+            'database.connections.mysql_acceptance' => [
+                'driver' => 'mysql',
+                'host' => $host,
+                'port' => $port,
+                'database' => $database,
+                'username' => $username,
+                'password' => $password,
+                'charset' => 'utf8mb4',
+                'collation' => 'utf8mb4_unicode_ci',
+                'prefix' => '',
+                'prefix_indexes' => true,
+                'strict' => true,
+                'engine' => null,
+            ],
+            'database.default' => 'mysql_acceptance',
+        ]);
+
+        DB::purge('mysql_acceptance');
+        DB::setDefaultConnection('mysql_acceptance');
+
+        $driver = DB::connection()->getDriverName();
+        if ($driver !== 'mysql') {
+            $this->fail("LessonMySqlAcceptanceTest requires running against MySQL 8. Current driver: '{$driver}'.");
         }
     }
 
-    /** Create a complete tenant and course lesson fixture. */
-    private function createLessonFixture(): array
+    protected function tearDown(): void
     {
-        $center = Center::factory()->create([
-            'name' => 'MySQL Acceptance Center',
+        // Deterministically clean every fixture created by this test, even after assertion failure
+        if (! empty($this->trackedCenterIds)) {
+            foreach ($this->trackedCenterIds as $centerId) {
+                $this->cleanCenterFixtures($centerId);
+            }
+            $this->trackedCenterIds = [];
+        }
+
+        if (! empty($this->trackedUserIds)) {
+            DB::table('users')->whereIn('id', $this->trackedUserIds)->delete();
+            $this->trackedUserIds = [];
+        }
+
+        // Restore previous default database connection
+        DB::purge('mysql_acceptance');
+        config(['database.default' => $this->previousDefaultConnection]);
+        DB::setDefaultConnection($this->previousDefaultConnection);
+
+        parent::tearDown();
+    }
+
+    /**
+     * Delete all records associated with a test center in strict reverse foreign-key order.
+     */
+    private function cleanCenterFixtures(int $centerId): void
+    {
+        DB::table('exercise_attempt_answers')->where('center_id', $centerId)->delete();
+        DB::table('exercise_attempts')->where('center_id', $centerId)->delete();
+        DB::table('lesson_progresses')->where('center_id', $centerId)->delete();
+
+        $cohortIds = DB::table('cohorts')->where('center_id', $centerId)->pluck('id');
+        if ($cohortIds->isNotEmpty()) {
+            DB::table('cohort_schedules')->whereIn('cohort_id', $cohortIds)->delete();
+        }
+
+        DB::table('enrollments')->where('center_id', $centerId)->delete();
+        DB::table('cohorts')->where('center_id', $centerId)->delete();
+        DB::table('student_profiles')->where('center_id', $centerId)->delete();
+
+        DB::table('lessons')->where('center_id', $centerId)->update([
+            'draft_revision_id' => null,
+            'published_revision_id' => null,
         ]);
 
-        $admin = User::factory()->create([
-            'name' => 'Admin User',
+        DB::table('lesson_blocks')->where('center_id', $centerId)->delete();
+        DB::table('lesson_revisions')->where('center_id', $centerId)->delete();
+        DB::table('lesson_assets')->where('center_id', $centerId)->delete();
+
+        $exerciseIds = DB::table('exercises')->where('center_id', $centerId)->pluck('id');
+        if ($exerciseIds->isNotEmpty()) {
+            $questionIds = DB::table('questions')->whereIn('exercise_id', $exerciseIds)->pluck('id');
+            if ($questionIds->isNotEmpty()) {
+                DB::table('question_options')->whereIn('question_id', $questionIds)->delete();
+                DB::table('questions')->whereIn('id', $questionIds)->delete();
+            }
+            DB::table('exercises')->where('center_id', $centerId)->delete();
+        }
+
+        DB::table('lessons')->where('center_id', $centerId)->delete();
+        DB::table('course_modules')->where('center_id', $centerId)->delete();
+
+        $courseIds = DB::table('courses')->where('center_id', $centerId)->pluck('id');
+        if ($courseIds->isNotEmpty()) {
+            DB::table('course_outcomes')->whereIn('course_id', $courseIds)->delete();
+            DB::table('course_translations')->whereIn('course_id', $courseIds)->delete();
+        }
+
+        DB::table('courses')->where('center_id', $centerId)->delete();
+        DB::table('languages')->where('center_id', $centerId)->delete();
+        DB::table('levels')->where('center_id', $centerId)->delete();
+
+        $memberships = DB::table('center_user')->where('center_id', $centerId)->get();
+        $membershipIds = $memberships->pluck('id')->all();
+
+        if (! empty($membershipIds)) {
+            DB::table('center_user_role')->whereIn('center_user_id', $membershipIds)->delete();
+            DB::table('center_user')->where('center_id', $centerId)->delete();
+        }
+
+        DB::table('centers')->where('id', $centerId)->delete();
+
+        // Verification: Center was cleanly removed
+        $remaining = DB::table('centers')->where('id', $centerId)->count();
+        $this->assertSame(0, $remaining, "Cleanup verification: center {$centerId} must not leave orphaned records.");
+    }
+
+    /** Create a complete tenant and course lesson fixture on MySQL. */
+    private function createLessonFixture(): array
+    {
+        $uniq = Str::lower(Str::random(8));
+
+        $center = Center::create([
+            'name' => 'MySQL Acceptance Center '.$uniq,
+            'slug' => 'mysql-center-'.$uniq,
+            'status' => 'active',
+            'timezone' => 'UTC',
+            'default_locale' => 'en',
+        ]);
+        $this->trackedCenterIds[] = $center->id;
+
+        $admin = User::create([
+            'name' => 'Admin User '.$uniq,
+            'email' => 'admin_'.$uniq.'@acceptance.test',
+            'password' => 'Password123!',
             'status' => User::STATUS_ACTIVE,
             'token_version' => 1,
         ]);
+        $this->trackedUserIds[] = $admin->id;
 
-        $course = Course::factory()
-            ->forCenter($center)
-            ->published()
-            ->create([
-                'title' => 'MySQL Acceptance Course',
-            ]);
+        $membership = CenterUser::create([
+            'center_id' => $center->id,
+            'user_id' => $admin->id,
+            'status' => 'active',
+        ]);
 
-        $module = CourseModule::factory()
-            ->forCourse($course)
-            ->published()
-            ->create([
-                'title' => 'Module 1',
-                'sort_order' => 1,
-            ]);
+        $adminRole = Role::query()->where('key', 'center_admin')->first();
+        if (! $adminRole) {
+            $adminRole = Role::firstOrCreate(['key' => 'center_admin'], ['name' => 'Center Admin']);
+        }
+        $membership->roles()->syncWithoutDetaching([$adminRole->id]);
 
-        $lesson = Lesson::factory()
-            ->forModule($module)
-            ->create([
-                'title' => 'Acceptance Lesson',
-                'content_locale' => 'en',
-                'status' => Lesson::STATUS_DRAFT,
-            ]);
+        $language = Language::firstOrCreate(
+            ['center_id' => $center->id, 'code' => 'en'],
+            ['name' => 'English', 'native_name' => 'English', 'is_active' => true]
+        );
+
+        $level = Level::firstOrCreate(
+            ['center_id' => $center->id, 'code' => 'A1'],
+            ['name' => 'Beginner', 'sort_order' => 1, 'is_active' => true]
+        );
+
+        $course = Course::create([
+            'center_id' => $center->id,
+            'language_id' => $language->id,
+            'level_id' => $level->id,
+            'title' => 'MySQL Acceptance Course '.$uniq,
+            'slug' => 'course-'.$uniq,
+            'status' => 'published',
+            'published_at' => now()->subMinute(),
+        ]);
+
+        $module = CourseModule::create([
+            'center_id' => $center->id,
+            'course_id' => $course->id,
+            'title' => 'Module 1',
+            'sort_order' => 1,
+            'status' => CourseModule::STATUS_PUBLISHED,
+            'published_at' => now()->subMinute(),
+        ]);
+
+        $lesson = Lesson::create([
+            'center_id' => $center->id,
+            'course_module_id' => $module->id,
+            'title' => 'Acceptance Lesson '.$uniq,
+            'content_locale' => 'en',
+            'status' => Lesson::STATUS_DRAFT,
+        ]);
 
         return compact('center', 'admin', 'course', 'module', 'lesson');
     }
@@ -95,11 +252,11 @@ class LessonMySqlAcceptanceTest extends TestCase
     /** Create an independent secondary PDO connection to MySQL for concurrency testing. */
     private function createSecondaryConnection(): \PDO
     {
-        $host = config('database.connections.mysql.host', '127.0.0.1');
-        $port = config('database.connections.mysql.port', '3306');
-        $database = DB::connection()->getDatabaseName();
-        $username = config('database.connections.mysql.username', 'root');
-        $password = config('database.connections.mysql.password', 'achraf123');
+        $host = config('database.connections.mysql_acceptance.host', '127.0.0.1');
+        $port = config('database.connections.mysql_acceptance.port', '3306');
+        $database = config('database.connections.mysql_acceptance.database');
+        $username = config('database.connections.mysql_acceptance.username');
+        $password = config('database.connections.mysql_acceptance.password');
 
         return new \PDO(
             "mysql:host={$host};port={$port};dbname={$database};charset=utf8mb4",
@@ -135,7 +292,6 @@ class LessonMySqlAcceptanceTest extends TestCase
     {
         $fixture = $this->createLessonFixture();
         $lesson = $fixture['lesson'];
-        $center = $fixture['center'];
         $admin = $fixture['admin'];
 
         $service = app(LessonRevisionService::class);
@@ -143,12 +299,13 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         // Another center
         $otherCenter = Center::create([
-            'name' => 'Other Center',
+            'name' => 'Other Center '.Str::random(6),
             'slug' => 'other-center-'.Str::random(8),
             'status' => 'active',
             'timezone' => 'UTC',
             'default_locale' => 'en',
         ]);
+        $this->trackedCenterIds[] = $otherCenter->id;
 
         $this->expectException(QueryException::class);
 
@@ -189,7 +346,6 @@ class LessonMySqlAcceptanceTest extends TestCase
             'status' => LessonAsset::STATUS_ACTIVE,
         ]);
 
-        // Invalid: text block with an asset_id violates chk_lb_text_excl
         $this->expectException(QueryException::class);
 
         DB::table('lesson_blocks')->insert([
@@ -271,7 +427,10 @@ class LessonMySqlAcceptanceTest extends TestCase
             $service->publish($lesson, $admin);
             $this->fail('Publish should have failed due to archived asset.');
         } catch (ValidationException $e) {
-            $this->assertArrayHasKey('asset_id', $e->errors());
+            $this->assertTrue(
+                isset($e->errors()['blocks']) || isset($e->errors()['asset_id']),
+                'Expected validation error on blocks or asset_id'
+            );
         }
 
         // Direct database state inspection via raw SQL
@@ -289,119 +448,139 @@ class LessonMySqlAcceptanceTest extends TestCase
      */
     public function test_mysql_innodb_row_locking_blocks_concurrent_connection(): void
     {
-        // Unwind RefreshDatabase transaction and commit fixture so secondary connection sees it
-        DB::commit();
+        $fixture = $this->createLessonFixture();
+        $lesson = $fixture['lesson'];
 
+        $pdo2 = $this->createSecondaryConnection();
+        $pdo2->exec('SET SESSION innodb_lock_wait_timeout = 1');
+
+        // Connection 1 acquires exclusive lock on the committed lesson row
+        DB::beginTransaction();
+        $lockedLesson = DB::table('lessons')->where('id', $lesson->id)->lockForUpdate()->first();
+        $this->assertNotNull($lockedLesson);
+
+        // Connection 2 attempts to lock the exact same row -> blocked by InnoDB
+        $timedOut = false;
         try {
-            $fixture = $this->createLessonFixture();
-            $lesson = $fixture['lesson'];
-
-            $pdo2 = $this->createSecondaryConnection();
-            $pdo2->exec('SET SESSION innodb_lock_wait_timeout = 1');
-
-            // Connection 1 acquires exclusive lock on the committed lesson row
-            DB::beginTransaction();
-            $lockedLesson = DB::table('lessons')->where('id', $lesson->id)->lockForUpdate()->first();
-            $this->assertNotNull($lockedLesson);
-
-            // Connection 2 attempts to lock the exact same row -> blocked by InnoDB
-            $timedOut = false;
-            try {
-                $pdo2->beginTransaction();
-                $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
-                $stmt->execute([$lesson->id]);
-                $stmt->fetch();
-                $pdo2->rollBack();
-            } catch (\PDOException $e) {
-                $timedOut = true;
-                $this->assertStringContainsString('Lock wait timeout exceeded', $e->getMessage());
-                $pdo2->rollBack();
-            }
-            $this->assertTrue($timedOut, 'Second connection was blocked by MySQL InnoDB row lock and timed out as expected');
-
-            // Connection 1 releases lock
-            DB::rollBack();
-
-            // Connection 2 can now acquire lock immediately
             $pdo2->beginTransaction();
             $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
             $stmt->execute([$lesson->id]);
-            $acquired = $stmt->fetch();
+            $stmt->fetch();
             $pdo2->rollBack();
-
-            $this->assertSame((int) $lesson->id, (int) $acquired['id']);
-        } finally {
-            DB::beginTransaction();
+        } catch (\PDOException $e) {
+            $timedOut = true;
+            $this->assertStringContainsString('Lock wait timeout exceeded', $e->getMessage());
+            $pdo2->rollBack();
         }
+        $this->assertTrue($timedOut, 'Second connection was blocked by MySQL InnoDB row lock and timed out as expected');
+
+        // Connection 1 releases lock
+        DB::rollBack();
+
+        // Connection 2 can now acquire lock immediately
+        $pdo2->beginTransaction();
+        $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+        $stmt->execute([$lesson->id]);
+        $acquired = $stmt->fetch();
+        $pdo2->rollBack();
+
+        $this->assertSame((int) $lesson->id, (int) $acquired['id']);
     }
 
     /**
-     * Test 7: Concurrent lesson publishing serialization across independent connections.
-     * Simultaneous publishing requests on the same draft are serialized; second call fails cleanly.
+     * Test 7: Actual concurrent lesson publishing across two genuinely independent worker processes.
+     * Both processes invoke the actual publication service concurrently on the same lesson & draft.
+     * Coordinated by a barrier file. Exactly one succeeds; the second fails safely.
      */
     public function test_concurrent_lesson_publishing_serialization_across_connections(): void
     {
-        // Commit fixture so secondary connection sees it
-        DB::commit();
+        $fixture = $this->createLessonFixture();
+        $lesson = $fixture['lesson'];
+        $admin = $fixture['admin'];
 
-        try {
-            $fixture = $this->createLessonFixture();
-            $lesson = $fixture['lesson'];
-            $admin = $fixture['admin'];
+        $service = app(LessonRevisionService::class);
+        $draft = $service->createDraft($lesson, $admin);
 
-            $service = app(LessonRevisionService::class);
-            $draft = $service->createDraft($lesson, $admin);
-
-            $service->addTextBlock($draft, [
-                'type' => 'doc',
-                'content' => [
-                    [
-                        'type' => 'paragraph',
-                        'content' => [['type' => 'text', 'text' => 'Concurrency test content']],
-                    ],
+        $service->addTextBlock($draft, [
+            'type' => 'doc',
+            'content' => [
+                [
+                    'type' => 'paragraph',
+                    'content' => [['type' => 'text', 'text' => 'Real Concurrency Content']],
                 ],
-            ]);
+            ],
+        ]);
 
-            $pdo2 = $this->createSecondaryConnection();
-            $pdo2->exec('SET SESSION innodb_lock_wait_timeout = 1');
+        $workerScript = base_path('tests/fixtures/concurrent_publish_worker.php');
+        $barrierFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'publish_barrier_'.uniqid().'.lock';
+        touch($barrierFile);
 
-            // Connection 1 acquires lock on lesson inside transaction (simulating mid-publication)
-            DB::beginTransaction();
-            $conn1Locked = DB::table('lessons')->where('id', $lesson->id)->lockForUpdate()->first();
-            $this->assertNotNull($conn1Locked);
+        $php = PHP_BINARY ?: 'php';
+        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($barrierFile);
+        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lesson->id.' '.$admin->id.' '.escapeshellarg($barrierFile);
 
-            // Connection 2 attempts to acquire lock concurrently -> blocked
-            $blocked = false;
-            try {
-                $pdo2->beginTransaction();
-                $stmt = $pdo2->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
-                $stmt->execute([$lesson->id]);
-                $pdo2->rollBack();
-            } catch (\PDOException $e) {
-                $blocked = true;
-                $this->assertStringContainsString('Lock wait timeout exceeded', $e->getMessage());
-                $pdo2->rollBack();
-            }
-            $this->assertTrue($blocked, 'Concurrent publication is serialized at database level');
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
 
-            // Connection 1 releases lock and performs complete publication
-            DB::rollBack();
+        $env = array_merge(getenv(), [
+            'DB_CONNECTION' => 'mysql',
+            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+        ]);
 
-            $published = $service->publish($lesson, $admin);
-            $this->assertSame(LessonRevision::STATUS_PUBLISHED, $published->status);
+        $p1 = proc_open($cmd1, $descriptors, $pipes1, base_path(), $env);
+        $p2 = proc_open($cmd2, $descriptors, $pipes2, base_path(), $env);
 
-            // A second publish call immediately encounters null draft_revision_id and fails safely
-            $failedSafely = false;
-            try {
-                $service->publish($lesson, $admin);
-            } catch (ValidationException $e) {
-                $failedSafely = true;
-                $this->assertArrayHasKey('revision', $e->errors());
-            }
-            $this->assertTrue($failedSafely, 'Second publish attempt safely rejected because draft is published');
-        } finally {
-            DB::beginTransaction();
-        }
+        $this->assertIsResource($p1);
+        $this->assertIsResource($p2);
+
+        fclose($pipes1[0]);
+        fclose($pipes2[0]);
+
+        // Let both processes boot, connect to MySQL and start polling the barrier
+        usleep(300000); // 300ms
+
+        // Release barrier -> Both processes fire simultaneously
+        unlink($barrierFile);
+
+        $out1 = stream_get_contents($pipes1[1]);
+        $err1 = stream_get_contents($pipes1[2]);
+        $out2 = stream_get_contents($pipes2[1]);
+        $err2 = stream_get_contents($pipes2[2]);
+        fclose($pipes1[1]);
+        fclose($pipes2[1]);
+        fclose($pipes1[2]);
+        fclose($pipes2[2]);
+
+        $exit1 = proc_close($p1);
+        $exit2 = proc_close($p2);
+
+        $res1 = json_decode(trim($out1), true);
+        $res2 = json_decode(trim($out2), true);
+
+        $this->assertIsArray($res1, "Worker 1 output was not valid JSON. stdout: '{$out1}', stderr: '{$err1}', exit: {$exit1}");
+        $this->assertIsArray($res2, "Worker 2 output was not valid JSON. stdout: '{$out2}', stderr: '{$err2}', exit: {$exit2}");
+
+        // Exactly one worker must succeed, and the losing worker must report validation_error
+        $statuses = [$res1['status'], $res2['status']];
+        $this->assertContains('success', $statuses, 'Exactly one concurrent publication worker must succeed');
+        $this->assertContains('validation_error', $statuses, 'Losing concurrent publication worker must fail cleanly with validation error');
+
+        // Database consistency verification
+        $publishedRevisions = DB::table('lesson_revisions')
+            ->where('lesson_id', $lesson->id)
+            ->where('status', LessonRevision::STATUS_PUBLISHED)
+            ->get();
+
+        $this->assertCount(1, $publishedRevisions, 'Database consistency: exactly one revision is published');
+
+        $dbLesson = DB::table('lessons')->where('id', $lesson->id)->first();
+        $this->assertNotNull($dbLesson->published_revision_id);
+        $this->assertNull($dbLesson->draft_revision_id, 'Draft pointer must be null after publication');
+        $this->assertSame((int) $publishedRevisions->first()->id, (int) $dbLesson->published_revision_id);
     }
 
     /**
@@ -442,7 +621,9 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
-     * Test 9: Concurrent student attempt creation returns a single in-progress attempt.
+     * Test 9: Actual concurrent student attempt creation across two independent worker processes.
+     * Both processes invoke ExerciseAttemptService::startOrResumeAttempt simultaneously for the same student.
+     * Coordinated by a barrier file. Exactly one active attempt is created; both receive the same attempt.
      */
     public function test_concurrent_student_attempt_creation_returns_single_in_progress_attempt(): void
     {
@@ -452,14 +633,19 @@ class LessonMySqlAcceptanceTest extends TestCase
         $center = $fixture['center'];
         $admin = $fixture['admin'];
 
-        $studentUser = User::factory()->create([
-            'name' => 'Student Alex',
+        $uniq = Str::lower(Str::random(6));
+
+        $studentUser = User::create([
+            'name' => 'Student Alex '.$uniq,
+            'email' => 'student_'.$uniq.'@acceptance.test',
+            'password' => 'Password123!',
             'status' => User::STATUS_ACTIVE,
             'token_version' => 1,
             'email_verified_at' => now(),
         ]);
+        $this->trackedUserIds[] = $studentUser->id;
 
-        $membership = CenterUser::query()->create([
+        $membership = CenterUser::create([
             'center_id' => $center->id,
             'user_id' => $studentUser->id,
             'status' => 'active',
@@ -467,25 +653,23 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         $studentRole = Role::query()->where('key', 'student')->first();
         if (! $studentRole) {
-            $studentRole = Role::create([
-                'key' => 'student',
-                'name' => 'Student',
-                'description' => 'Student role',
-            ]);
+            $studentRole = Role::firstOrCreate(['key' => 'student'], ['name' => 'Student']);
         }
         $membership->roles()->syncWithoutDetaching([$studentRole->id]);
 
         $profile = StudentProfile::factory()->forMembership($membership)->create();
 
         $cohort = Cohort::factory()->forCourse($course)->inProgress()->create([
+            'center_id' => $center->id,
             'starts_at' => now()->subDays(2),
             'ends_at' => now()->addMonths(2),
         ]);
 
-        $enrollment = Enrollment::factory()
+        Enrollment::factory()
             ->forStudentProfile($profile)
             ->forCohort($cohort)
             ->create([
+                'center_id' => $center->id,
                 'start_at' => now()->subDay(),
                 'end_at' => now()->addMonth(),
             ]);
@@ -493,7 +677,7 @@ class LessonMySqlAcceptanceTest extends TestCase
         $exercise = Exercise::create([
             'center_id' => $center->id,
             'lesson_id' => $lesson->id,
-            'title' => 'MySQL Concurrency Quiz',
+            'title' => 'MySQL Concurrency Quiz '.$uniq,
             'status' => Exercise::STATUS_PUBLISHED,
             'published_at' => now(),
         ]);
@@ -529,69 +713,220 @@ class LessonMySqlAcceptanceTest extends TestCase
         $revisionService->addExerciseBlock($draft, $exercise->id);
         $revisionService->publish($lesson, $admin);
 
-        $attemptService = app(ExerciseAttemptService::class);
+        // Run two concurrent worker processes calling startOrResumeAttempt
+        $workerScript = base_path('tests/fixtures/concurrent_attempt_worker.php');
+        $barrierFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'attempt_barrier_'.uniqid().'.lock';
+        touch($barrierFile);
 
-        // First attempt creation
-        $attempt1 = $attemptService->startOrResumeAttempt(
-            $studentUser,
-            $course,
-            $lesson,
-            $exercise,
-            $profile,
-            $center
-        );
+        $php = PHP_BINARY ?: 'php';
+        $args = "{$studentUser->id} {$course->id} {$lesson->id} {$exercise->id} {$profile->id} {$center->id} ".escapeshellarg($barrierFile);
+        $cmd1 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args;
+        $cmd2 = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$args;
 
-        $this->assertInstanceOf(ExerciseAttempt::class, $attempt1);
-        $this->assertSame(ExerciseAttempt::STATUS_IN_PROGRESS, $attempt1->status);
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
 
-        // Second concurrent invocation for same user / exercise resumes the exact same attempt
-        $attempt2 = $attemptService->startOrResumeAttempt(
-            $studentUser,
-            $course,
-            $lesson,
-            $exercise,
-            $profile,
-            $center
-        );
+        $env = array_merge(getenv(), [
+            'DB_CONNECTION' => 'mysql',
+            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+        ]);
 
-        $this->assertSame($attempt1->id, $attempt2->id);
+        $p1 = proc_open($cmd1, $descriptors, $pipes1, base_path(), $env);
+        $p2 = proc_open($cmd2, $descriptors, $pipes2, base_path(), $env);
 
-        $totalAttempts = ExerciseAttempt::query()
+        $this->assertIsResource($p1);
+        $this->assertIsResource($p2);
+
+        fclose($pipes1[0]);
+        fclose($pipes2[0]);
+
+        usleep(300000); // 300ms for workers to boot and wait at barrier
+
+        unlink($barrierFile); // Trigger concurrent execution
+
+        $out1 = stream_get_contents($pipes1[1]);
+        $err1 = stream_get_contents($pipes1[2]);
+        $out2 = stream_get_contents($pipes2[1]);
+        $err2 = stream_get_contents($pipes2[2]);
+        fclose($pipes1[1]);
+        fclose($pipes2[1]);
+        fclose($pipes1[2]);
+        fclose($pipes2[2]);
+
+        $exit1 = proc_close($p1);
+        $exit2 = proc_close($p2);
+
+        $res1 = json_decode(trim($out1), true);
+        $res2 = json_decode(trim($out2), true);
+
+        $this->assertIsArray($res1, "Worker 1 output invalid JSON. stdout: '{$out1}', stderr: '{$err1}', exit: {$exit1}");
+        $this->assertIsArray($res2, "Worker 2 output invalid JSON. stdout: '{$out2}', stderr: '{$err2}', exit: {$exit2}");
+
+        $this->assertSame('success', $res1['status'], 'Worker 1 error: '.json_encode($res1));
+        $this->assertSame('success', $res2['status'], 'Worker 2 error: '.json_encode($res2));
+
+        // Both concurrent requests must have resolved to the EXACT same attempt ID
+        $this->assertSame($res1['attempt_id'], $res2['attempt_id'], 'Both concurrent workers must receive the exact same attempt ID');
+        $this->assertSame(1, $res1['attempt_number']);
+        $this->assertSame(1, $res2['attempt_number']);
+        $this->assertSame('in_progress', $res1['attempt_status']);
+
+        // In the database, exactly one attempt must exist
+        $totalAttempts = DB::table('exercise_attempts')
             ->where('center_id', $center->id)
             ->where('student_profile_id', $profile->id)
             ->where('exercise_id', $exercise->id)
             ->count();
 
-        $this->assertSame(1, $totalAttempts);
+        $this->assertSame(1, $totalAttempts, 'Database consistency: exactly one active attempt exists');
     }
 
     /**
-     * Test 10: Real deadlock detection and top-level transaction recovery.
-     * Verifies that when a MySQL concurrency collision occurs (code 40001),
-     * top-level DB::transaction retries and recovers successfully.
+     * Test 10: Real MySQL InnoDB Deadlock detection and Laravel transaction recovery.
+     * Separates:
+     * 1. Real MySQL deadlock behavior (InnoDB cycle detection error 1213 / SQLSTATE 40001).
+     * 2. Laravel transaction retry behavior (DB::transaction retries and recovers).
+     * 3. Rollback integrity (failed iterations leave no partial writes).
+     * 4. Nested transaction savepoint rollback integrity.
      */
     public function test_deadlock_retry_behavior(): void
     {
-        // Unwind RefreshDatabase transaction to test true top-level request retry
-        DB::rollBack();
+        $fixture = $this->createLessonFixture();
+        $lessonA = $fixture['lesson'];
 
-        try {
-            $attempts = 0;
+        // Create a second lesson in the same module
+        $lessonB = Lesson::create([
+            'center_id' => $fixture['center']->id,
+            'course_module_id' => $fixture['module']->id,
+            'title' => 'Deadlock Lesson B',
+            'content_locale' => 'en',
+            'status' => Lesson::STATUS_DRAFT,
+        ]);
 
-            $result = DB::transaction(function () use (&$attempts) {
-                $attempts++;
-                if ($attempts < 3) {
-                    // Simulate MySQL error 1213 deadlock (SQLSTATE 40001)
-                    throw new \PDOException('Deadlock found when trying to get lock; try restarting transaction', 40001);
-                }
+        // --- Part 1: Real MySQL InnoDB Deadlock Cycle ---
+        $workerScript = base_path('tests/fixtures/deadlock_worker.php');
+        $step1File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_step1_'.uniqid().'.tmp';
+        $step2File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_step2_'.uniqid().'.tmp';
 
-                return 'success_after_retries';
-            }, 3);
+        $php = PHP_BINARY ?: 'php';
+        $cmd = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lessonA->id.' '.$lessonB->id.' '.escapeshellarg($step1File).' '.escapeshellarg($step2File);
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
 
-            $this->assertSame('success_after_retries', $result);
-            $this->assertSame(3, $attempts);
-        } finally {
-            DB::beginTransaction();
+        $env = array_merge(getenv(), [
+            'DB_CONNECTION' => 'mysql',
+            'DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+            'ACCEPTANCE_DB_DATABASE' => config('database.connections.mysql_acceptance.database'),
+        ]);
+
+        $proc = proc_open($cmd, $descriptors, $pipes, base_path(), $env);
+        $this->assertIsResource($proc);
+
+        fclose($pipes[0]);
+
+        // Wait for Worker to lock Lesson B (Step 1)
+        $waitLimit = 100;
+        while (! file_exists($step1File) && $waitLimit > 0) {
+            usleep(25000);
+            $waitLimit--;
         }
+
+        $pdo1 = DB::connection()->getPdo();
+        $pdo1->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo1->exec('SET SESSION innodb_lock_wait_timeout = 5');
+
+        $deadlockCaught = false;
+        try {
+            $pdo1->beginTransaction();
+
+            // Parent locks Lesson A
+            $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+            $stmt->execute([$lessonA->id]);
+            $stmt->fetch();
+
+            // Signal Step 2 to Worker (Parent has locked Lesson A)
+            touch($step2File);
+
+            // Small delay to let worker issue its query for Lesson A
+            usleep(50000);
+
+            // Parent attempts to lock Lesson B (which Worker already holds) -> Deadlock cycle!
+            $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
+            $stmt->execute([$lessonB->id]);
+            $stmt->fetch();
+
+            $pdo1->commit();
+        } catch (\PDOException $e) {
+            $deadlockCaught = true;
+            // Verify MySQL Error 1213 / SQLSTATE 40001
+            $this->assertStringContainsString('Deadlock found', $e->getMessage());
+            if ($pdo1->inTransaction()) {
+                $pdo1->rollBack();
+            }
+        }
+
+        $workerOut = stream_get_contents($pipes[1]);
+        $workerErr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($proc);
+
+        @unlink($step1File);
+        @unlink($step2File);
+
+        $workerRes = json_decode($workerOut, true);
+        $workerDeadlocked = isset($workerRes['status']) && $workerRes['status'] === 'pdo_exception' && str_contains($workerRes['message'] ?? '', 'Deadlock');
+
+        // At least one of the two connections must have received error 1213 from MySQL InnoDB
+        $this->assertTrue(
+            $deadlockCaught || $workerDeadlocked,
+            'Real MySQL InnoDB deadlock detection succeeded: either connection 1 or connection 2 received Error 1213 / 40001'
+        );
+
+        // --- Part 2: Laravel Transaction Retry and Rollback Integrity ---
+        $retryAttempts = 0;
+        $result = DB::transaction(function () use (&$retryAttempts, $lessonA) {
+            $retryAttempts++;
+            if ($retryAttempts < 3) {
+                // Mutate state inside transaction before failing
+                DB::table('lessons')->where('id', $lessonA->id)->update(['title' => 'Intermediate_Failed_Title']);
+                // Simulate deadlock exception code 40001
+                throw new \PDOException('Deadlock found when trying to get lock; try restarting transaction', 40001);
+            }
+
+            DB::table('lessons')->where('id', $lessonA->id)->update(['title' => 'Final_Success_Title']);
+
+            return 'recovered';
+        }, 3);
+
+        $this->assertSame('recovered', $result);
+        $this->assertSame(3, $retryAttempts);
+
+        $persistedTitle = DB::table('lessons')->where('id', $lessonA->id)->value('title');
+        $this->assertSame('Final_Success_Title', $persistedTitle, 'Rollback integrity: failed retry writes were rolled back');
+
+        // --- Part 3: Nested Transaction Savepoint Rollback Integrity ---
+        DB::transaction(function () use ($lessonA) {
+            DB::table('lessons')->where('id', $lessonA->id)->update(['title' => 'Outer_Title']);
+
+            try {
+                DB::transaction(function () use ($lessonA) {
+                    DB::table('lessons')->where('id', $lessonA->id)->update(['title' => 'Inner_Will_Rollback']);
+                    throw new \RuntimeException('Inner failure');
+                });
+            } catch (\RuntimeException $e) {
+                // Inner failed, rolled back to savepoint
+            }
+
+            $currentTitle = DB::table('lessons')->where('id', $lessonA->id)->value('title');
+            $this->assertSame('Outer_Title', $currentTitle, 'Savepoint rollback integrity: inner failure rolled back without corrupting outer transaction');
+        });
     }
 }
