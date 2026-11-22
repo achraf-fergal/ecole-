@@ -27,6 +27,7 @@ use InvalidArgumentException;
 class E2EFixtureManager
 {
     public const FIXTURE_NAME_PREFIX = 'E2E Acceptance Center ';
+
     public const FIXTURE_SLUG_PREFIX = 'center-e2e_';
 
     public static function bootstrap(): void
@@ -37,6 +38,7 @@ class E2EFixtureManager
             $kernel->bootstrap();
         }
     }
+
     private static function buildPdfFixture(): string
     {
         $objects = [
@@ -44,47 +46,48 @@ class E2EFixtureManager
             '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
             '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>',
         ];
-    
+
         $pdf = "%PDF-1.4\n";
         $offsets = [];
-    
+
         foreach ($objects as $index => $object) {
             $offsets[] = strlen($pdf);
-    
+
             $objectNumber = $index + 1;
-    
+
             $pdf .= $objectNumber." 0 obj\n";
             $pdf .= $object."\n";
             $pdf .= "endobj\n";
         }
-    
+
         // XRef must point to its actual byte position.
         $xrefOffset = strlen($pdf);
-    
+
         $objectCount = count($objects);
-    
+
         $pdf .= "xref\n";
-        $pdf .= "0 ".($objectCount + 1)."\n";
-    
+        $pdf .= '0 '.($objectCount + 1)."\n";
+
         // Free object 0.
         $pdf .= "0000000000 65535 f \n";
-    
+
         foreach ($offsets as $offset) {
             $pdf .= sprintf(
                 "%010d 00000 n \n",
                 $offset
             );
         }
-    
+
         $pdf .= "trailer\n";
-        $pdf .= "<< /Size ".($objectCount + 1)." /Root 1 0 R >>\n";
-    
+        $pdf .= '<< /Size '.($objectCount + 1)." /Root 1 0 R >>\n";
+
         $pdf .= "startxref\n";
         $pdf .= $xrefOffset."\n";
         $pdf .= "%%EOF\n";
-    
+
         return $pdf;
     }
+
     public static function setup(): array
     {
         self::bootstrap();
@@ -271,19 +274,11 @@ class E2EFixtureManager
                 ]);
 
                 // 7. PDF fixture
+                // 7. PDF fixture
                 $pdfKey = $storageRoot.'/handout.pdf';
 
-                $pdfBytes = "%PDF-1.4\n"
-                    ."1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-                    ."2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
-                    ."3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\n"
-                    ."xref\n0 4\n"
-                    ."0000000000 65535 f \n"
-                    ."0000000009 00000 n \n"
-                    ."0000000052 00000 n \n"
-                    ."0000000108 00000 n \n"
-                    ."trailer<</Size 4/Root 1 0 R>>\n"
-                    ."startxref\n178\n%%EOF";
+                // Generate a valid PDF with calculated XRef offsets.
+                $pdfBytes = self::buildPdfFixture();
 
                 $createdStorageFiles[] = [
                     'disk' => 'private',
@@ -428,7 +423,7 @@ class E2EFixtureManager
         self::bootstrap();
 
         if ($centerId <= 0) {
-            throw new \InvalidArgumentException(
+            throw new InvalidArgumentException(
                 'Invalid E2E fixture center ID.'
             );
         }
@@ -547,7 +542,7 @@ class E2EFixtureManager
             ! str_starts_with($name, self::FIXTURE_NAME_PREFIX) ||
             ! str_starts_with($slug, self::FIXTURE_SLUG_PREFIX)
         ) {
-            throw new \InvalidArgumentException(
+            throw new InvalidArgumentException(
                 "SAFETY VIOLATION: Center {$center->id} is not an E2E fixture."
             );
         }
@@ -568,7 +563,7 @@ class E2EFixtureManager
             $nameToken !== $slugToken ||
             ! preg_match('/\Ae2e_[a-z0-9]+\z/i', $slugToken)
         ) {
-            throw new \InvalidArgumentException(
+            throw new InvalidArgumentException(
                 "SAFETY VIOLATION: Center {$center->id} has an invalid fixture identity."
             );
         }

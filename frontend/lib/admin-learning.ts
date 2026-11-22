@@ -305,6 +305,10 @@ export async function deleteAdminBlock(
 
 /**
  * Reorder all blocks in the draft revision.
+
+/**
+ * Reorder all blocks in the current draft revision.
+ * The payload key must match LessonContentController validation.
  */
 export async function reorderAdminBlocks(
   centerSlug: string,
@@ -313,14 +317,34 @@ export async function reorderAdminBlocks(
   revisionId: number,
   blockIds: number[]
 ): Promise<LessonBlock[]> {
-  const endpoint = `${buildContentBasePath(centerSlug, courseSlug, lessonId)}/revisions/${revisionId}/blocks/order`;
+  if (
+    !Array.isArray(blockIds) ||
+    blockIds.length === 0 ||
+    new Set(blockIds).size !== blockIds.length ||
+    blockIds.some(
+      (id) => !Number.isSafeInteger(id) || id <= 0
+    )
+  ) {
+    throw new Error("Invalid lesson block ordering.");
+  }
+
+  const endpoint =
+    `${buildContentBasePath(centerSlug, courseSlug, lessonId)}` +
+    `/revisions/${revisionId}/blocks/order`;
+
   const response = await authFetch(endpoint, {
     method: "PUT",
-    body: JSON.stringify({ block_ids: blockIds }),
+    body: JSON.stringify({
+      ordered_block_ids: blockIds,
+    }),
   });
 
-  return handleResponse<LessonBlock[]>(response, "Failed to reorder blocks.");
+  return handleResponse<LessonBlock[]>(
+    response,
+    "Failed to reorder blocks."
+  );
 }
+
 
 /**
  * Publish the current draft revision.

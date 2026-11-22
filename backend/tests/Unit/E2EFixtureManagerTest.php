@@ -21,7 +21,8 @@ class E2EFixtureManagerTest extends TestCase
 
     /**
      * Test 1: Successful setup creates all required fixture entities and returns expected keys.
-     */
+
+    */
     public function test_successful_setup(): void
     {
         Storage::fake('private');
@@ -61,8 +62,14 @@ class E2EFixtureManagerTest extends TestCase
 
     /**
      * Test 2: Failed setup actually invokes E2EFixtureManager::setup() with injected failure
+     * 
+     * 
      * and rolls back all entities atomically.
-     */
+
+    */
+    
+    
+    
     public function test_failed_setup_rollback(): void
     {
         Storage::fake('private');
@@ -217,7 +224,98 @@ class E2EFixtureManagerTest extends TestCase
             'Failed fixture setup must remove its physical storage files.'
         );
     }
-
+    public function test_setup_generates_pdf_with_correct_xref_offsets(): void
+    {
+        Storage::fake('private');
+    
+        $fixture = E2EFixtureManager::setup();
+    
+        try {
+            $pdf = Storage::disk('private')->get(
+                $fixture['pdfStorageKey']
+            );
+    
+            $this->assertIsString($pdf);
+    
+            $this->assertStringStartsWith(
+                "%PDF-1.4\n",
+                $pdf
+            );
+    
+            // Read the XRef offset from startxref.
+            $this->assertSame(
+                1,
+                preg_match(
+                    '/startxref\n(\d+)\n%%EOF/s',
+                    $pdf,
+                    $startxrefMatches
+                )
+            );
+    
+            $xrefOffset = (int) $startxrefMatches[1];
+    
+            $this->assertSame(
+                "xref",
+                substr($pdf, $xrefOffset, 4),
+                'startxref must point to the actual XRef section.'
+            );
+    
+            // Extract all XRef entries.
+            $this->assertSame(
+                1,
+                preg_match(
+                    '/xref\n0 4\n(.*?)trailer\n/s',
+                    $pdf,
+                    $xrefMatches
+                )
+            );
+    
+            $entries = preg_split(
+                '/\r\n|\n|\r/',
+                trim($xrefMatches[1])
+            );
+    
+            $this->assertCount(4, $entries);
+    
+            // Object 0 must be the free object.
+            $this->assertStringContainsString(
+                '65535 f',
+                $entries[0]
+            );
+    
+            // Verify that every XRef entry points to its real object.
+            for ($objectNumber = 1; $objectNumber <= 3; $objectNumber++) {
+                $offset = (int) substr(
+                    $entries[$objectNumber],
+                    0,
+                    10
+                );
+    
+                $expectedHeader = $objectNumber.' 0 obj';
+    
+                $actualHeader = substr(
+                    $pdf,
+                    $offset,
+                    strlen($expectedHeader)
+                );
+    
+                $this->assertSame(
+                    $expectedHeader,
+                    $actualHeader,
+                    "Incorrect XRef offset for PDF object {$objectNumber}."
+                );
+            }
+    
+            $this->assertGreaterThan(
+                100,
+                strlen($pdf)
+            );
+        } finally {
+            E2EFixtureManager::teardown(
+                $fixture['centerId']
+            );
+        }
+    }
     /**
      * Test 4: Successful teardown deletes all fixture records in foreign-key order and removes storage files.
      */

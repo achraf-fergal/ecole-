@@ -76,6 +76,43 @@ function teardownFixture(centerId) {
   console.log(`✓ Teardown complete: Center ID ${data.centerId} cleanly removed.`);
 }
 
+async function checkService(name, url) {
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5000),
+      redirect: "manual",
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    console.log(`✓ ${name} is reachable: ${url}`);
+  } catch (error) {
+    throw new Error(
+      `${name} is not available at ${url}. `
+      + `Start the required server before running acceptance tests.`,
+      { cause: error }
+    );
+  }
+}
+
+async function verifyRequiredServices() {
+  console.log("\nPreflight: checking application servers...");
+
+  await checkService(
+    "Next.js Frontend",
+    `${BASE_URL}/login`
+  );
+
+  await checkService(
+    "Laravel Backend",
+    `${API_URL}/api/auth/csrf-cookie`
+  );
+
+  console.log("✓ All required application services are ready.");
+}
+
 async function main() {
   console.log("=================================================");
   console.log("G5.2.1 Production-Grade Reliable Browser Acceptance Suite");
@@ -88,8 +125,16 @@ async function main() {
   const failedRequests = [];
 
   try {
-    fixture = setupFixture();
+    // 1. Validate frontend and backend first.
+    await verifyRequiredServices();
+
+    // 2. Launch browser before touching the database.
     browser = await launchBrowser();
+
+    // 3. Create isolated fixture only after prerequisites pass.
+    fixture = setupFixture();
+
+    // Continue with existing admin/student workflows...
 
     // -----------------------------------------------------------------------
     // ASSERTION 1: Admin Authentication
@@ -264,93 +309,251 @@ async function main() {
     assert.ok(exerciseRes.status() === 201 || exerciseRes.status() === 200, "Exercise block API returned success");
     console.log("✓ Exercise block attached via API.");
 
+    
     // -----------------------------------------------------------------------
-    // ASSERTION 10: Reordering Blocks via UI and Verifying Persisted Order (No API Fallback)
+    // ASSERTION 10: Reordering Blocks via UI and Verifying Persisted Order
     // -----------------------------------------------------------------------
-    console.log("\n[Assertion 10] Testing Block Reordering in Timeline via Accessible UI...");
-    const dragHandles = adminPage.locator('button[aria-label^="Reorder"]');
+    
+    console.log(
+      "\n[Assertion 10] Testing Block Reordering in Timeline via Accessible UI..."
+    );
+    
+    const dragHandles = adminPage.locator(
+      'button[aria-label^="Reorder"]'
+    );
+    
     const dragCount = await dragHandles.count();
-    assert.ok(dragCount >= 2, `Timeline has ${dragCount} blocks ready for reordering`);
-
-    // Fetch current draft blocks to know existing canonical order
-    const draftBeforeReorder = await adminPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
-      const res = await fetch(
-        `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content`,
-        {
-          credentials: "include",
-          headers: { Accept: "application/json" },
+    
+    assert.ok(
+      dragCount >= 2,
+      `Timeline has ${dragCount} blocks ready for reordering`
+    );
+    
+    // Read canonical order before interaction.
+    const draftBeforeReorder = await adminPage.evaluate(
+      async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
+        const response = await fetch(
+          `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content`,
+          {
+            credentials: "include",
+            headers: {
+              Accept: "application/json",
+            },
+          }
+        );
+    
+        if (!response.ok) {
+          throw new Error(
+            `Cannot retrieve draft before reorder: HTTP ${response.status}`
+          );
         }
-      );
-      const json = await res.json();
-      const payload = json.data ?? json;
-      return payload.draft_revision;
-    }, { apiUrl: API_URL, centerSlug: fixture.centerSlug, courseSlug: fixture.courseSlug, lessonId: fixture.lessonId });
-
-    assert.ok(draftBeforeReorder && draftBeforeReorder.blocks.length >= 2, "Draft has multiple blocks");
-    const originalBlockIds = draftBeforeReorder.blocks.map((b) => b.id);
-
-    // Compute expected order: moving element 0 down to index 1
+    
+        const json = await response.json();
+        const payload = json.data ?? json;
+    
+        return payload.draft_revision;
+      },
+      {
+        apiUrl: API_URL,
+        centerSlug: fixture.centerSlug,
+        courseSlug: fixture.courseSlug,
+        lessonId: fixture.lessonId,
+      }
+    );
+    
+    assert.ok(
+      draftBeforeReorder &&
+      draftBeforeReorder.blocks.length >= 2,
+      "Draft must contain multiple blocks."
+    );
+    
+    const originalBlockIds = draftBeforeReorder.blocks.map(
+      (block) => Number(block.id)
+    );
+    
+    // Move the first block down by one position.
     const expectedOrderedIds = [...originalBlockIds];
+    
     const [movedId] = expectedOrderedIds.splice(0, 1);
+    
     expectedOrderedIds.splice(1, 0, movedId);
-
-    // Reorder block 0 down to index 1 via accessible keyboard operation:
-    // Focus first handle, press Space (pick up), ArrowDown (move down), Space (drop)
-    const reorderResponsePromise = adminPage.waitForResponse(
-      (resp) =>
-          resp.url().includes("/blocks/order") &&
-          resp.request().method() === "PUT" &&
-          resp.status() === 200,
-      { timeout: 10000 }
-  );
-
+    
+    assert.notDeepEqual(
+      expectedOrderedIds,
+      originalBlockIds,
+      "Expected order must differ from the original order."
+    );
+    
+    // Locate the first accessible drag handle.
     const firstHandle = dragHandles.first();
+    
+    await firstHandle.waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
+    
+    // Detect disabled controls before attempting keyboard interaction.
+    assert.equal(
+      await firstHandle.isEnabled(),
+      true,
+      "Reorder handle is disabled. Check isSubmitting and hasUnsavedChanges."
+    );
+    
     await firstHandle.focus();
+    
+    const focused = await firstHandle.evaluate(
+      (element) => document.activeElement === element
+    );
+    
+    assert.equal(
+      focused,
+      true,
+      "Reorder handle did not receive keyboard focus."
+    );
+    
+    // IMPORTANT:
+    // Match the endpoint and method only.
+    // Do not filter by HTTP 200 here, otherwise a 422 or 500
+    // is hidden and becomes a misleading timeout.
+    const reorderResponsePromise = adminPage.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+    
+        return (
+          url.pathname.endsWith("/blocks/order") &&
+          response.request().method() === "PUT"
+        );
+      },
+      {
+        timeout: 15000,
+      }
+    );
+    
+    // Perform actual UI keyboard operation.
     await adminPage.keyboard.press("Space");
     await adminPage.keyboard.press("ArrowDown");
     await adminPage.keyboard.press("Space");
-
+    
     const capturedReorder = await reorderResponsePromise;
-    assert.ok(capturedReorder, "UI operation must trigger HTTP 200 PUT /blocks/order request");
-    const reorderRequestBody = capturedReorder.request().postDataJSON();
-    assert.deepEqual(
-      reorderRequestBody.block_ids.map(Number),
-      expectedOrderedIds.map(Number),
-      "UI must submit the exact expected block order"
+    
+    // Read the response body before asserting its status,
+    // so backend validation errors remain visible.
+    const reorderResponseText = await capturedReorder.text();
+    
+    assert.equal(
+      capturedReorder.status(),
+      200,
+      `Block reorder failed: HTTP ${capturedReorder.status()}\n${reorderResponseText}`
     );
-    console.log("✓ UI keyboard reordering triggered block order API request with exact expected block_ids.");
-
-    // Reload page and verify persisted order strictly matches expected sequence
-    await adminPage.reload({ waitUntil: "networkidle" });
-    const draftAfterReorder = await adminPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
-      const res = await fetch(
-        `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content`,
-        {
-          credentials: "include",
-          headers: { Accept: "application/json" },
-        }
-      );
-      const json = await res.json();
-      const payload = json.data ?? json;
-      return payload.draft_revision;
-    }, { apiUrl: API_URL, centerSlug: fixture.centerSlug, courseSlug: fixture.courseSlug, lessonId: fixture.lessonId });
-
-    const persistedBlockIds = draftAfterReorder.blocks.map((b) => b.id);
-    assert.notDeepEqual(
+    
+    // Verify the exact request payload expected by Laravel.
+    const reorderRequestBody =
+      capturedReorder.request().postDataJSON();
+    
+    assert.ok(
+      Array.isArray(reorderRequestBody.ordered_block_ids),
+      "Request must contain ordered_block_ids."
+    );
+    
+    assert.deepEqual(
+      reorderRequestBody.ordered_block_ids.map(Number),
       expectedOrderedIds,
-      originalBlockIds
-  );
-  
-  assert.notDeepEqual(
+      "UI must submit the exact expected ordered_block_ids."
+    );
+    
+    // Verify the canonical response returned by Laravel.
+    const reorderResponseJson = JSON.parse(
+      reorderResponseText
+    );
+    
+    const returnedBlocks =
+      reorderResponseJson.data ?? reorderResponseJson;
+    
+    assert.deepEqual(
+      returnedBlocks.map((block) => Number(block.id)),
+      expectedOrderedIds,
+      "Backend must return the canonical reordered blocks."
+    );
+    
+    console.log(
+      "✓ UI keyboard interaction persisted the exact block order."
+    );
+    
+    // -----------------------------------------------------------------------
+    // Verify persistence after a real browser reload.
+    // -----------------------------------------------------------------------
+    
+    await adminPage.reload({
+      waitUntil: "networkidle",
+    });
+    
+    const draftAfterReorder = await adminPage.evaluate(
+      async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
+        const response = await fetch(
+          `${apiUrl}/api/centers/${centerSlug}/admin/courses/${courseSlug}/lessons/${lessonId}/content`,
+          {
+            credentials: "include",
+            headers: {
+              Accept: "application/json",
+            },
+          }
+        );
+    
+        if (!response.ok) {
+          throw new Error(
+            `Cannot retrieve draft after reorder: HTTP ${response.status}`
+          );
+        }
+    
+        const json = await response.json();
+        const payload = json.data ?? json;
+    
+        return payload.draft_revision;
+      },
+      {
+        apiUrl: API_URL,
+        centerSlug: fixture.centerSlug,
+        courseSlug: fixture.courseSlug,
+        lessonId: fixture.lessonId,
+      }
+    );
+    
+    assert.ok(
+      draftAfterReorder,
+      "Draft revision must remain available after reload."
+    );
+    
+    const persistedBlockIds = draftAfterReorder.blocks.map(
+      (block) => Number(block.id)
+    );
+    
+    assert.notDeepEqual(
       persistedBlockIds,
-      originalBlockIds
-  );
-  
-  assert.deepEqual(
+      originalBlockIds,
+      "Persisted order must differ from original order."
+    );
+    
+    assert.deepEqual(
       persistedBlockIds,
-      expectedOrderedIds
-  );
-    console.log("✓ Persisted order across reload verified in database & API strictly matching UI operation.");
+      expectedOrderedIds,
+      "Persisted order must exactly match the order submitted by the UI."
+    );
+    
+    console.log(
+      "✓ Block ordering persisted across reload and matches the canonical API order."
+    );
+    
+
+
+
+
+
+
+
+
+
+
+
 
     // -----------------------------------------------------------------------
     // ASSERTION 11: Opening Student Preview
@@ -773,18 +976,10 @@ async function main() {
   } catch (err) {
     primaryError = err;
   } finally {
-    if (browser) await browser.close();
-    if (fixture && fixture.centerId) {
-      try {
-        teardownFixture(fixture.centerId);
-      } catch (teardownErr) {
-        if (primaryError) {
-          console.error("❌ Primary test error:", primaryError);
-          console.error("❌ Teardown error:", teardownErr);
-          throw primaryError;
-        }
-        throw teardownErr;
-      }
+    if (browser) {
+      await browser.close();
+    }    if (fixture) {
+      teardownFixture(fixture.centerId);
     }
     if (primaryError) throw primaryError;
   }
