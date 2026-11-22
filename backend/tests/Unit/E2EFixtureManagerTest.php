@@ -133,7 +133,45 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 4: Global level_templates are preserved and unchanged across fixture setup and teardown.
+     * Test 4: Teardown transaction failure preserves storage files (files are deleted only after commit).
+     */
+    public function test_teardown_transaction_failure_preserves_storage_files(): void
+    {
+        Storage::fake('private');
+
+        $fixture = E2EFixtureManager::setup();
+        $centerId = $fixture['centerId'];
+        $imageKey = $fixture['imageStorageKey'];
+        $pdfKey = $fixture['pdfStorageKey'];
+
+        // Inject failure during Center::delete() inside teardown's DB::transaction
+        Center::deleting(function ($center) use ($centerId) {
+            if ($center->id === $centerId) {
+                throw new \RuntimeException('Simulated database error during teardown transaction');
+            }
+        });
+
+        try {
+            E2EFixtureManager::teardown($centerId);
+            $this->fail('Expected RuntimeException was not thrown');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('Simulated database error during teardown transaction', $e->getMessage());
+        } finally {
+            Center::flushEventListeners();
+        }
+
+        // Storage files must still exist because DB transaction rolled back before file deletion
+        Storage::disk('private')->assertExists($imageKey);
+        Storage::disk('private')->assertExists($pdfKey);
+
+        // Subsequent clean teardown deletes them successfully
+        E2EFixtureManager::teardown($centerId);
+        Storage::disk('private')->assertMissing($imageKey);
+        Storage::disk('private')->assertMissing($pdfKey);
+    }
+
+    /**
+     * Test 5: Global level_templates are preserved and unchanged across fixture setup and teardown.
      */
     public function test_global_level_templates_preserved_across_setup_and_teardown(): void
     {

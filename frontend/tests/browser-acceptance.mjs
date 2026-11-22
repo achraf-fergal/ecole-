@@ -326,6 +326,16 @@ async function main() {
     }, { apiUrl: API_URL, centerSlug: fixture.centerSlug, courseSlug: fixture.courseSlug, lessonId: fixture.lessonId });
 
     const persistedBlockIds = draftAfterReorder.blocks.map((b) => b.id);
+    assert.notDeepEqual(
+      expectedOrderedIds,
+      originalBlockIds,
+      "Expected order must differ from original order"
+    );
+    assert.notDeepEqual(
+      persistedBlockIds,
+      originalBlockIds,
+      "Persisted order must differ from original order"
+    );
     assert.deepEqual(
       persistedBlockIds,
       expectedOrderedIds,
@@ -454,12 +464,14 @@ async function main() {
       "Student sees the published revision text content!"
     );
 
-    // 16a. Verify Media Retrieval
-    const imgElement = studentPage.locator('img[alt*="Diagram"], img[alt*="Asset"], img').first();
-    await imgElement.waitFor({ state: "visible", timeout: 5000 });
+    // 16a. Verify Media Retrieval (Image Asset)
+    const imgElement = studentPage.locator('img[alt="E2E Diagram Asset"]');
+    await imgElement.waitFor({ state: "visible", timeout: 10000 });
+    const imgLoaded = await imgElement.evaluate((img) => img.complete && img.naturalWidth > 0);
+    assert.ok(imgLoaded, "Image 'E2E Diagram Asset' is fully loaded in DOM with naturalWidth > 0");
     const imgSrc = await imgElement.getAttribute("src");
     assert.ok(imgSrc && imgSrc.length > 0, "Image asset has valid src attribute in student view");
-    console.log("✓ Student media image rendered successfully in DOM.");
+    console.log("✓ Student media image rendered and verified loaded (naturalWidth > 0).");
 
     // 16b. Authorized Student PDF Download Verification
     const authorizedPdfDownload = await studentPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, pdfAssetId }) => {
@@ -467,10 +479,13 @@ async function main() {
         `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/assets/${pdfAssetId}/download`,
         { credentials: "include" }
       );
-      const text = await res.text();
+      const buffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const header = String.fromCharCode(...bytes.slice(0, 5));
       return {
         status: res.status,
-        isPdfHeader: text.startsWith("%PDF"),
+        length: bytes.length,
+        header: header,
       };
     }, {
       apiUrl: API_URL,
@@ -480,8 +495,9 @@ async function main() {
       pdfAssetId: fixture.pdfAssetId,
     });
     assert.equal(authorizedPdfDownload.status, 200, "Authorized student PDF download returns HTTP 200");
-    assert.ok(authorizedPdfDownload.isPdfHeader, "Authorized student PDF starts with %PDF header");
-    console.log("✓ Authorized student PDF download verified with valid %PDF payload.");
+    assert.equal(authorizedPdfDownload.header, "%PDF-", "Authorized student PDF starts with binary %PDF- header");
+    assert.ok(authorizedPdfDownload.length > 100, `Authorized student PDF byte size must be > 100 bytes (got ${authorizedPdfDownload.length})`);
+    console.log(`✓ Authorized student PDF download verified with valid %PDF- binary structure (${authorizedPdfDownload.length} bytes).`);
 
     // 16c. Unenrolled User PDF Access Rejection
     const anonContext = await browser.newContext();
@@ -526,18 +542,27 @@ async function main() {
     await correctOptionBtn.click();
     console.log("✓ Selected correct assessment option.");
 
-    // Save progress
+    // Save progress with strict PATCH method and URL filter
     const saveProgressBtn = studentPage.locator('button:has-text("Save Progress")');
     await saveProgressBtn.waitFor({ state: "visible", timeout: 5000 });
     const saveProgressPromise = studentPage.waitForResponse(
-      (resp) => resp.url().includes("/attempts/") && resp.status() === 200
+      (resp) =>
+        resp.request().method() === "PATCH" &&
+        resp.url().includes(`/exercises/${fixture.exerciseId}/attempts/current`) &&
+        resp.status() === 200
     );
     await saveProgressBtn.click();
     const saveProgressRes = await saveProgressPromise;
     assert.equal(saveProgressRes.status(), 200, "Save progress PATCH returned HTTP 200");
-    console.log("✓ Saved attempt progress.");
+    const saveProgressJson = await saveProgressRes.json();
+    const savePayload = saveProgressJson.data ?? saveProgressJson;
+    assert.ok(
+      savePayload.answers && savePayload.answers.length > 0,
+      "Saved answer must be returned in attempt payload"
+    );
+    console.log("✓ Saved attempt progress verified via PATCH response payload.");
 
-    // Reload page and verify active attempt is resumed
+    // Reload page and verify active attempt and selected answer are resumed across reload
     await studentPage.reload({ waitUntil: "networkidle" });
     await studentPage.waitForSelector("main", { state: "visible" });
     const submitBtn = studentPage.locator('button:has-text("Submit Assessment")');

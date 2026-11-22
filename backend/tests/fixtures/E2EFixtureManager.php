@@ -281,7 +281,9 @@ class E2EFixtureManager
             );
         }
 
-        DB::transaction(function () use ($center) {
+        $filesToDelete = [];
+
+        DB::transaction(function () use ($center, &$filesToDelete) {
             // 1. Assessment attempt answers and attempts
             DB::table('exercise_attempt_answers')->where('center_id', $center->id)->delete();
             DB::table('exercise_attempts')->where('center_id', $center->id)->delete();
@@ -304,15 +306,14 @@ class E2EFixtureManager
                 'published_revision_id' => null,
             ]);
 
-            // 5. Lesson blocks, revisions, assets (and clean actual files from storage)
+            // 5. Collect lesson asset files to delete AFTER commit, then delete DB records
             $assets = DB::table('lesson_assets')->where('center_id', $center->id)->get();
             foreach ($assets as $a) {
                 if (! empty($a->storage_disk) && ! empty($a->storage_key)) {
-                    try {
-                        Storage::disk($a->storage_disk)->delete($a->storage_key);
-                    } catch (\Throwable) {
-                        // Suppress storage disk deletion errors during database teardown
-                    }
+                    $filesToDelete[] = [
+                        'disk' => $a->storage_disk,
+                        'key' => $a->storage_key,
+                    ];
                 }
             }
 
@@ -387,6 +388,20 @@ class E2EFixtureManager
             // 9. Finally delete the center
             $center->delete();
         });
+
+        // 10. Delete physical storage files ONLY after DB transaction successfully commits
+        foreach ($filesToDelete as $file) {
+            try {
+                if (Storage::disk($file['disk'])->exists($file['key'])) {
+                    $deleted = Storage::disk($file['disk'])->delete($file['key']);
+                    if (! $deleted) {
+                        throw new \RuntimeException("Failed to delete fixture file from storage: {$file['key']} on disk {$file['disk']}");
+                    }
+                }
+            } catch (\Throwable $e) {
+                throw new \RuntimeException("Teardown storage cleanup failure for {$file['key']} on disk {$file['disk']}: ".$e->getMessage(), 0, $e);
+            }
+        }
     }
 }
 

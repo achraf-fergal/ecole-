@@ -141,25 +141,53 @@ class LessonMySqlAcceptanceTest extends TestCase
     }
 
     /**
+     * Safely terminate a worker process if still running, preventing test suite hangs.
+     */
+    private function terminateWorker($process, int $graceMs = 500): void
+    {
+        if (! is_resource($process)) {
+            return;
+        }
+
+        $status = proc_get_status($process);
+        if ($status['running']) {
+            proc_terminate($process);
+            $waited = 0;
+            while ($waited < $graceMs) {
+                usleep(25000);
+                $waited += 25;
+                $status = proc_get_status($process);
+                if (! $status['running']) {
+                    break;
+                }
+            }
+            if ($status['running']) {
+                proc_terminate($process, 9);
+            }
+        }
+    }
+
+    /**
      * Deterministically wait until both workers signal ready via their marker files.
      * Throws an exception if workers terminate prematurely or timeout.
      */
     private function waitForWorkersReady(string $ready1, string $ready2, $p1, $p2, int $timeoutSeconds = 10): void
     {
-        $iterations = $timeoutSeconds * 20; // 50ms intervals
-        while ((! file_exists($ready1) || ! file_exists($ready2)) && $iterations > 0) {
+        $deadline = microtime(true) + (float) $timeoutSeconds;
+        while ((! file_exists($ready1) || ! file_exists($ready2)) && microtime(true) < $deadline) {
             $s1 = proc_get_status($p1);
             $s2 = proc_get_status($p2);
             if (! $s1['running'] || ! $s2['running']) {
                 break;
             }
-            usleep(50000);
-            $iterations--;
+            usleep(25000);
         }
 
         if (! file_exists($ready1) || ! file_exists($ready2)) {
             $s1 = proc_get_status($p1);
             $s2 = proc_get_status($p2);
+            $this->terminateWorker($p1);
+            $this->terminateWorker($p2);
             throw new \RuntimeException(sprintf(
                 'Workers failed to reach ready state within %ds. Worker1 ready: %s (running: %s, exit: %s), Worker2 ready: %s (running: %s, exit: %s)',
                 $timeoutSeconds,
@@ -618,6 +646,9 @@ class LessonMySqlAcceptanceTest extends TestCase
             fclose($pipes1[2]);
             fclose($pipes2[2]);
 
+            $this->terminateWorker($p1);
+            $this->terminateWorker($p2);
+
             $exit1 = proc_close($p1);
             $exit2 = proc_close($p2);
 
@@ -833,6 +864,9 @@ class LessonMySqlAcceptanceTest extends TestCase
             fclose($pipes1[2]);
             fclose($pipes2[2]);
 
+            $this->terminateWorker($p1);
+            $this->terminateWorker($p2);
+
             $exit1 = proc_close($p1);
             $exit2 = proc_close($p2);
 
@@ -890,11 +924,12 @@ class LessonMySqlAcceptanceTest extends TestCase
 
         // --- Part 1: Real MySQL InnoDB Deadlock Cycle ---
         $workerScript = base_path('tests/fixtures/deadlock_worker.php');
-        $step1File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_step1_'.uniqid().'.tmp';
-        $step2File = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_step2_'.uniqid().'.tmp';
+        $workerLockedBFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_wb_'.uniqid().'.tmp';
+        $parentLockedAFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_pa_'.uniqid().'.tmp';
+        $workerReqAFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'dl_wreqa_'.uniqid().'.tmp';
 
         $php = PHP_BINARY ?: 'php';
-        $cmd = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lessonA->id.' '.$lessonB->id.' '.escapeshellarg($step1File).' '.escapeshellarg($step2File);
+        $cmd = escapeshellarg($php).' '.escapeshellarg($workerScript).' '.$lessonA->id.' '.$lessonB->id.' '.escapeshellarg($workerLockedBFile).' '.escapeshellarg($parentLockedAFile).' '.escapeshellarg($workerReqAFile);
         $descriptors = [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
@@ -911,10 +946,12 @@ class LessonMySqlAcceptanceTest extends TestCase
         $deadlockCaught = false;
         try {
             // Wait for Worker to lock Lesson B (Step 1)
-            $waitLimit = 100;
-            while (! file_exists($step1File) && $waitLimit > 0) {
-                usleep(25000);
-                $waitLimit--;
+            $deadlineB = microtime(true) + 10.0;
+            while (! file_exists($workerLockedBFile) && microtime(true) < $deadlineB) {
+                usleep(10000);
+            }
+            if (! file_exists($workerLockedBFile)) {
+                throw new \RuntimeException('Timed out waiting for worker to lock Lesson B');
             }
 
             $pdo1 = DB::connection()->getPdo();
@@ -930,10 +967,16 @@ class LessonMySqlAcceptanceTest extends TestCase
                 $stmt->fetch();
 
                 // Signal Step 2 to Worker (Parent has locked Lesson A)
-                touch($step2File);
+                touch($parentLockedAFile);
 
-                // Small delay to let worker issue its query for Lesson A
-                usleep(50000);
+                // Wait until worker signals it is requesting Lesson A (no arbitrary fixed sleeps)
+                $deadlineReqA = microtime(true) + 10.0;
+                while (! file_exists($workerReqAFile) && microtime(true) < $deadlineReqA) {
+                    usleep(10000);
+                }
+                if (! file_exists($workerReqAFile)) {
+                    throw new \RuntimeException('Timed out waiting for worker to request Lesson A');
+                }
 
                 // Parent attempts to lock Lesson B (which Worker already holds) -> Deadlock cycle!
                 $stmt = $pdo1->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
@@ -959,10 +1002,12 @@ class LessonMySqlAcceptanceTest extends TestCase
         } finally {
             fclose($pipes[1]);
             fclose($pipes[2]);
+            $this->terminateWorker($proc);
             $exitCode = proc_close($proc);
 
-            @unlink($step1File);
-            @unlink($step2File);
+            @unlink($workerLockedBFile);
+            @unlink($parentLockedAFile);
+            @unlink($workerReqAFile);
         }
 
         $workerRes = json_decode($workerOut, true);

@@ -68,10 +68,9 @@ try {
     touch($readyMarkerFile);
 
     // 2. Await Release Signal from Parent
-    $waitLimit = 200; // max 10 seconds (50ms interval)
-    while (! file_exists($releaseSignalFile) && $waitLimit > 0) {
-        usleep(25000);
-        $waitLimit--;
+    $deadline = microtime(true) + 10.0;
+    while (! file_exists($releaseSignalFile) && microtime(true) < $deadline) {
+        usleep(10000); // 10ms
     }
 
     if (! file_exists($releaseSignalFile)) {

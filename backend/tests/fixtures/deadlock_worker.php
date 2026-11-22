@@ -49,8 +49,9 @@ $rowA = (int) ($argv[1] ?? 0);
 $rowB = (int) ($argv[2] ?? 0);
 $workerLockedBFile = $argv[3] ?? '';
 $parentLockedAFile = $argv[4] ?? '';
+$workerRequestingAFile = $argv[5] ?? '';
 
-if (! $rowA || ! $rowB || ! $workerLockedBFile || ! $parentLockedAFile) {
+if (! $rowA || ! $rowB || ! $workerLockedBFile || ! $parentLockedAFile || ! $workerRequestingAFile) {
     echo json_encode(['status' => 'error', 'message' => 'Missing arguments for deadlock_worker']);
     exit(1);
 }
@@ -71,14 +72,18 @@ try {
     touch($workerLockedBFile);
 
     // Wait until Parent has locked Row A and signaled Step 2
-    $waitLimit = 200;
-    while (! file_exists($parentLockedAFile) && $waitLimit > 0) {
-        usleep(25000);
-        $waitLimit--;
+    $deadline = microtime(true) + 10.0;
+    while (! file_exists($parentLockedAFile) && microtime(true) < $deadline) {
+        usleep(10000); // 10ms
     }
 
-    // Small delay to let parent issue its blocking request for Row B
-    usleep(150000);
+    if (! file_exists($parentLockedAFile)) {
+        echo json_encode(['status' => 'error', 'message' => 'Timed out waiting for parentLockedAFile']);
+        exit(1);
+    }
+
+    // Signal that Worker is about to request lock on Row A
+    touch($workerRequestingAFile);
 
     // 2. Attempt to lock Row A -> Causes Deadlock Cycle!
     $stmt = $pdo->prepare('SELECT id FROM lessons WHERE id = ? FOR UPDATE');
