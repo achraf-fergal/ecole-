@@ -497,13 +497,18 @@ export default function LessonExerciseBlock({
 
               <div className="mt-4 space-y-2">
                 {question.options.map((option) => {
-                  const isSelected = selectedAnswers[question.id] === option.id;
+                  const isSelected =
+                    selectedAnswers[question.id] === option.id;
 
                   return (
                     <button
                       type="button"
                       key={option.id}
-                      onClick={() => handleSelectOption(question.id, option.id)}
+                      data-option-id={option.id}
+                      aria-pressed={isSelected}
+                      onClick={() =>
+                        handleSelectOption(question.id, option.id)
+                      }
                       className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3.5 text-left text-xs transition ${
                         isSelected
                           ? "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold"
@@ -522,6 +527,7 @@ export default function LessonExerciseBlock({
                             <span className="h-1.5 w-1.5 rounded-full bg-white" />
                           )}
                         </span>
+
                         <span>{option.option_text}</span>
                       </div>
                     </button>

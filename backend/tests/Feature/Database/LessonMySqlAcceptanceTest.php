@@ -48,83 +48,211 @@ class LessonMySqlAcceptanceTest extends TestCase
     {
         parent::setUp();
 
-        $this->previousDefaultConnection = config('database.default', 'sqlite');
-
-        // Configure dedicated acceptance MySQL connection
-        $host = env('ACCEPTANCE_DB_HOST', env('DB_HOST', '127.0.0.1'));
-        $port = env('ACCEPTANCE_DB_PORT', env('DB_PORT', '3306'));
-        $database = env('ACCEPTANCE_DB_DATABASE', 'school_saas_g5_acceptance_20261121_a7f3');
-        $username = env('ACCEPTANCE_DB_USERNAME', env('DB_USERNAME', 'root'));
-        $password = env('ACCEPTANCE_DB_PASSWORD', env('DB_PASSWORD', ''));
-
-        // Safety enforcement: NEVER run acceptance tests against development or production DB
-        if ($database === 'school_saas' || (! str_contains($database, 'acceptance') && ! str_contains($database, 'test'))) {
-            $this->fail("SAFETY VIOLATION: Acceptance tests must never execute against database '{$database}'. Use dedicated acceptance database.");
+        // Never permit database acceptance tests in production.
+        if (app()->environment('production')) {
+            throw new \RuntimeException(
+                'SAFETY VIOLATION: MySQL acceptance tests cannot run in production.'
+            );
         }
 
-        $this->acceptanceDbConfig = compact('host', 'port', 'database', 'username', 'password');
+        $this->previousDefaultConnection = config(
+            'database.default',
+            'sqlite'
+        );
 
-        config([
-            'database.connections.mysql_acceptance' => [
-                'driver' => 'mysql',
-                'host' => $host,
-                'port' => (int) $port,
-                'database' => $database,
-                'username' => $username,
-                'password' => $password,
-                'charset' => 'utf8mb4',
-                'collation' => 'utf8mb4_unicode_ci',
-                'prefix' => '',
-                'prefix_indexes' => true,
-                'strict' => true,
-                'engine' => null,
-            ],
-            'database.default' => 'mysql_acceptance',
-        ]);
+        // Require explicitly configured acceptance credentials.
+        $host = trim((string) env('ACCEPTANCE_DB_HOST', ''));
+        $port = env('ACCEPTANCE_DB_PORT', '3306');
+        $database = trim((string) env('ACCEPTANCE_DB_DATABASE', ''));
+        $username = trim((string) env('ACCEPTANCE_DB_USERNAME', ''));
+        $password = env('ACCEPTANCE_DB_PASSWORD');
 
-        DB::purge('mysql_acceptance');
-        DB::setDefaultConnection('mysql_acceptance');
+        $allowedPrefix = 'school_saas_g5_acceptance_';
 
-        $driver = DB::connection()->getDriverName();
-        if ($driver !== 'mysql') {
-            $this->fail("LessonMySqlAcceptanceTest requires running against MySQL 8. Current driver: '{$driver}'.");
+        $portNumber = filter_var(
+            $port,
+            FILTER_VALIDATE_INT
+        );
+
+        if (
+            $host === '' ||
+            $username === '' ||
+            $password === null ||
+            $database === '' ||
+            $portNumber === false ||
+            $portNumber < 1 ||
+            $portNumber > 65535
+        ) {
+            throw new \RuntimeException(
+                'Missing or invalid dedicated ACCEPTANCE_DB configuration.'
+            );
+        }
+
+        if (
+            ! str_starts_with($database, $allowedPrefix) ||
+            ! preg_match(
+                '/\Aschool_saas_g5_acceptance_[a-zA-Z0-9_]+\z/',
+                $database
+            )
+        ) {
+            throw new \RuntimeException(
+                'SAFETY VIOLATION: Invalid MySQL acceptance database name.'
+            );
+        }
+
+        if ($database === 'school_saas') {
+            throw new \RuntimeException(
+                'SAFETY VIOLATION: Development database is forbidden.'
+            );
+        }
+
+        $this->acceptanceDbConfig = [
+            'host' => $host,
+            'port' => (int) $portNumber,
+            'database' => $database,
+            'username' => $username,
+            'password' => (string) $password,
+        ];
+
+        try {
+            config([
+                'database.connections.mysql_acceptance' => [
+                    'driver' => 'mysql',
+                    'host' => $host,
+                    'port' => (int) $portNumber,
+                    'database' => $database,
+                    'username' => $username,
+                    'password' => (string) $password,
+                    'charset' => 'utf8mb4',
+                    'collation' => 'utf8mb4_unicode_ci',
+                    'prefix' => '',
+                    'prefix_indexes' => true,
+                    'strict' => true,
+                    'engine' => 'InnoDB',
+                ],
+
+                'database.default' => 'mysql_acceptance',
+            ]);
+
+            DB::purge('mysql_acceptance');
+            DB::setDefaultConnection('mysql_acceptance');
+
+            $connection = DB::connection('mysql_acceptance');
+
+            if ($connection->getDriverName() !== 'mysql') {
+                throw new \RuntimeException(
+                    'MySQL acceptance tests require the MySQL driver.'
+                );
+            }
+
+            $versionRow = $connection->selectOne(
+                'SELECT VERSION() AS version'
+            );
+
+            $version = (string) ($versionRow->version ?? '');
+
+            if (! preg_match('/^8\./', $version)) {
+                throw new \RuntimeException(
+                    "MySQL 8 is required. Detected version: {$version}"
+                );
+            }
+
+        } catch (\Throwable $exception) {
+            DB::purge('mysql_acceptance');
+
+            config([
+                'database.default' => $this->previousDefaultConnection,
+            ]);
+
+            DB::setDefaultConnection(
+                $this->previousDefaultConnection
+            );
+
+            throw $exception;
         }
     }
 
     protected function tearDown(): void
     {
         try {
-            // Safety enforcement: Reject production environment and development database
             if (app()->environment('production')) {
-                throw new \RuntimeException('SAFETY VIOLATION: Acceptance tests must never run in production.');
+                throw new \RuntimeException(
+                    'SAFETY VIOLATION: Acceptance cleanup is forbidden in production.'
+                );
             }
 
-            $currentDb = config('database.connections.mysql_acceptance.database');
-            if ($currentDb === 'school_saas' || (! str_contains($currentDb, 'acceptance') && ! str_contains($currentDb, 'test'))) {
-                throw new \RuntimeException("SAFETY VIOLATION: Teardown forbidden on non-acceptance database '{$currentDb}'.");
+            $currentDatabase = (string) config(
+                'database.connections.mysql_acceptance.database',
+                ''
+            );
+
+            if (
+                ! preg_match(
+                    '/\Aschool_saas_g5_acceptance_[a-zA-Z0-9_]+\z/',
+                    $currentDatabase
+                ) ||
+                $currentDatabase === 'school_saas'
+            ) {
+                throw new \RuntimeException(
+                    'SAFETY VIOLATION: Teardown refused for an unauthorized database.'
+                );
             }
 
-            // Wrap fixture cleanup in an explicit transaction
-            DB::transaction(function () {
-                if (! empty($this->trackedCenterIds)) {
-                    foreach ($this->trackedCenterIds as $centerId) {
-                        $this->cleanCenterFixtures($centerId);
+            // Preserve fixture IDs until the entire cleanup transaction commits.
+            $centerIds = array_values(
+                array_unique($this->trackedCenterIds)
+            );
+
+            $userIds = array_values(
+                array_unique($this->trackedUserIds)
+            );
+
+            if ($centerIds !== [] || $userIds !== []) {
+                DB::connection('mysql_acceptance')->transaction(
+                    function () use ($centerIds, $userIds): void {
+                        foreach ($centerIds as $centerId) {
+                            $this->cleanCenterFixtures(
+                                (int) $centerId
+                            );
+                        }
+
+                        // Never delete users still connected to another center.
+                        if ($userIds !== []) {
+                            DB::table('users')
+                                ->whereIn('id', $userIds)
+                                ->whereNotExists(function ($query): void {
+                                    $query
+                                        ->selectRaw('1')
+                                        ->from('center_user')
+                                        ->whereColumn(
+                                            'center_user.user_id',
+                                            'users.id'
+                                        );
+                                })
+                                ->delete();
+                        }
                     }
-                    $this->trackedCenterIds = [];
-                }
+                );
+            }
 
-                if (! empty($this->trackedUserIds)) {
-                    DB::table('users')->whereIn('id', $this->trackedUserIds)->delete();
-                    $this->trackedUserIds = [];
-                }
-            });
+            // Clear tracking only after successful database commit.
+            $this->trackedCenterIds = [];
+            $this->trackedUserIds = [];
+
         } finally {
-            // Always restore previous default database connection
-            DB::purge('mysql_acceptance');
-            config(['database.default' => $this->previousDefaultConnection]);
-            DB::setDefaultConnection($this->previousDefaultConnection);
+            try {
+                DB::purge('mysql_acceptance');
 
-            parent::tearDown();
+                config([
+                    'database.default' => $this->previousDefaultConnection,
+                ]);
+
+                DB::setDefaultConnection(
+                    $this->previousDefaultConnection
+                );
+            } finally {
+                parent::tearDown();
+            }
         }
     }
 
@@ -140,9 +268,6 @@ class LessonMySqlAcceptanceTest extends TestCase
         ]);
     }
 
-    /**
-     * Safely terminate a worker process if still running, preventing test suite hangs.
-     */
     private function terminateWorker(
         $process,
         int $graceMs = 500
@@ -150,14 +275,148 @@ class LessonMySqlAcceptanceTest extends TestCase
         if (! is_resource($process)) {
             return;
         }
-    
+
         $status = proc_get_status($process);
-    
+
+        if (! $status['running']) {
+            return;
+        }
+
+        // Try graceful termination first.
+        proc_terminate($process);
+
+        $graceDeadline = microtime(true)
+            + ($graceMs / 1000);
+
+        while (microtime(true) < $graceDeadline) {
+            usleep(10000);
+
+            $status = proc_get_status($process);
+
+            if (! $status['running']) {
+                return;
+            }
+        }
+
+        // Graceful shutdown failed: force termination.
+        proc_terminate($process, 9);
+
+        $killDeadline = microtime(true) + 1.0;
+
+        while (microtime(true) < $killDeadline) {
+            usleep(10000);
+
+            $status = proc_get_status($process);
+
+            if (! $status['running']) {
+                return;
+            }
+        }
+
+        $status = proc_get_status($process);
+
         if ($status['running']) {
-            proc_terminate($process);
-    
-            // Wait for graceful termination.
-            // Force termination if necessary.
+            throw new \RuntimeException(
+                'Unable to terminate MySQL acceptance worker.'
+            );
+        }
+    }
+
+    private function collectWorkerProcesses(
+        array $workers,
+        int $timeoutSeconds = 20
+    ): array {
+        if ($workers === [] || $timeoutSeconds <= 0) {
+            throw new \InvalidArgumentException(
+                'Workers and a positive timeout are required.'
+            );
+        }
+
+        $results = [];
+
+        foreach ($workers as $index => $worker) {
+            foreach (['process', 'stdout', 'stderr'] as $key) {
+                if (
+                    ! isset($worker[$key]) ||
+                    ! is_resource($worker[$key])
+                ) {
+                    throw new \InvalidArgumentException(
+                        "Worker {$index} has an invalid {$key} resource."
+                    );
+                }
+            }
+
+            stream_set_blocking($worker['stdout'], false);
+            stream_set_blocking($worker['stderr'], false);
+
+            $results[$index] = [
+                'stdout' => '',
+                'stderr' => '',
+                'exitCode' => null,
+            ];
+        }
+
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        try {
+            while (true) {
+                $allFinished = true;
+
+                foreach ($workers as $index => $worker) {
+                    $stdout = stream_get_contents($worker['stdout']);
+
+                    if ($stdout !== false && $stdout !== '') {
+                        $results[$index]['stdout'] .= $stdout;
+                    }
+
+                    $stderr = stream_get_contents($worker['stderr']);
+
+                    if ($stderr !== false && $stderr !== '') {
+                        $results[$index]['stderr'] .= $stderr;
+                    }
+
+                    if ($results[$index]['exitCode'] === null) {
+                        $status = proc_get_status($worker['process']);
+
+                        if (! $status['running']) {
+                            $results[$index]['exitCode'] =
+                                (int) $status['exitcode'];
+                        }
+                    }
+
+                    $processFinished =
+                        $results[$index]['exitCode'] !== null;
+
+                    $streamsFinished =
+                        feof($worker['stdout']) &&
+                        feof($worker['stderr']);
+
+                    if (! $processFinished || ! $streamsFinished) {
+                        $allFinished = false;
+                    }
+                }
+
+                if ($allFinished) {
+                    return $results;
+                }
+
+                if (microtime(true) >= $deadline) {
+                    $details = json_encode($results);
+
+                    throw new \RuntimeException(
+                        "Worker execution exceeded {$timeoutSeconds}s. "
+                        ."Partial results: {$details}"
+                    );
+                }
+
+                usleep(10000);
+            }
+        } catch (\Throwable $exception) {
+            foreach ($workers as $worker) {
+                $this->terminateWorker($worker['process']);
+            }
+
+            throw $exception;
         }
     }
 
@@ -623,6 +882,9 @@ class LessonMySqlAcceptanceTest extends TestCase
         fclose($pipes1[0]);
         fclose($pipes2[0]);
 
+        $exit1 = null;
+        $exit2 = null;
+
         try {
             // Deterministically wait for both workers to connect and load models
             $this->waitForWorkersReady($ready1File, $ready2File, $p1, $p2, 10);
@@ -630,10 +892,26 @@ class LessonMySqlAcceptanceTest extends TestCase
             // Release barrier -> Both processes fire simultaneously
             touch($releaseSignalFile);
 
-            $out1 = stream_get_contents($pipes1[1]);
-            $err1 = stream_get_contents($pipes1[2]);
-            $out2 = stream_get_contents($pipes2[1]);
-            $err2 = stream_get_contents($pipes2[2]);
+            $workerResults = $this->collectWorkerProcesses([
+                [
+                    'process' => $p1,
+                    'stdout' => $pipes1[1],
+                    'stderr' => $pipes1[2],
+                ],
+                [
+                    'process' => $p2,
+                    'stdout' => $pipes2[1],
+                    'stderr' => $pipes2[2],
+                ],
+            ], 20);
+
+            $out1 = $workerResults[0]['stdout'];
+            $err1 = $workerResults[0]['stderr'];
+            $exit1 = $workerResults[0]['exitCode'];
+
+            $out2 = $workerResults[1]['stdout'];
+            $err2 = $workerResults[1]['stderr'];
+            $exit2 = $workerResults[1]['exitCode'];
         } finally {
             fclose($pipes1[1]);
             fclose($pipes2[1]);
@@ -643,13 +921,33 @@ class LessonMySqlAcceptanceTest extends TestCase
             $this->terminateWorker($p1);
             $this->terminateWorker($p2);
 
-            $exit1 = proc_close($p1);
-            $exit2 = proc_close($p2);
+            $closeExit1 = proc_close($p1);
+            $closeExit2 = proc_close($p2);
+
+            if ($exit1 === null || $exit1 < 0) {
+                $exit1 = $closeExit1;
+            }
+
+            if ($exit2 === null || $exit2 < 0) {
+                $exit2 = $closeExit2;
+            }
 
             @unlink($ready1File);
             @unlink($ready2File);
             @unlink($releaseSignalFile);
         }
+
+        $this->assertSame(
+            0,
+            $exit1,
+            "Worker 1 exited unsuccessfully: {$err1}"
+        );
+
+        $this->assertSame(
+            0,
+            $exit2,
+            "Worker 2 exited unsuccessfully: {$err2}"
+        );
 
         $res1 = json_decode(trim($out1), true);
         $res2 = json_decode(trim($out2), true);
@@ -843,15 +1141,34 @@ class LessonMySqlAcceptanceTest extends TestCase
         fclose($pipes1[0]);
         fclose($pipes2[0]);
 
+        $exit1 = null;
+        $exit2 = null;
+
         try {
             $this->waitForWorkersReady($ready1File, $ready2File, $p1, $p2, 10);
 
             touch($releaseSignalFile); // Trigger simultaneous execution
 
-            $out1 = stream_get_contents($pipes1[1]);
-            $err1 = stream_get_contents($pipes1[2]);
-            $out2 = stream_get_contents($pipes2[1]);
-            $err2 = stream_get_contents($pipes2[2]);
+            $workerResults = $this->collectWorkerProcesses([
+                [
+                    'process' => $p1,
+                    'stdout' => $pipes1[1],
+                    'stderr' => $pipes1[2],
+                ],
+                [
+                    'process' => $p2,
+                    'stdout' => $pipes2[1],
+                    'stderr' => $pipes2[2],
+                ],
+            ], 20);
+
+            $out1 = $workerResults[0]['stdout'];
+            $err1 = $workerResults[0]['stderr'];
+            $exit1 = $workerResults[0]['exitCode'];
+
+            $out2 = $workerResults[1]['stdout'];
+            $err2 = $workerResults[1]['stderr'];
+            $exit2 = $workerResults[1]['exitCode'];
         } finally {
             fclose($pipes1[1]);
             fclose($pipes2[1]);
@@ -861,13 +1178,33 @@ class LessonMySqlAcceptanceTest extends TestCase
             $this->terminateWorker($p1);
             $this->terminateWorker($p2);
 
-            $exit1 = proc_close($p1);
-            $exit2 = proc_close($p2);
+            $closeExit1 = proc_close($p1);
+            $closeExit2 = proc_close($p2);
+
+            if ($exit1 === null || $exit1 < 0) {
+                $exit1 = $closeExit1;
+            }
+
+            if ($exit2 === null || $exit2 < 0) {
+                $exit2 = $closeExit2;
+            }
 
             @unlink($ready1File);
             @unlink($ready2File);
             @unlink($releaseSignalFile);
         }
+
+        $this->assertSame(
+            0,
+            $exit1,
+            "Worker 1 exited unsuccessfully: {$err1}"
+        );
+
+        $this->assertSame(
+            0,
+            $exit2,
+            "Worker 2 exited unsuccessfully: {$err2}"
+        );
 
         $res1 = json_decode(trim($out1), true);
         $res2 = json_decode(trim($out2), true);
@@ -938,6 +1275,7 @@ class LessonMySqlAcceptanceTest extends TestCase
         fclose($pipes[0]);
 
         $deadlockCaught = false;
+        $workerExitCode = null;
         try {
             // Wait for Worker to lock Lesson B (Step 1)
             $deadlineB = microtime(true) + 10.0;
@@ -991,13 +1329,25 @@ class LessonMySqlAcceptanceTest extends TestCase
                 }
             }
 
-            $workerOut = stream_get_contents($pipes[1]);
-            $workerErr = stream_get_contents($pipes[2]);
+            $workerResults = $this->collectWorkerProcesses([
+                [
+                    'process' => $proc,
+                    'stdout' => $pipes[1],
+                    'stderr' => $pipes[2],
+                ],
+            ], 15);
+
+            $workerOut = $workerResults[0]['stdout'];
+            $workerErr = $workerResults[0]['stderr'];
+            $workerExitCode = $workerResults[0]['exitCode'];
         } finally {
             fclose($pipes[1]);
             fclose($pipes[2]);
             $this->terminateWorker($proc);
-            $exitCode = proc_close($proc);
+            $closeExit = proc_close($proc);
+            if ($workerExitCode === null || $workerExitCode < 0) {
+                $workerExitCode = $closeExit;
+            }
 
             @unlink($workerLockedBFile);
             @unlink($parentLockedAFile);

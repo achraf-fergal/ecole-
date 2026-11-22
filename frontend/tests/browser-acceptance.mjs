@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { PDFDocument } from "pdf-lib";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -311,7 +312,13 @@ async function main() {
 
     const capturedReorder = await reorderResponsePromise;
     assert.ok(capturedReorder, "UI operation must trigger HTTP 200 PUT /blocks/order request");
-    console.log("✓ UI keyboard reordering triggered block order API request.");
+    const reorderRequestBody = capturedReorder.request().postDataJSON();
+    assert.deepEqual(
+      reorderRequestBody.block_ids.map(Number),
+      expectedOrderedIds.map(Number),
+      "UI must submit the exact expected block order"
+    );
+    console.log("✓ UI keyboard reordering triggered block order API request with exact expected block_ids.");
 
     // Reload page and verify persisted order strictly matches expected sequence
     await adminPage.reload({ waitUntil: "networkidle" });
@@ -484,10 +491,15 @@ async function main() {
       const buffer = await res.arrayBuffer();
       const bytes = new Uint8Array(buffer);
       const header = String.fromCharCode(...bytes.slice(0, 5));
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
       return {
         status: res.status,
         length: bytes.length,
         header: header,
+        base64: btoa(binary),
       };
     }, {
       apiUrl: API_URL,
@@ -499,7 +511,10 @@ async function main() {
     assert.equal(authorizedPdfDownload.status, 200, "Authorized student PDF download returns HTTP 200");
     assert.equal(authorizedPdfDownload.header, "%PDF-", "Authorized student PDF starts with binary %PDF- header");
     assert.ok(authorizedPdfDownload.length > 100, `Authorized student PDF byte size must be > 100 bytes (got ${authorizedPdfDownload.length})`);
-    console.log(`✓ Authorized student PDF download verified with valid %PDF- binary structure (${authorizedPdfDownload.length} bytes).`);
+
+    const pdfDocument = await PDFDocument.load(Buffer.from(authorizedPdfDownload.base64, "base64"));
+    assert.ok(pdfDocument.getPageCount() >= 1, "Downloaded PDF must contain at least one valid page");
+    console.log(`✓ Authorized student PDF parsed successfully (${pdfDocument.getPageCount()} pages, ${authorizedPdfDownload.length} bytes).`);
 
     // 16c. Unenrolled User PDF Access Rejection
     const anonContext = await browser.newContext();
@@ -536,97 +551,195 @@ async function main() {
     assert.ok(startAttemptRes.status() === 200 || startAttemptRes.status() === 201, "Start attempt API returned success");
     console.log("✓ Assessment attempt started.");
 
-    // Select the known correct fixture option ("Yes, completely isolated")
-    const correctOptionBtn = studentPage.locator(
-      'button:has-text("Yes, completely isolated"), input[type="radio"], button[role="radio"]'
-    ).first();
-    await correctOptionBtn.waitFor({ state: "visible", timeout: 5000 });
-    await correctOptionBtn.click();
-    console.log("✓ Selected correct assessment option.");
+    // -----------------------------------------------------------------------
+    // Assessment lifecycle: Start -> Select -> Save -> Reload -> Resume
+    // -> Submit -> Result -> History
+    // -----------------------------------------------------------------------
 
-    // Save progress with strict PATCH method and URL filter
-    const saveProgressBtn = studentPage.locator('button:has-text("Save Progress")');
-    await saveProgressBtn.waitFor({ state: "visible", timeout: 5000 });
+    const expectedOptionId = String(
+      fixture.correctOptionId
+    );
+
+    assert.ok(
+      expectedOptionId !== "undefined" &&
+      expectedOptionId !== "null",
+      "Fixture must provide correctOptionId."
+    );
+
+    // 1. Select correct answer.
+    const correctOptionButton = studentPage.locator(
+      `button[data-option-id="${expectedOptionId}"]`
+    );
+
+    await correctOptionButton.waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
+
+    await correctOptionButton.click();
+
+    assert.equal(
+      await correctOptionButton.getAttribute("aria-pressed"),
+      "true",
+      "Selected answer must be marked as selected."
+    );
+
+    // 2. Save progress.
+    const saveProgressButton = studentPage.locator(
+      'button:has-text("Save Progress")'
+    );
+
+    await saveProgressButton.waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
+
     const saveProgressPromise = studentPage.waitForResponse(
-      (resp) =>
-        resp.request().method() === "PATCH" &&
-        resp.url().includes(`/exercises/${fixture.exerciseId}/attempts/current`) &&
-        resp.status() === 200
+      (response) => {
+        const pathname = new URL(response.url()).pathname;
+
+        return (
+          response.request().method() === "PATCH" &&
+          pathname.endsWith(
+            `/exercises/${fixture.exerciseId}/attempts/current`
+          ) &&
+          response.status() === 200
+        );
+      },
+      { timeout: 15000 }
     );
-    await saveProgressBtn.click();
-    const saveProgressRes = await saveProgressPromise;
-    assert.equal(saveProgressRes.status(), 200, "Save progress PATCH returned HTTP 200");
-    const saveProgressJson = await saveProgressRes.json();
-    const savePayload = saveProgressJson.data ?? saveProgressJson;
+
+    await saveProgressButton.click();
+
+    const saveResponse = await saveProgressPromise;
+
+    assert.equal(
+      saveResponse.status(),
+      200
+    );
+
+    const saveJson = await saveResponse.json();
+
+    const savePayload = saveJson.data ?? saveJson;
+
     assert.ok(
-      savePayload.answers && savePayload.answers.length > 0,
-      "Saved answer must be returned in attempt payload"
+      Array.isArray(savePayload.answers) &&
+      savePayload.answers.length > 0,
+      "Backend must return saved attempt answers."
     );
-    console.log("✓ Saved attempt progress verified via PATCH response payload.");
 
-    // Reload page and verify active attempt and selected answer are resumed across reload
-    const selectedOption = studentPage.locator(
-      'input[type="radio"]:checked'
-  );
-  
-  await selectedOption.waitFor({
-      state: "attached",
-      timeout: 10000
-  });
-  
-  const restoredOptionId = await selectedOption.getAttribute(
-      "value"
-  );
-  
-  assert.equal(
-      restoredOptionId,
-      String(fixture.correctOptionId),
-      "Previously saved answer must be restored after reload"
-  );;
+    // 3. Reload the actual browser page.
+    // This is required to prove persistence, not local React state.
+    await studentPage.reload({
+      waitUntil: "networkidle",
+    });
 
-    // Submit assessment
+    // 4. Wait until the same answer is restored.
+    const restoredOptionButton = studentPage.locator(
+      `button[data-option-id="${expectedOptionId}"]`
+    );
+
+    await restoredOptionButton.waitFor({
+      state: "visible",
+      timeout: 15000,
+    });
+
+    await studentPage.waitForFunction(
+      (optionId) => {
+        const button = document.querySelector(
+          `button[data-option-id="${optionId}"]`
+        );
+
+        return button?.getAttribute("aria-pressed") === "true";
+      },
+      expectedOptionId,
+      {
+        timeout: 15000,
+      }
+    );
+
+    assert.equal(
+      await restoredOptionButton.getAttribute("aria-pressed"),
+      "true",
+      "The same answer must be restored from the persisted attempt after reload."
+    );
+
+    // 5. Submit attempt.
+    const submitButton = studentPage.locator(
+      'button:has-text("Submit Assessment")'
+    );
+
+    await submitButton.waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
+
     const submitPromise = studentPage.waitForResponse(
-      (resp) => resp.url().includes("/submit") && resp.status() === 200
-    );
-    await submitBtn.click();
-    const submitRes = await submitPromise;
-    assert.equal(submitRes.status(), 200, "Assessment submit returned HTTP 200");
-    console.log("✓ Assessment submitted successfully.");
+      (response) => {
+        const pathname = new URL(response.url()).pathname;
 
-    // Verify Passed result and 100% score displayed in DOM
-    await studentPage.waitForSelector('text=Passed, text=PASSED, text=Assessment Passed', { timeout: 10000 });
-    const postSubmitText = await studentPage.locator("main").innerText();
+        return (
+          response.request().method() === "POST" &&
+          pathname.endsWith("/attempts/current/submit") &&
+          response.status() === 200
+        );
+      },
+      { timeout: 15000 }
+    );
+
+    await submitButton.click();
+
+    const submitResponse = await submitPromise;
+
+    assert.equal(
+      submitResponse.status(),
+      200,
+      "Assessment submission must return HTTP 200."
+    );
+
+    // 6. Verify result.
+    await studentPage.waitForSelector(
+      'text=Passed, text=PASSED, text=Assessment Passed',
+      { timeout: 15000 }
+    );
+
+    const resultText = await studentPage.locator("main").innerText();
+
     assert.ok(
-      postSubmitText.includes("100%") || postSubmitText.includes("10 / 10"),
-      "100% score displayed in student assessment view"
+      resultText.includes("100%") ||
+      resultText.includes("10 / 10"),
+      "Correct answer must produce the expected 100% result."
     );
-    console.log("✓ Passed status and 100% score verified in DOM.");
 
-    // Open attempt history and verify Attempt #1 is displayed
-    const viewHistoryBtn = studentPage.locator(
+    // 7. Attempt History must be accessible and functional.
+    const historyButton = studentPage.locator(
       'button:has-text("View Attempt History")'
-  );
-  
-  await viewHistoryBtn.waitFor({
+    );
+
+    await historyButton.waitFor({
       state: "visible",
-      timeout: 10000
-  });
-  
-  await viewHistoryBtn.click();
-  
-  const historyEntry = studentPage.getByText(
+      timeout: 10000,
+    });
+
+    await historyButton.click();
+
+    const historyEntry = studentPage.getByText(
       /Attempt\s*#?\s*1/
-  );
-  
-  await historyEntry.waitFor({
+    );
+
+    await historyEntry.waitFor({
       state: "visible",
-      timeout: 10000
-  });
-  
-  assert.ok(
+      timeout: 10000,
+    });
+
+    assert.ok(
       await historyEntry.isVisible(),
-      "Completed attempt #1 must be visible in attempt history"
-  );
+      "Completed Attempt #1 must appear in history."
+    );
+
+    console.log(
+      "✓ Assessment lifecycle fully verified: Save, Reload, Resume, Submit, Result and History."
+    );
     // -----------------------------------------------------------------------
     // ASSERTION 17: Administrative Controls are Inaccessible to Students
     // -----------------------------------------------------------------------

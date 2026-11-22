@@ -4,6 +4,7 @@ namespace Tests\Unit;
 
 use App\Models\Center;
 use App\Models\CenterUser;
+use App\Models\Exercise;
 use App\Models\Lesson;
 use App\Models\LevelTemplate;
 use App\Models\User;
@@ -39,6 +40,7 @@ class E2EFixtureManagerTest extends TestCase
         $this->assertArrayHasKey('exerciseId', $fixture);
         $this->assertArrayHasKey('adminEmail', $fixture);
         $this->assertArrayHasKey('studentEmail', $fixture);
+        $this->assertArrayHasKey('correctOptionId', $fixture);
 
         $this->assertDatabaseHas('centers', ['id' => $fixture['centerId']]);
         $this->assertDatabaseHas('users', ['id' => $fixture['adminUserId']]);
@@ -65,45 +67,159 @@ class E2EFixtureManagerTest extends TestCase
     {
         Storage::fake('private');
 
-        $initialCenters = DB::table('centers')->count();
-        $initialUsers = DB::table('users')->count();
-        $initialMemberships = DB::table('center_user')->count();
-        $initialCourses = DB::table('courses')->count();
-        $initialModules = DB::table('course_modules')->count();
-        $initialLessons = DB::table('lessons')->count();
-        $initialAssets = DB::table('lesson_assets')->count();
-        $initialExercises = DB::table('exercises')->count();
+        $tables = [
+            'centers',
+            'users',
+            'center_user',
+            'courses',
+            'course_modules',
+            'lessons',
+            'lesson_assets',
+            'exercises',
+            'questions',
+            'question_options',
+        ];
 
-        // Inject a controlled failure during real Lesson creation inside E2EFixtureManager::setup()
-        Lesson::saving(function ($lesson) {
-            if (str_starts_with($lesson->title, 'E2E Lesson')) {
-                throw new \RuntimeException('Controlled failure during Lesson creation');
-            }
-        });
+        $before = [];
 
-        try {
-            E2EFixtureManager::setup();
-            $this->fail('Expected RuntimeException was not thrown by E2EFixtureManager::setup()');
-        } catch (\RuntimeException $e) {
-            $this->assertSame('Controlled failure during Lesson creation', $e->getMessage());
-        } finally {
-            // Unregister the model event dispatcher callback to avoid contaminating subsequent tests
-            Lesson::flushEventListeners();
+        foreach ($tables as $table) {
+            $before[$table] = DB::table($table)->count();
         }
 
-        // Verify complete transactional rollback: Every table count remains completely unchanged
-        $this->assertSame($initialCenters, DB::table('centers')->count(), 'Centers must roll back');
-        $this->assertSame($initialUsers, DB::table('users')->count(), 'Users must roll back');
-        $this->assertSame($initialMemberships, DB::table('center_user')->count(), 'Memberships must roll back');
-        $this->assertSame($initialCourses, DB::table('courses')->count(), 'Courses must roll back');
-        $this->assertSame($initialModules, DB::table('course_modules')->count(), 'Modules must roll back');
-        $this->assertSame($initialLessons, DB::table('lessons')->count(), 'Lessons must roll back');
-        $this->assertSame($initialAssets, DB::table('lesson_assets')->count(), 'Assets must roll back');
-        $this->assertSame($initialExercises, DB::table('exercises')->count(), 'Exercises must roll back');
+        $originalDispatcher = Lesson::getEventDispatcher();
+
+        Lesson::setEventDispatcher(
+            clone $originalDispatcher
+        );
+
+        try {
+            Lesson::saving(function (Lesson $lesson): void {
+                if (
+                    str_starts_with(
+                        (string) $lesson->title,
+                        'E2E Lesson'
+                    )
+                ) {
+                    throw new \RuntimeException(
+                        'Controlled failure during Lesson creation.'
+                    );
+                }
+            });
+
+            try {
+                E2EFixtureManager::setup();
+
+                $this->fail(
+                    'Expected E2EFixtureManager::setup() to fail.'
+                );
+            } catch (\RuntimeException $exception) {
+                $this->assertSame(
+                    'Controlled failure during Lesson creation.',
+                    $exception->getMessage()
+                );
+            }
+        } finally {
+            Lesson::setEventDispatcher(
+                $originalDispatcher
+            );
+        }
+
+        foreach ($tables as $table) {
+            $this->assertSame(
+                $before[$table],
+                DB::table($table)->count(),
+                "Table {$table} must be unchanged after failed fixture setup."
+            );
+        }
+
+        $this->assertSame(
+            [],
+            Storage::disk('private')->allFiles('e2e_fixtures/centers')
+        );
     }
 
     /**
-     * Test 3: Successful teardown deletes all fixture records in foreign-key order and removes storage files.
+     * Test 3: Failed setup removes physical storage files if failure happens after files are created.
+     */
+    public function test_failed_setup_removes_storage_files_after_late_failure(): void
+    {
+        Storage::fake('private');
+
+        $tables = [
+            'centers',
+            'users',
+            'center_user',
+            'courses',
+            'course_modules',
+            'lessons',
+            'lesson_assets',
+            'exercises',
+            'questions',
+            'question_options',
+        ];
+
+        $beforeCounts = [];
+
+        foreach ($tables as $table) {
+            $beforeCounts[$table] = DB::table($table)->count();
+        }
+
+        $beforeFiles = Storage::disk('private')
+            ->allFiles('e2e_fixtures/centers');
+
+        $originalDispatcher = Exercise::getEventDispatcher();
+
+        Exercise::setEventDispatcher(
+            clone $originalDispatcher
+        );
+
+        try {
+            Exercise::creating(function (Exercise $exercise): void {
+                if ($exercise->title === 'E2E Assessment Quiz') {
+                    throw new \RuntimeException(
+                        'Injected failure after storage creation.'
+                    );
+                }
+            });
+
+            try {
+                E2EFixtureManager::setup();
+
+                $this->fail(
+                    'Expected setup to fail after physical storage creation.'
+                );
+            } catch (\RuntimeException $exception) {
+                $this->assertSame(
+                    'Injected failure after storage creation.',
+                    $exception->getMessage()
+                );
+            }
+        } finally {
+            Exercise::setEventDispatcher(
+                $originalDispatcher
+            );
+        }
+
+        foreach ($tables as $table) {
+            $this->assertSame(
+                $beforeCounts[$table],
+                DB::table($table)->count(),
+                "Database table {$table} must roll back completely."
+            );
+        }
+
+        $afterFiles = Storage::disk('private')
+            ->allFiles('e2e_fixtures/centers');
+
+        $this->assertSame(
+            $beforeFiles,
+            $afterFiles,
+            'Failed fixture setup must remove its physical storage files.'
+        );
+    }
+
+    /**
+     * Test 4: Successful teardown deletes all fixture records in foreign-key order and removes storage files.
      */
     public function test_successful_teardown(): void
     {
@@ -133,55 +249,80 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 4: Teardown transaction failure preserves storage files (files are deleted only after commit).
+     * Test 5: Teardown transaction failure preserves storage files (files are deleted only after commit).
      */
     public function test_teardown_transaction_failure_preserves_storage_files(): void
     {
         Storage::fake('private');
 
         $fixture = E2EFixtureManager::setup();
+
         $centerId = $fixture['centerId'];
         $imageKey = $fixture['imageStorageKey'];
         $pdfKey = $fixture['pdfStorageKey'];
 
-        // Inject failure during Center::delete() inside teardown's DB::transaction
         $originalDispatcher = Center::getEventDispatcher();
 
-        Center::setEventDispatcher(clone $originalDispatcher);
-        
+        Center::setEventDispatcher(
+            clone $originalDispatcher
+        );
+
         try {
-            Center::deleting(function ($center) use ($centerId) {
+            Center::deleting(function ($center) use ($centerId): void {
                 if ((int) $center->id === (int) $centerId) {
-                    throw new RuntimeException(
-                        'Simulated database error during teardown transaction'
+                    throw new \RuntimeException(
+                        'Simulated database error during teardown transaction.'
                     );
                 }
             });
-        
-            E2EFixtureManager::teardown($centerId);
-        
-            $this->fail('Expected teardown failure.');
-        } catch (RuntimeException $e) {
-            $this->assertSame(
-                'Simulated database error during teardown transaction',
-                $e->getMessage()
-            );
+
+            try {
+                E2EFixtureManager::teardown($centerId);
+
+                $this->fail(
+                    'Expected teardown transaction failure.'
+                );
+            } catch (\RuntimeException $exception) {
+                $this->assertSame(
+                    'Simulated database error during teardown transaction.',
+                    $exception->getMessage()
+                );
+            }
         } finally {
-            Center::setEventDispatcher($originalDispatcher);
+            Center::setEventDispatcher(
+                $originalDispatcher
+            );
         }
 
-        // Storage files must still exist because DB transaction rolled back before file deletion
+        // Database transaction must have rolled back.
+        $this->assertDatabaseHas('centers', [
+            'id' => $centerId,
+        ]);
+
+        $this->assertDatabaseHas('lesson_assets', [
+            'id' => $fixture['imageAssetId'],
+        ]);
+
+        // Files must still exist because DB deletion failed.
         Storage::disk('private')->assertExists($imageKey);
         Storage::disk('private')->assertExists($pdfKey);
 
-        // Subsequent clean teardown deletes them successfully
+        // Retry must now work.
         E2EFixtureManager::teardown($centerId);
+
+        $this->assertDatabaseMissing('centers', [
+            'id' => $centerId,
+        ]);
+
         Storage::disk('private')->assertMissing($imageKey);
         Storage::disk('private')->assertMissing($pdfKey);
+
+        // A further retry must also be safe.
+        E2EFixtureManager::teardown($centerId);
     }
 
     /**
-     * Test 5: Global level_templates are preserved and unchanged across fixture setup and teardown.
+     * Test 6: Global level_templates are preserved and unchanged across fixture setup and teardown.
      */
     public function test_global_level_templates_preserved_across_setup_and_teardown(): void
     {
@@ -215,7 +356,7 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 5: Repeated teardown is idempotent.
+     * Test 7: Repeated teardown is idempotent.
      */
     public function test_repeated_teardown_is_idempotent(): void
     {
@@ -232,7 +373,7 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 6: Rejection of real / ordinary center ID.
+     * Test 8: Rejection of real / ordinary center ID.
      */
     public function test_rejection_of_real_center_id(): void
     {
@@ -257,7 +398,7 @@ class E2EFixtureManagerTest extends TestCase
     }
 
     /**
-     * Test 7: Preservation of unrelated users and centers.
+     * Test 9: Preservation of unrelated users and centers.
      */
     public function test_preservation_of_unrelated_users_and_centers(): void
     {

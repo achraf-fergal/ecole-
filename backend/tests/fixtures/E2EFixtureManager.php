@@ -38,292 +38,687 @@ class E2EFixtureManager
         }
     }
 
-    /**
-     * Create an isolated E2E test fixture inside a single transaction.
-     * Records all created IDs and rolls back atomically on any failure.
-     */
     public static function setup(): array
     {
         self::bootstrap();
 
-        return DB::transaction(function (): array {
-            $uniq = 'e2e_'.Str::lower(Str::random(10));
+        $createdStorageFiles = [];
 
-            // 1. Create Center with unmistakable E2E prefix
-            $center = Center::create([
-                'name' => self::FIXTURE_NAME_PREFIX.$uniq,
-                'slug' => self::FIXTURE_SLUG_PREFIX.$uniq,
-                'status' => 'active',
-                'timezone' => 'UTC',
-                'default_locale' => 'en',
-            ]);
+        try {
+            return DB::transaction(function () use (
+                &$createdStorageFiles
+            ): array {
+                $uniq = 'e2e_'.Str::lower(Str::random(10));
 
-            // 2. Create Admin User with unmistakable E2E email
-            $adminPassword = 'Password123!@#';
-            $admin = User::create([
-                'name' => 'E2E Admin',
-                'email' => 'admin_'.$uniq.'@example.test',
-                'password' => $adminPassword,
-                'status' => User::STATUS_ACTIVE,
-                'token_version' => 1,
-            ]);
-            $admin->email_verified_at = now();
-            $admin->save();
-
-            $adminMembership = CenterUser::create([
-                'center_id' => $center->id,
-                'user_id' => $admin->id,
-                'status' => 'active',
-            ]);
-
-            $adminRole = Role::query()->where('key', 'center_admin')->first();
-            if (! $adminRole) {
-                $adminRole = Role::firstOrCreate(['key' => 'center_admin'], ['name' => 'Center Admin']);
-            }
-            $adminMembership->roles()->syncWithoutDetaching([$adminRole->id]);
-
-            // 3. Create Student User with unmistakable E2E email
-            $studentPassword = 'Password123!@#';
-            $student = User::create([
-                'name' => 'E2E Student',
-                'email' => 'student_'.$uniq.'@example.test',
-                'password' => $studentPassword,
-                'status' => User::STATUS_ACTIVE,
-                'token_version' => 1,
-            ]);
-            $student->email_verified_at = now();
-            $student->save();
-
-            $studentMembership = CenterUser::create([
-                'center_id' => $center->id,
-                'user_id' => $student->id,
-                'status' => 'active',
-            ]);
-
-            $studentRole = Role::query()->where('key', 'student')->first();
-            if (! $studentRole) {
-                $studentRole = Role::firstOrCreate(['key' => 'student'], ['name' => 'Student']);
-            }
-            $studentMembership->roles()->syncWithoutDetaching([$studentRole->id]);
-
-            $studentProfile = StudentProfile::factory()->forMembership($studentMembership)->create([
-                'status' => StudentProfile::STATUS_ACTIVE,
-            ]);
-
-            // 4. Create Course, Module, Lesson
-            $course = Course::factory()
-                ->forCenter($center)
-                ->published()
-                ->create([
-                    'title' => 'E2E Course '.$uniq,
-                    'slug' => 'course-'.$uniq,
-                    'status' => 'published',
+                // 1. Create Center
+                $center = Center::create([
+                    'name' => self::FIXTURE_NAME_PREFIX.$uniq,
+                    'slug' => self::FIXTURE_SLUG_PREFIX.$uniq,
+                    'status' => 'active',
+                    'timezone' => 'UTC',
+                    'default_locale' => 'en',
                 ]);
 
-            $module = CourseModule::factory()
-                ->forCourse($course)
-                ->published()
-                ->create([
-                    'title' => 'Module 1',
-                    'sort_order' => 1,
-                    'status' => CourseModule::STATUS_PUBLISHED,
+                // 2. Create Admin
+                $adminPassword = 'Password123!@#';
+
+                $admin = User::create([
+                    'name' => 'E2E Admin',
+                    'email' => 'admin_'.$uniq.'@example.test',
+                    'password' => $adminPassword,
+                    'status' => User::STATUS_ACTIVE,
+                    'token_version' => 1,
                 ]);
 
-            $lesson = Lesson::factory()
-                ->forModule($module)
-                ->create([
-                    'title' => 'E2E Lesson '.$uniq,
-                    'content_locale' => 'en',
-                    'status' => Lesson::STATUS_DRAFT,
-                ]);
+                $admin->email_verified_at = now();
+                $admin->save();
 
-            // 5. Create Cohort & Student Enrollment
-            $cohort = Cohort::factory()->forCourse($course)->inProgress()->create([
-                'center_id' => $center->id,
-                'name' => 'Cohort '.$uniq,
-                'starts_at' => now()->subDays(2),
-                'ends_at' => now()->addMonths(2),
-                'status' => Cohort::STATUS_OPEN,
-            ]);
-
-            $enrollment = Enrollment::factory()
-                ->forStudentProfile($studentProfile)
-                ->forCohort($cohort)
-                ->create([
+                $adminMembership = CenterUser::create([
                     'center_id' => $center->id,
-                    'start_at' => now()->subDay(),
-                    'end_at' => now()->addMonth(),
+                    'user_id' => $admin->id,
                     'status' => 'active',
                 ]);
 
-            // 6. Pre-create active LessonAssets (Image and PDF) with real files in isolated storage
-            $imageKey = 'e2e_fixtures/centers/'.$center->id.'/diagram.png';
-            $imageBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==');
-            Storage::disk('private')->put($imageKey, $imageBytes);
+                $adminRole = Role::query()
+                    ->where('key', 'center_admin')
+                    ->first();
 
-            $imageAsset = LessonAsset::create([
-                'center_id' => $center->id,
-                'lesson_id' => $lesson->id,
-                'title' => 'E2E Diagram Asset',
-                'asset_type' => LessonAsset::TYPE_IMAGE,
-                'storage_disk' => 'private',
-                'storage_key' => $imageKey,
-                'original_filename' => 'diagram.png',
-                'mime_type' => 'image/png',
-                'size_bytes' => strlen($imageBytes),
-                'status' => LessonAsset::STATUS_ACTIVE,
-            ]);
+                if (! $adminRole) {
+                    $adminRole = Role::firstOrCreate(
+                        ['key' => 'center_admin'],
+                        ['name' => 'Center Admin']
+                    );
+                }
 
-            $pdfKey = 'e2e_fixtures/centers/'.$center->id.'/handout.pdf';
-            $pdfBytes = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000108 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF";
-            Storage::disk('private')->put($pdfKey, $pdfBytes);
+                $adminMembership->roles()
+                    ->syncWithoutDetaching([$adminRole->id]);
 
-            $pdfAsset = LessonAsset::create([
-                'center_id' => $center->id,
-                'lesson_id' => $lesson->id,
-                'title' => 'E2E Study Guide PDF',
-                'asset_type' => LessonAsset::TYPE_FILE,
-                'storage_disk' => 'private',
-                'storage_key' => $pdfKey,
-                'original_filename' => 'handout.pdf',
-                'mime_type' => 'application/pdf',
-                'size_bytes' => strlen($pdfBytes),
-                'status' => LessonAsset::STATUS_ACTIVE,
-            ]);
+                // 3. Create Student
+                $studentPassword = 'Password123!@#';
 
-            // 7. Pre-create an active Exercise for exercise block testing
-            $exercise = Exercise::create([
-                'center_id' => $center->id,
-                'lesson_id' => $lesson->id,
-                'title' => 'E2E Assessment Quiz',
-                'instructions' => 'Choose the correct answer.',
-                'status' => Exercise::STATUS_PUBLISHED,
-                'published_at' => now(),
-            ]);
+                $student = User::create([
+                    'name' => 'E2E Student',
+                    'email' => 'student_'.$uniq.'@example.test',
+                    'password' => $studentPassword,
+                    'status' => User::STATUS_ACTIVE,
+                    'token_version' => 1,
+                ]);
 
-            $question = Question::create([
-                'center_id' => $center->id,
-                'exercise_id' => $exercise->id,
-                'question_type' => Question::TYPE_SINGLE_CHOICE,
-                'prompt' => 'Is this E2E test running against isolated fixtures?',
-                'points' => 10,
-                'sort_order' => 1,
-            ]);
+                $student->email_verified_at = now();
+                $student->save();
 
-            $opt1 = QuestionOption::create([
-                'center_id' => $center->id,
-                'question_id' => $question->id,
-                'option_text' => 'Yes, completely isolated',
-                'is_correct' => true,
-                'sort_order' => 1,
-            ]);
+                $studentMembership = CenterUser::create([
+                    'center_id' => $center->id,
+                    'user_id' => $student->id,
+                    'status' => 'active',
+                ]);
 
-            $opt2 = QuestionOption::create([
-                'center_id' => $center->id,
-                'question_id' => $question->id,
-                'option_text' => 'No',
-                'is_correct' => false,
-                'sort_order' => 2,
-            ]);
+                $studentRole = Role::query()
+                    ->where('key', 'student')
+                    ->first();
 
-            return [
-                'uniq' => $uniq,
-                'centerId' => $center->id,
-                'centerSlug' => $center->slug,
-                'courseId' => $course->id,
-                'courseSlug' => $course->slug,
-                'moduleId' => $module->id,
-                'lessonId' => $lesson->id,
-                'cohortId' => $cohort->id,
-                'enrollmentId' => $enrollment->id,
-                'assetId' => $imageAsset->id,
-                'imageAssetId' => $imageAsset->id,
-                'imageStorageKey' => $imageKey,
-                'imageDisk' => 'private',
-                'pdfAssetId' => $pdfAsset->id,
-                'pdfStorageKey' => $pdfKey,
-                'pdfDisk' => 'private',
-                'exerciseId' => $exercise->id,
-                'questionId' => $question->id,
-                'optionIds' => [$opt1->id, $opt2->id],
-                'adminUserId' => $admin->id,
-                'adminEmail' => $admin->email,
-                'adminPassword' => $adminPassword,
-                'studentUserId' => $student->id,
-                'studentEmail' => $student->email,
-                'studentPassword' => $studentPassword,
-            ];
-        });
+                if (! $studentRole) {
+                    $studentRole = Role::firstOrCreate(
+                        ['key' => 'student'],
+                        ['name' => 'Student']
+                    );
+                }
+
+                $studentMembership->roles()
+                    ->syncWithoutDetaching([$studentRole->id]);
+
+                $studentProfile = StudentProfile::factory()
+                    ->forMembership($studentMembership)
+                    ->create([
+                        'status' => StudentProfile::STATUS_ACTIVE,
+                    ]);
+
+                // 4. Create Course, Module and Lesson
+                $course = Course::factory()
+                    ->forCenter($center)
+                    ->published()
+                    ->create([
+                        'title' => 'E2E Course '.$uniq,
+                        'slug' => 'course-'.$uniq,
+                        'status' => 'published',
+                    ]);
+
+                $module = CourseModule::factory()
+                    ->forCourse($course)
+                    ->published()
+                    ->create([
+                        'title' => 'Module 1',
+                        'sort_order' => 1,
+                        'status' => CourseModule::STATUS_PUBLISHED,
+                    ]);
+
+                $lesson = Lesson::factory()
+                    ->forModule($module)
+                    ->create([
+                        'title' => 'E2E Lesson '.$uniq,
+                        'content_locale' => 'en',
+                        'status' => Lesson::STATUS_DRAFT,
+                    ]);
+
+                // 5. Cohort and Enrollment
+                $cohort = Cohort::factory()
+                    ->forCourse($course)
+                    ->inProgress()
+                    ->create([
+                        'center_id' => $center->id,
+                        'name' => 'Cohort '.$uniq,
+                        'starts_at' => now()->subDays(2),
+                        'ends_at' => now()->addMonths(2),
+                        'status' => Cohort::STATUS_OPEN,
+                    ]);
+
+                $enrollment = Enrollment::factory()
+                    ->forStudentProfile($studentProfile)
+                    ->forCohort($cohort)
+                    ->create([
+                        'center_id' => $center->id,
+                        'start_at' => now()->subDay(),
+                        'end_at' => now()->addMonth(),
+                        'status' => 'active',
+                    ]);
+
+                // 6. Image fixture
+                $storageRoot = 'e2e_fixtures/centers/'.$center->id;
+
+                $imageKey = $storageRoot.'/diagram.png';
+
+                $imageBytes = base64_decode(
+                    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+                    true
+                );
+
+                if ($imageBytes === false) {
+                    throw new \RuntimeException(
+                        'Failed to decode E2E image fixture.'
+                    );
+                }
+
+                // Register before writing so partial writes can be compensated.
+                $createdStorageFiles[] = [
+                    'disk' => 'private',
+                    'key' => $imageKey,
+                ];
+
+                if (! Storage::disk('private')->put($imageKey, $imageBytes)) {
+                    throw new \RuntimeException(
+                        'Failed to write E2E image fixture.'
+                    );
+                }
+
+                $imageAsset = LessonAsset::create([
+                    'center_id' => $center->id,
+                    'lesson_id' => $lesson->id,
+                    'title' => 'E2E Diagram Asset',
+                    'asset_type' => LessonAsset::TYPE_IMAGE,
+                    'storage_disk' => 'private',
+                    'storage_key' => $imageKey,
+                    'original_filename' => 'diagram.png',
+                    'mime_type' => 'image/png',
+                    'size_bytes' => strlen($imageBytes),
+                    'status' => LessonAsset::STATUS_ACTIVE,
+                ]);
+
+                // 7. PDF fixture
+                $pdfKey = $storageRoot.'/handout.pdf';
+
+                $pdfBytes = "%PDF-1.4\n"
+                    ."1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                    ."2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
+                    ."3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\n"
+                    ."xref\n0 4\n"
+                    ."0000000000 65535 f \n"
+                    ."0000000009 00000 n \n"
+                    ."0000000052 00000 n \n"
+                    ."0000000108 00000 n \n"
+                    ."trailer<</Size 4/Root 1 0 R>>\n"
+                    ."startxref\n178\n%%EOF";
+
+                $createdStorageFiles[] = [
+                    'disk' => 'private',
+                    'key' => $pdfKey,
+                ];
+
+                if (! Storage::disk('private')->put($pdfKey, $pdfBytes)) {
+                    throw new \RuntimeException(
+                        'Failed to write E2E PDF fixture.'
+                    );
+                }
+
+                $pdfAsset = LessonAsset::create([
+                    'center_id' => $center->id,
+                    'lesson_id' => $lesson->id,
+                    'title' => 'E2E Study Guide PDF',
+                    'asset_type' => LessonAsset::TYPE_FILE,
+                    'storage_disk' => 'private',
+                    'storage_key' => $pdfKey,
+                    'original_filename' => 'handout.pdf',
+                    'mime_type' => 'application/pdf',
+                    'size_bytes' => strlen($pdfBytes),
+                    'status' => LessonAsset::STATUS_ACTIVE,
+                ]);
+
+                // 8. Exercise
+                $exercise = Exercise::create([
+                    'center_id' => $center->id,
+                    'lesson_id' => $lesson->id,
+                    'title' => 'E2E Assessment Quiz',
+                    'instructions' => 'Choose the correct answer.',
+                    'status' => Exercise::STATUS_PUBLISHED,
+                    'published_at' => now(),
+                ]);
+
+                $question = Question::create([
+                    'center_id' => $center->id,
+                    'exercise_id' => $exercise->id,
+                    'question_type' => Question::TYPE_SINGLE_CHOICE,
+                    'prompt' => 'Is this E2E test running against isolated fixtures?',
+                    'points' => 10,
+                    'sort_order' => 1,
+                ]);
+
+                $opt1 = QuestionOption::create([
+                    'center_id' => $center->id,
+                    'question_id' => $question->id,
+                    'option_text' => 'Yes, completely isolated',
+                    'is_correct' => true,
+                    'sort_order' => 1,
+                ]);
+
+                $opt2 = QuestionOption::create([
+                    'center_id' => $center->id,
+                    'question_id' => $question->id,
+                    'option_text' => 'No',
+                    'is_correct' => false,
+                    'sort_order' => 2,
+                ]);
+
+                return [
+                    'uniq' => $uniq,
+
+                    'centerId' => $center->id,
+                    'centerSlug' => $center->slug,
+
+                    'courseId' => $course->id,
+                    'courseSlug' => $course->slug,
+
+                    'moduleId' => $module->id,
+                    'lessonId' => $lesson->id,
+
+                    'cohortId' => $cohort->id,
+                    'enrollmentId' => $enrollment->id,
+
+                    'assetId' => $imageAsset->id,
+                    'imageAssetId' => $imageAsset->id,
+                    'imageStorageKey' => $imageKey,
+                    'imageDisk' => 'private',
+
+                    'pdfAssetId' => $pdfAsset->id,
+                    'pdfStorageKey' => $pdfKey,
+                    'pdfDisk' => 'private',
+
+                    'exerciseId' => $exercise->id,
+                    'questionId' => $question->id,
+
+                    'optionIds' => [$opt1->id, $opt2->id],
+
+                    // Explicit values for reliable browser assertions.
+                    'correctOptionId' => $opt1->id,
+                    'incorrectOptionId' => $opt2->id,
+
+                    'adminUserId' => $admin->id,
+                    'adminEmail' => $admin->email,
+                    'adminPassword' => $adminPassword,
+
+                    'studentUserId' => $student->id,
+                    'studentEmail' => $student->email,
+                    'studentPassword' => $studentPassword,
+                ];
+            });
+        } catch (\Throwable $setupError) {
+            // Database transaction has already rolled back.
+            // Compensate external Storage writes explicitly.
+            $cleanupFailures = [];
+
+            foreach (array_reverse($createdStorageFiles) as $file) {
+                try {
+                    $disk = Storage::disk($file['disk']);
+
+                    if (
+                        $disk->exists($file['key']) &&
+                        ! $disk->delete($file['key'])
+                    ) {
+                        $cleanupFailures[] = $file['key'];
+                    }
+
+                    if ($disk->exists($file['key'])) {
+                        $cleanupFailures[] = $file['key'];
+                    }
+                } catch (\Throwable $cleanupError) {
+                    $cleanupFailures[] = $file['key'];
+                }
+            }
+
+            if ($cleanupFailures !== []) {
+                throw new \RuntimeException(
+                    'E2E setup failed and Storage compensation was incomplete: '
+                    .implode(', ', array_unique($cleanupFailures)),
+                    0,
+                    $setupError
+                );
+            }
+
+            throw $setupError;
+        }
     }
 
-    /**
-     * Safely teardown an E2E fixture.
-     * Strictly restricted to centers created by this manager.
-     * Deletes in correct foreign-key order and ensures idempotence.
-     */
     public static function teardown(int $centerId): void
     {
         self::bootstrap();
-    
+
+        if ($centerId <= 0) {
+            throw new \InvalidArgumentException(
+                'Invalid E2E fixture center ID.'
+            );
+        }
+
+        $storageRoot = 'e2e_fixtures/centers/'.$centerId;
+
         $center = Center::query()
             ->whereKey($centerId)
             ->first();
-    
-        if (! $center) {
-            return;
+
+        if ($center) {
+            self::assertFixtureCenter($center);
+
+            DB::transaction(function () use (
+                $centerId,
+                $storageRoot
+            ): void {
+                $lockedCenter = Center::query()
+                    ->whereKey($centerId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                self::assertFixtureCenter($lockedCenter);
+
+                // Validate every stored asset before removing database rows.
+                $assets = DB::table('lesson_assets')
+                    ->where('center_id', $centerId)
+                    ->get([
+                        'storage_disk',
+                        'storage_key',
+                    ]);
+
+                foreach ($assets as $asset) {
+                    if (
+                        empty($asset->storage_disk) ||
+                        empty($asset->storage_key)
+                    ) {
+                        continue;
+                    }
+
+                    $expectedPrefix = $storageRoot.'/';
+
+                    if (
+                        $asset->storage_disk !== 'private' ||
+                        ! str_starts_with(
+                            $asset->storage_key,
+                            $expectedPrefix
+                        )
+                    ) {
+                        throw new \RuntimeException(
+                            'Unsafe Storage reference found in E2E fixture. '
+                            .'Cleanup was rejected.'
+                        );
+                    }
+                }
+
+                // Database cleanup only.
+                // Physical files are intentionally preserved until commit.
+                self::deleteFixtureRecords($lockedCenter);
+            });
         }
-    
-        self::assertFixtureCenter($center);
-    
-        $files = DB::transaction(function () use ($center) {
-            $lockedCenter = Center::query()
-                ->whereKey($center->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-    
-            self::assertFixtureCenter($lockedCenter);
-    
-            $assets = DB::table('lesson_assets')
-                ->where('center_id', $lockedCenter->id)
-                ->get(['storage_disk', 'storage_key']);
-    
-            // Register a durable cleanup manifest here.
-            // Do not delete asset records or center yet.
-    
-            return $assets;
-        });
-    
-        foreach ($files as $file) {
-            if (! $file->storage_disk || ! $file->storage_key) {
-                continue;
+
+        // This step also handles retries when the database center
+        // was removed by an earlier teardown, but file deletion failed.
+        $disk = Storage::disk('private');
+
+        $disk->deleteDirectory($storageRoot);
+
+        $remainingFiles = $disk->allFiles($storageRoot);
+
+        if ($remainingFiles !== []) {
+            throw new \RuntimeException(
+                'E2E Storage cleanup incomplete. Remaining files: '
+                .implode(', ', $remainingFiles)
+            );
+        }
+
+        // Verify database cleanup.
+        $remainingAssets = DB::table('lesson_assets')
+            ->where('center_id', $centerId)
+            ->count();
+
+        $remainingLessons = DB::table('lessons')
+            ->where('center_id', $centerId)
+            ->count();
+
+        $remainingCenters = DB::table('centers')
+            ->where('id', $centerId)
+            ->count();
+
+        if (
+            $remainingAssets !== 0 ||
+            $remainingLessons !== 0 ||
+            $remainingCenters !== 0
+        ) {
+            throw new \RuntimeException(
+                "E2E database cleanup incomplete for center {$centerId}."
+            );
+        }
+    }
+
+    /**
+     * Strictly verify E2E fixture ownership.
+     *
+     * A center must have:
+     * - The exact E2E name prefix.
+     * - The exact E2E slug prefix.
+     * - The same generated token in both values.
+     */
+    private static function assertFixtureCenter(Center $center): void
+    {
+        $name = (string) $center->name;
+        $slug = (string) $center->slug;
+
+        if (
+            ! str_starts_with($name, self::FIXTURE_NAME_PREFIX) ||
+            ! str_starts_with($slug, self::FIXTURE_SLUG_PREFIX)
+        ) {
+            throw new \InvalidArgumentException(
+                "SAFETY VIOLATION: Center {$center->id} is not an E2E fixture."
+            );
+        }
+
+        $nameToken = substr(
+            $name,
+            strlen(self::FIXTURE_NAME_PREFIX)
+        );
+
+        $slugToken = substr(
+            $slug,
+            strlen(self::FIXTURE_SLUG_PREFIX)
+        );
+
+        if (
+            $nameToken === '' ||
+            $slugToken === '' ||
+            $nameToken !== $slugToken ||
+            ! preg_match('/\Ae2e_[a-z0-9]+\z/i', $slugToken)
+        ) {
+            throw new \InvalidArgumentException(
+                "SAFETY VIOLATION: Center {$center->id} has an invalid fixture identity."
+            );
+        }
+    }
+
+    /**
+     * Delete E2E database records in foreign-key-safe order.
+     *
+     * This method must run inside the caller's DB transaction.
+     */
+    private static function deleteFixtureRecords(Center $center): void
+    {
+        $centerId = $center->id;
+
+        // 1. Assessment answers and attempts.
+        DB::table('exercise_attempt_answers')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('exercise_attempts')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // 2. Student lesson progress.
+        DB::table('lesson_progresses')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // 3. Cohorts and enrollments.
+        $cohortIds = DB::table('cohorts')
+            ->where('center_id', $centerId)
+            ->pluck('id');
+
+        if ($cohortIds->isNotEmpty()) {
+            DB::table('cohort_schedules')
+                ->whereIn('cohort_id', $cohortIds)
+                ->delete();
+        }
+
+        DB::table('enrollments')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('cohorts')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('student_profiles')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // 4. Clear circular revision pointers.
+        DB::table('lessons')
+            ->where('center_id', $centerId)
+            ->update([
+                'draft_revision_id' => null,
+                'published_revision_id' => null,
+            ]);
+
+        // 5. Content blocks and revisions.
+        DB::table('lesson_blocks')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('lesson_revisions')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // Only DB rows are deleted here.
+        // Actual files are removed after the database commit.
+        DB::table('lesson_assets')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // 6. Exercises, questions and options.
+        $exerciseIds = DB::table('exercises')
+            ->where('center_id', $centerId)
+            ->pluck('id');
+
+        if ($exerciseIds->isNotEmpty()) {
+            $questionIds = DB::table('questions')
+                ->whereIn('exercise_id', $exerciseIds)
+                ->pluck('id');
+
+            if ($questionIds->isNotEmpty()) {
+                DB::table('question_options')
+                    ->whereIn('question_id', $questionIds)
+                    ->delete();
+
+                DB::table('questions')
+                    ->whereIn('id', $questionIds)
+                    ->delete();
             }
-    
-            $disk = Storage::disk($file->storage_disk);
-    
-            if ($disk->exists($file->storage_key)) {
-                if (! $disk->delete($file->storage_key)) {
-                    throw new RuntimeException(
-                        "Failed to delete fixture asset: {$file->storage_key}"
-                    );
+
+            DB::table('exercises')
+                ->where('center_id', $centerId)
+                ->delete();
+        }
+
+        // 7. Lessons and course structure.
+        DB::table('lessons')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('course_modules')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        $courseIds = DB::table('courses')
+            ->where('center_id', $centerId)
+            ->pluck('id');
+
+        if ($courseIds->isNotEmpty()) {
+            DB::table('course_outcomes')
+                ->whereIn('course_id', $courseIds)
+                ->delete();
+
+            DB::table('course_translations')
+                ->whereIn('course_id', $courseIds)
+                ->delete();
+        }
+
+        DB::table('courses')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('languages')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        DB::table('levels')
+            ->where('center_id', $centerId)
+            ->delete();
+
+        // Global level_templates are deliberately preserved.
+
+        // 8. Memberships and fixture users.
+        $memberships = DB::table('center_user')
+            ->where('center_id', $centerId)
+            ->get();
+
+        $userIds = $memberships
+            ->pluck('user_id')
+            ->all();
+
+        $membershipIds = $memberships
+            ->pluck('id')
+            ->all();
+
+        if ($membershipIds !== []) {
+            DB::table('center_user_role')
+                ->whereIn('center_user_id', $membershipIds)
+                ->delete();
+
+            DB::table('center_user')
+                ->where('center_id', $centerId)
+                ->delete();
+        }
+
+        // 9. Delete only users matching the exact E2E token.
+        if ($userIds !== []) {
+            $fixtureToken = substr(
+                (string) $center->slug,
+                strlen(self::FIXTURE_SLUG_PREFIX)
+            );
+
+            $exactEmails = [
+                "admin_{$fixtureToken}@example.test",
+                "student_{$fixtureToken}@example.test",
+            ];
+
+            $fixtureUsers = DB::table('users')
+                ->whereIn('id', $userIds)
+                ->whereIn('email', $exactEmails)
+                ->get(['id']);
+
+            $userIdsToDelete = [];
+
+            foreach ($fixtureUsers as $fixtureUser) {
+                $hasOtherMemberships = DB::table('center_user')
+                    ->where('user_id', $fixtureUser->id)
+                    ->exists();
+
+                if (! $hasOtherMemberships) {
+                    $userIdsToDelete[] = $fixtureUser->id;
                 }
             }
-        }
-    
-        DB::transaction(function () use ($centerId) {
-            $lockedCenter = Center::query()
-                ->whereKey($centerId)
-                ->lockForUpdate()
-                ->first();
-    
-            if (! $lockedCenter) {
-                return;
+
+            if ($userIdsToDelete !== []) {
+                DB::table('users')
+                    ->whereIn('id', $userIdsToDelete)
+                    ->delete();
             }
-    
-            self::assertFixtureCenter($lockedCenter);
-    
-            // Execute the existing FK-safe database cleanup here.
-            self::deleteFixtureRecords($lockedCenter);
-        });
+        }
+
+        // 10. Delete center last.
+        $center->delete();
     }
 }
 
