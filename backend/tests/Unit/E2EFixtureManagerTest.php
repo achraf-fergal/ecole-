@@ -145,19 +145,29 @@ class E2EFixtureManagerTest extends TestCase
         $pdfKey = $fixture['pdfStorageKey'];
 
         // Inject failure during Center::delete() inside teardown's DB::transaction
-        Center::deleting(function ($center) use ($centerId) {
-            if ($center->id === $centerId) {
-                throw new \RuntimeException('Simulated database error during teardown transaction');
-            }
-        });
+        $originalDispatcher = Center::getEventDispatcher();
 
+        Center::setEventDispatcher(clone $originalDispatcher);
+        
         try {
+            Center::deleting(function ($center) use ($centerId) {
+                if ((int) $center->id === (int) $centerId) {
+                    throw new RuntimeException(
+                        'Simulated database error during teardown transaction'
+                    );
+                }
+            });
+        
             E2EFixtureManager::teardown($centerId);
-            $this->fail('Expected RuntimeException was not thrown');
-        } catch (\RuntimeException $e) {
-            $this->assertSame('Simulated database error during teardown transaction', $e->getMessage());
+        
+            $this->fail('Expected teardown failure.');
+        } catch (RuntimeException $e) {
+            $this->assertSame(
+                'Simulated database error during teardown transaction',
+                $e->getMessage()
+            );
         } finally {
-            Center::flushEventListeners();
+            Center::setEventDispatcher($originalDispatcher);
         }
 
         // Storage files must still exist because DB transaction rolled back before file deletion

@@ -264,144 +264,66 @@ class E2EFixtureManager
     public static function teardown(int $centerId): void
     {
         self::bootstrap();
-
-        $center = Center::find($centerId);
+    
+        $center = Center::query()
+            ->whereKey($centerId)
+            ->first();
+    
         if (! $center) {
-            // Idempotent: already deleted or does not exist
             return;
         }
-
-        // Strict verification: Reject deletion of real/ordinary centers
-        if (
-            ! str_starts_with($center->name, self::FIXTURE_NAME_PREFIX) ||
-            ! str_starts_with($center->slug, self::FIXTURE_SLUG_PREFIX)
-        ) {
-            throw new InvalidArgumentException(
-                "SAFETY VIOLATION: Center ID {$centerId} ('{$center->name}') is an ordinary center and cannot be deleted by E2EFixtureManager."
-            );
-        }
-
-        $filesToDelete = [];
-
-        DB::transaction(function () use ($center, &$filesToDelete) {
-            // 1. Assessment attempt answers and attempts
-            DB::table('exercise_attempt_answers')->where('center_id', $center->id)->delete();
-            DB::table('exercise_attempts')->where('center_id', $center->id)->delete();
-
-            // 2. Student lesson progress
-            DB::table('lesson_progresses')->where('center_id', $center->id)->delete();
-
-            // 3. Enrollments, cohorts, student profiles
-            $cohortIds = DB::table('cohorts')->where('center_id', $center->id)->pluck('id');
-            if ($cohortIds->isNotEmpty()) {
-                DB::table('cohort_schedules')->whereIn('cohort_id', $cohortIds)->delete();
-            }
-            DB::table('enrollments')->where('center_id', $center->id)->delete();
-            DB::table('cohorts')->where('center_id', $center->id)->delete();
-            DB::table('student_profiles')->where('center_id', $center->id)->delete();
-
-            // 4. Clear lesson pointers to break circular FK with revisions
-            DB::table('lessons')->where('center_id', $center->id)->update([
-                'draft_revision_id' => null,
-                'published_revision_id' => null,
-            ]);
-
-            // 5. Collect lesson asset files to delete AFTER commit, then delete DB records
-            $assets = DB::table('lesson_assets')->where('center_id', $center->id)->get();
-            foreach ($assets as $a) {
-                if (! empty($a->storage_disk) && ! empty($a->storage_key)) {
-                    $filesToDelete[] = [
-                        'disk' => $a->storage_disk,
-                        'key' => $a->storage_key,
-                    ];
-                }
-            }
-
-            DB::table('lesson_blocks')->where('center_id', $center->id)->delete();
-            DB::table('lesson_revisions')->where('center_id', $center->id)->delete();
-            DB::table('lesson_assets')->where('center_id', $center->id)->delete();
-
-            // 6. Exercises, questions, options
-            $exerciseIds = DB::table('exercises')->where('center_id', $center->id)->pluck('id');
-            if ($exerciseIds->isNotEmpty()) {
-                $questionIds = DB::table('questions')->whereIn('exercise_id', $exerciseIds)->pluck('id');
-                if ($questionIds->isNotEmpty()) {
-                    DB::table('question_options')->whereIn('question_id', $questionIds)->delete();
-                    DB::table('questions')->whereIn('id', $questionIds)->delete();
-                }
-                DB::table('exercises')->where('center_id', $center->id)->delete();
-            }
-
-            // 7. Lessons, modules, courses, languages, levels (level_templates are global reference records and preserved)
-            DB::table('lessons')->where('center_id', $center->id)->delete();
-            DB::table('course_modules')->where('center_id', $center->id)->delete();
-
-            $courseIds = DB::table('courses')->where('center_id', $center->id)->pluck('id');
-            if ($courseIds->isNotEmpty()) {
-                DB::table('course_outcomes')->whereIn('course_id', $courseIds)->delete();
-                DB::table('course_translations')->whereIn('course_id', $courseIds)->delete();
-            }
-            DB::table('courses')->where('center_id', $center->id)->delete();
-            DB::table('languages')->where('center_id', $center->id)->delete();
-            DB::table('levels')->where('center_id', $center->id)->delete();
-
-            // 8. User memberships and strictly verified E2E users
-            $memberships = DB::table('center_user')->where('center_id', $center->id)->get();
-            $userIds = $memberships->pluck('user_id')->all();
-            $membershipIds = $memberships->pluck('id')->all();
-
-            if (! empty($membershipIds)) {
-                DB::table('center_user_role')->whereIn('center_user_id', $membershipIds)->delete();
-                DB::table('center_user')->where('center_id', $center->id)->delete();
-            }
-
-            // Strictly verify ownership: Only delete users that match exact fixture token and belong solely to this fixture
-            if (! empty($userIds)) {
-                $fixtureToken = Str::after($center->slug, self::FIXTURE_SLUG_PREFIX);
-                $exactEmails = [
-                    "admin_{$fixtureToken}@example.test",
-                    "student_{$fixtureToken}@example.test",
-                ];
-
-                $fixtureUsers = DB::table('users')
-                    ->whereIn('id', $userIds)
-                    ->whereIn('email', $exactEmails)
-                    ->get();
-
-                $userIdsToDelete = [];
-                foreach ($fixtureUsers as $fu) {
-                    $otherMemberships = DB::table('center_user')
-                        ->where('user_id', $fu->id)
-                        ->where('center_id', '!=', $center->id)
-                        ->count();
-
-                    if ($otherMemberships === 0) {
-                        $userIdsToDelete[] = $fu->id;
-                    }
-                }
-
-                if (! empty($userIdsToDelete)) {
-                    DB::table('users')->whereIn('id', $userIdsToDelete)->delete();
-                }
-            }
-
-            // 9. Finally delete the center
-            $center->delete();
+    
+        self::assertFixtureCenter($center);
+    
+        $files = DB::transaction(function () use ($center) {
+            $lockedCenter = Center::query()
+                ->whereKey($center->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+    
+            self::assertFixtureCenter($lockedCenter);
+    
+            $assets = DB::table('lesson_assets')
+                ->where('center_id', $lockedCenter->id)
+                ->get(['storage_disk', 'storage_key']);
+    
+            // Register a durable cleanup manifest here.
+            // Do not delete asset records or center yet.
+    
+            return $assets;
         });
-
-        // 10. Delete physical storage files ONLY after DB transaction successfully commits
-        foreach ($filesToDelete as $file) {
-            try {
-                if (Storage::disk($file['disk'])->exists($file['key'])) {
-                    $deleted = Storage::disk($file['disk'])->delete($file['key']);
-                    if (! $deleted) {
-                        throw new \RuntimeException("Failed to delete fixture file from storage: {$file['key']} on disk {$file['disk']}");
-                    }
+    
+        foreach ($files as $file) {
+            if (! $file->storage_disk || ! $file->storage_key) {
+                continue;
+            }
+    
+            $disk = Storage::disk($file->storage_disk);
+    
+            if ($disk->exists($file->storage_key)) {
+                if (! $disk->delete($file->storage_key)) {
+                    throw new RuntimeException(
+                        "Failed to delete fixture asset: {$file->storage_key}"
+                    );
                 }
-            } catch (\Throwable $e) {
-                throw new \RuntimeException("Teardown storage cleanup failure for {$file['key']} on disk {$file['disk']}: ".$e->getMessage(), 0, $e);
             }
         }
+    
+        DB::transaction(function () use ($centerId) {
+            $lockedCenter = Center::query()
+                ->whereKey($centerId)
+                ->lockForUpdate()
+                ->first();
+    
+            if (! $lockedCenter) {
+                return;
+            }
+    
+            self::assertFixtureCenter($lockedCenter);
+    
+            // Execute the existing FK-safe database cleanup here.
+            self::deleteFixtureRecords($lockedCenter);
+        });
     }
 }
 

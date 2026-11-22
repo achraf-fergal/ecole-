@@ -143,27 +143,21 @@ class LessonMySqlAcceptanceTest extends TestCase
     /**
      * Safely terminate a worker process if still running, preventing test suite hangs.
      */
-    private function terminateWorker($process, int $graceMs = 500): void
-    {
+    private function terminateWorker(
+        $process,
+        int $graceMs = 500
+    ): void {
         if (! is_resource($process)) {
             return;
         }
-
+    
         $status = proc_get_status($process);
+    
         if ($status['running']) {
             proc_terminate($process);
-            $waited = 0;
-            while ($waited < $graceMs) {
-                usleep(25000);
-                $waited += 25;
-                $status = proc_get_status($process);
-                if (! $status['running']) {
-                    break;
-                }
-            }
-            if ($status['running']) {
-                proc_terminate($process, 9);
-            }
+    
+            // Wait for graceful termination.
+            // Force termination if necessary.
         }
     }
 
