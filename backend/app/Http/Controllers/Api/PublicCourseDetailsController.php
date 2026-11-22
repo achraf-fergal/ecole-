@@ -186,7 +186,12 @@ class PublicCourseDetailsController extends Controller
 
                 'language' => [
                     'code' => $course->language->code,
-                    'name' => $course->language->name,
+                    'name' => str_starts_with(
+                        strtolower($requestedLocale),
+                        'fr'
+                    )
+                        ? ($course->language->native_name ?: $course->language->name)
+                        : $course->language->name,
                 ],
 
                 'level' => [

@@ -78,11 +78,11 @@ export async function apiGetAvailableRoles(
   );
 
   if (!response.ok) {
-    return [
-      { id: 1, key: "center_admin", name: "Center Admin" },
-      { id: 2, key: "teacher", name: "Teacher" },
-      { id: 3, key: "student", name: "Student" },
-    ];
+    const errorData = await response.json().catch(() => null);
+    throw new Error(
+      errorData?.message ||
+        `Failed to load available roles (HTTP ${response.status}).`
+    );
   }
 
   const data = await response.json();
