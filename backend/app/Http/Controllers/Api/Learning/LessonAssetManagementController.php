@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Api\Learning;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Learning\StoreExternalVideoRequest;
 use App\Models\Center;
 use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\LessonAsset;
 use App\Services\Learning\CloudflareStreamService;
+use App\Services\Learning\ExternalVideoService;
 use App\Services\Learning\LearningAccessService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
@@ -26,7 +28,8 @@ class LessonAssetManagementController extends Controller
     public function __construct(
         protected LearningAccessService $learningAccess,
         protected LessonRevisionService $lessonRevisionService,
-        protected CloudflareStreamService $cloudflareStream
+        protected CloudflareStreamService $cloudflareStream,
+        protected ExternalVideoService $externalVideo
     ) {}
 
     /**
@@ -341,7 +344,7 @@ class LessonAssetManagementController extends Controller
                     'original_filename' => $filename,
                     'mime_type' => $validated['mime_type'],
                     'size_bytes' => $sizeBytes,
-                    'video_provider' => 'cloudflare_stream',
+                    'video_provider' => LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
                     'provider_asset_id' => $upload['uid'],
                     'external_url' => null,
                     'duration_seconds' => null,
@@ -376,6 +379,30 @@ class LessonAssetManagementController extends Controller
         ], 201);
     }
 
+    /** Create or reuse a validated YouTube or Google Drive video asset. */
+    public function storeExternalVideo(
+        StoreExternalVideoRequest $request
+    ): JsonResponse {
+        [$center, , $lesson] = $this->resolveLessonContext($request);
+        $validated = $request->validated();
+
+        $result = $this->externalVideo->createAsset(
+            $center,
+            $lesson,
+            $validated['provider'],
+            $validated['url'],
+            $validated['title'] ?? null,
+            $validated['caption'] ?? null
+        );
+
+        return response()->json([
+            'message' => $result['created']
+                ? 'External video added successfully.'
+                : 'This external video is already available in the lesson library.',
+            'data' => $this->assetPayload($result['asset']),
+        ], $result['created'] ? 201 : 200);
+    }
+
     /** Poll and synchronize the canonical Cloudflare processing state. */
     public function videoStatus(Request $request): JsonResponse
     {
@@ -384,7 +411,7 @@ class LessonAssetManagementController extends Controller
 
         abort_unless(
             $asset->asset_type === LessonAsset::TYPE_VIDEO
-                && $asset->video_provider === 'cloudflare_stream'
+                && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM
                 && $asset->isProviderVideo(),
             404,
             'Video asset not found.'
@@ -553,7 +580,7 @@ class LessonAssetManagementController extends Controller
 
             abort_unless(
                 ! $lockedAsset->isProviderVideo()
-                    || $lockedAsset->video_provider !== 'cloudflare_stream'
+                    || $lockedAsset->video_provider !== LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM
                     || $lockedAsset->status !== LessonAsset::STATUS_PROCESSING,
                 409,
                 'Cancel the Cloudflare upload before archiving this video.'
@@ -587,7 +614,10 @@ class LessonAssetManagementController extends Controller
 
         $this->lessonRevisionService->assertAssetCanBeModified($asset);
 
-        if ($asset->asset_type === LessonAsset::TYPE_VIDEO) {
+        if (
+            $asset->asset_type === LessonAsset::TYPE_VIDEO
+            && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM
+        ) {
             $asset = $this->cloudflareStream->restoreReadyVideo($asset);
         } else {
             $asset = DB::transaction(function () use ($asset): LessonAsset {
@@ -770,6 +800,12 @@ class LessonAssetManagementController extends Controller
                 409,
                 'The video provider reference is invalid.'
             );
+
+            if ($asset->video_provider !== LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM) {
+                $this->externalVideo->assertValidAssetReference($asset);
+
+                return;
+            }
 
             $details = $this->cloudflareStream->getVideoDetails(
                 $asset->provider_asset_id

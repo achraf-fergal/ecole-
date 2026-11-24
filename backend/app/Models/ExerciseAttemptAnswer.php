@@ -17,7 +17,11 @@ class ExerciseAttemptAnswer extends Model
         'exercise_attempt_id',
         'question_id',
         'selected_option_id',
+        'selected_option_ids',
+        'text_answer',
         'correct_option_id_snapshot',
+        'correct_option_ids_snapshot',
+        'answer_config_snapshot',
         'question_type_snapshot',
         'prompt_snapshot',
         'explanation_snapshot',
@@ -32,6 +36,8 @@ class ExerciseAttemptAnswer extends Model
      */
     protected $hidden = [
         'correct_option_id_snapshot',
+        'correct_option_ids_snapshot',
+        'answer_config_snapshot',
         'explanation_snapshot',
         'is_correct',
         'points_awarded',
@@ -41,6 +47,9 @@ class ExerciseAttemptAnswer extends Model
     {
         return [
             'options_snapshot' => 'array',
+            'selected_option_ids' => 'array',
+            'correct_option_ids_snapshot' => 'array',
+            'answer_config_snapshot' => 'array',
             'points_possible' => 'decimal:2',
             'is_correct' => 'boolean',
             'points_awarded' => 'decimal:2',

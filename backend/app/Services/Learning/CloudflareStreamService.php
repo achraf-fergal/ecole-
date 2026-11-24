@@ -260,7 +260,7 @@ class CloudflareStreamService
     ): array {
         abort_unless(
             $asset->isProviderVideo()
-                && $asset->video_provider === 'cloudflare_stream',
+                && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
             404,
             'Video asset not found.'
         );
@@ -353,7 +353,7 @@ class CloudflareStreamService
     {
         abort_unless(
             $asset->isProviderVideo()
-                && $asset->video_provider === 'cloudflare_stream'
+                && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM
                 && $asset->status === LessonAsset::STATUS_ARCHIVED,
             409,
             'The video provider reference is invalid.'
@@ -408,7 +408,7 @@ class CloudflareStreamService
     {
         abort_unless(
             $asset->isProviderVideo()
-                && $asset->video_provider === 'cloudflare_stream',
+                && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
             404,
             'Video asset not found.'
         );
@@ -464,7 +464,7 @@ class CloudflareStreamService
     {
         abort_unless(
             $asset->isProviderVideo()
-                && $asset->video_provider === 'cloudflare_stream'
+                && $asset->video_provider === LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM
                 && $asset->status === LessonAsset::STATUS_ACTIVE,
             404,
             'Video asset not found.'
@@ -539,8 +539,8 @@ class CloudflareStreamService
         );
 
         return [
-            'type' => 'cloudflare_stream',
-            'provider' => 'cloudflare_stream',
+            'type' => LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
+            'provider' => LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
             'player_url' => $baseUrl.'/iframe',
             'hls_url' => $baseUrl.'/manifest/video.m3u8',
             'dash_url' => $baseUrl.'/manifest/video.mpd',

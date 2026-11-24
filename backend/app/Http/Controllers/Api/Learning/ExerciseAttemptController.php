@@ -14,6 +14,8 @@ use App\Services\Learning\ExerciseAttemptService;
 use App\Services\Learning\LearningAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 
 class ExerciseAttemptController extends Controller
 {
@@ -113,11 +115,7 @@ class ExerciseAttemptController extends Controller
     {
         [$center, $course, $lesson, $exercise, $studentProfile] = $this->resolveContext($request);
 
-        $validated = $request->validate([
-            'answers' => ['required', 'array'],
-            'answers.*.question_id' => ['required', 'integer', 'min:1'],
-            'answers.*.selected_option_id' => ['nullable', 'integer', 'min:1'],
-        ]);
+        $validated = $this->validateAnswerRequest($request, true);
 
         $activeAttempt = ExerciseAttempt::query()
             ->where('center_id', $center->id)
@@ -144,28 +142,94 @@ class ExerciseAttemptController extends Controller
     {
         [$center, $course, $lesson, $exercise, $studentProfile] = $this->resolveContext($request);
 
-        $validated = $request->validate([
-            'answers' => ['sometimes', 'array'],
-            'answers.*.question_id' => ['required', 'integer', 'min:1'],
-            'answers.*.selected_option_id' => ['nullable', 'integer', 'min:1'],
-        ]);
+        $validated = $this->validateAnswerRequest($request, false);
 
         $activeAttempt = ExerciseAttempt::query()
             ->where('center_id', $center->id)
             ->where('student_profile_id', $studentProfile->id)
             ->where('exercise_id', $exercise->id)
             ->where('status', ExerciseAttempt::STATUS_IN_PROGRESS)
-            ->firstOrFail();
+            ->with('answers')
+            ->first();
+
+        if ($activeAttempt === null) {
+            $activeAttempt = ExerciseAttempt::query()
+                ->where('center_id', $center->id)
+                ->where('student_profile_id', $studentProfile->id)
+                ->where('exercise_id', $exercise->id)
+                ->whereIn('status', [
+                    ExerciseAttempt::STATUS_SUBMITTED,
+                    ExerciseAttempt::STATUS_GRADED,
+                ])
+                ->with('answers')
+                ->orderByDesc('attempt_number')
+                ->firstOrFail();
+        }
 
         $graded = $this->attemptService->submitAttempt(
             $activeAttempt,
-            $validated['answers'] ?? []
+            $validated['answers'] ?? [],
+            array_key_exists('answers', $validated)
         );
 
         return response()->json([
             'message' => 'Attempt submitted and graded successfully.',
             'data' => $this->attemptService->formatAttemptPayload($graded),
         ]);
+    }
+
+    /**
+     * Submit or retry one explicit attempt without ambiguity about newer attempts.
+     */
+    public function submitAttempt(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson, $exercise, $studentProfile] = $this->resolveContext($request);
+
+        $attemptParam = (string) $request->route('attempt');
+        abort_unless(ctype_digit($attemptParam), 404, 'Attempt not found.');
+
+        $attempt = ExerciseAttempt::query()
+            ->where('center_id', $center->id)
+            ->where('student_profile_id', $studentProfile->id)
+            ->where('exercise_id', $exercise->id)
+            ->whereKey((int) $attemptParam)
+            ->with('answers')
+            ->firstOrFail();
+
+        $validated = $this->validateAnswerRequest($request, false);
+        $graded = $this->attemptService->submitAttempt(
+            $attempt,
+            $validated['answers'] ?? [],
+            array_key_exists('answers', $validated)
+        );
+
+        return response()->json([
+            'message' => 'Attempt submitted and graded successfully.',
+            'data' => $this->attemptService->formatAttemptPayload($graded),
+        ]);
+    }
+
+    /** Validate strict student answer payloads and reject privileged/unknown fields. */
+    private function validateAnswerRequest(Request $request, bool $answersRequired): array
+    {
+        $unknownFields = array_diff(array_keys($request->all()), ['answers']);
+        if ($unknownFields !== []) {
+            throw ValidationException::withMessages([
+                (string) reset($unknownFields) => ['This field is not accepted.'],
+            ]);
+        }
+
+        $rules = [
+            'answers' => [$answersRequired ? 'required' : 'sometimes', 'array'],
+            'answers.*' => ['required', 'array:question_id,selected_option_id,selected_option_ids,text_answer'],
+            'answers.*.question_id' => ['required', 'integer', 'min:1'],
+            'answers.*.selected_option_id' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'answers.*.selected_option_ids' => ['sometimes', 'array', 'max:100'],
+            'answers.*.selected_option_ids.*' => ['integer', 'min:1'],
+            'answers.*.text_answer' => ['sometimes', 'nullable', 'string', 'max:5000'],
+        ];
+
+        return Validator::make($request->all(), $rules)->validate();
     }
 
     /**

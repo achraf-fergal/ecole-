@@ -336,6 +336,13 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.assets.video-upload');
 
+                        Route::post('/external-video', [
+                            LessonAssetManagementController::class,
+                            'storeExternalVideo',
+                        ])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.assets.external-video');
+
                         Route::get('/{asset}/status', [
                             LessonAssetManagementController::class,
                             'videoStatus',
@@ -510,6 +517,11 @@ Route::prefix('centers/{center}')
                     Route::post('/current/submit', [ExerciseAttemptController::class, 'submit'])
                         ->middleware('csrf.api')
                         ->name('api.centers.courses.learn.lessons.exercises.attempts.submit');
+
+                    Route::post('/{attempt}/submit', [ExerciseAttemptController::class, 'submitAttempt'])
+                        ->middleware('csrf.api')
+                        ->whereNumber('attempt')
+                        ->name('api.centers.courses.learn.lessons.exercises.attempts.submit-specific');
 
                     Route::get('/history', [ExerciseAttemptController::class, 'history'])
                         ->name('api.centers.courses.learn.lessons.exercises.attempts.history');

@@ -1451,4 +1451,244 @@ class LessonAssetManagementTest extends TestCase
             LessonAsset::STATUS_ACTIVE
         );
     }
+
+    public function test_center_admin_can_add_and_reuse_youtube_and_drive_assets(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $url = route(
+            'api.centers.admin.learning.assets.external-video',
+            $this->assetRouteParameters($context)
+        );
+
+        $youtubeResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($url, [
+            'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'url' => 'https://youtu.be/M7lc1UVf-VE',
+            'title' => 'IFrame API demo',
+            'caption' => 'A caption for the demo video.',
+        ]);
+
+        $youtubeResponse->assertCreated();
+        $youtubeResponse->assertJsonPath('data.asset_type', LessonAsset::TYPE_VIDEO);
+        $youtubeResponse->assertJsonPath('data.status', LessonAsset::STATUS_ACTIVE);
+        $youtubeResponse->assertJsonMissingPath('data.storage_disk');
+        $youtubeResponse->assertJsonMissingPath('data.storage_key');
+        $youtubeResponse->assertJsonMissingPath('data.provider_asset_id');
+
+        $youtubeAssetId = (int) $youtubeResponse->json('data.id');
+        $youtubeAsset = LessonAsset::query()->findOrFail($youtubeAssetId);
+
+        $this->assertSame(
+            LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            $youtubeAsset->video_provider
+        );
+        $this->assertSame('M7lc1UVf-VE', $youtubeAsset->provider_asset_id);
+        $this->assertNull($youtubeAsset->storage_disk);
+        $this->assertNull($youtubeAsset->storage_key);
+
+        $duplicateResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($url, [
+            'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'url' => 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
+        ]);
+
+        $duplicateResponse->assertOk();
+        $duplicateResponse->assertJsonPath('data.id', $youtubeAssetId);
+        $this->assertSame(
+            1,
+            LessonAsset::query()
+                ->where('lesson_id', $context['lesson']->id)
+                ->where('video_provider', LessonAsset::VIDEO_PROVIDER_YOUTUBE)
+                ->count()
+        );
+
+        $driveFileId = '1AbCdEfGhIjKlMnOpQrStUvWxYz123456';
+        $driveResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($url, [
+            'provider' => LessonAsset::VIDEO_PROVIDER_GOOGLE_DRIVE,
+            'url' => "https://drive.google.com/file/d/{$driveFileId}/view?usp=sharing",
+            'title' => 'Drive lesson video',
+        ]);
+
+        $driveResponse->assertCreated();
+        $driveAsset = LessonAsset::query()->findOrFail(
+            (int) $driveResponse->json('data.id')
+        );
+
+        $this->assertSame(
+            LessonAsset::VIDEO_PROVIDER_GOOGLE_DRIVE,
+            $driveAsset->video_provider
+        );
+        $this->assertSame($driveFileId, $driveAsset->provider_asset_id);
+        $this->assertFalse($driveAsset->is_downloadable);
+    }
+
+    public function test_external_video_endpoint_rejects_deceptive_urls_and_client_provider_ids(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $url = route(
+            'api.centers.admin.learning.assets.external-video',
+            $this->assetRouteParameters($context)
+        );
+
+        $invalidUrlResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($url, [
+            'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'url' => 'https://youtube.com.evil.test/watch?v=M7lc1UVf-VE',
+        ]);
+
+        $invalidUrlResponse->assertUnprocessable();
+        $invalidUrlResponse->assertJsonValidationErrors('url');
+
+        $forgedProviderResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson($url, [
+            'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'url' => 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
+            'provider_asset_id' => 'attacker-controlled-id',
+            'video_provider' => 'cloudflare_stream',
+        ]);
+
+        $forgedProviderResponse->assertUnprocessable();
+        $forgedProviderResponse->assertJsonValidationErrors([
+            'provider_asset_id',
+            'video_provider',
+        ]);
+
+        $this->assertDatabaseCount('lesson_assets', 0);
+    }
+
+    public function test_external_video_asset_persists_in_the_ordered_draft_and_can_be_published(): void
+    {
+        $context = $this->createContext();
+        $token = $this->tokenFor($context['user']);
+        $routeParameters = $this->assetRouteParameters($context);
+
+        $assetResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.assets.external-video',
+                $routeParameters
+            ),
+            [
+                'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'url' => 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
+                'title' => 'Published video',
+            ]
+        );
+
+        $assetResponse->assertCreated();
+        $assetId = (int) $assetResponse->json('data.id');
+
+        $draftResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.content.revisions.store',
+                $routeParameters
+            )
+        );
+
+        $draftResponse->assertOk();
+        $revisionId = (int) $draftResponse->json('data.id');
+
+        $blockResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.content.blocks.media.store',
+                $routeParameters + ['revision' => $revisionId]
+            ),
+            ['asset_id' => $assetId]
+        );
+
+        $blockResponse->assertCreated();
+        $blockResponse->assertJsonPath('data.block_type', LessonBlock::TYPE_MEDIA);
+        $blockResponse->assertJsonPath('data.asset.id', $assetId);
+
+        $reloaded = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route(
+                'api.centers.admin.learning.content.show',
+                $routeParameters
+            )
+        );
+
+        $reloaded->assertOk();
+        $reloadedAssetIds = collect(
+            $reloaded->json('data.draft_revision.blocks')
+        )
+            ->pluck('asset.id')
+            ->filter()
+            ->map(fn ($id): int => (int) $id)
+            ->all();
+
+        $this->assertContains($assetId, $reloadedAssetIds);
+
+        $publishResponse = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->postJson(
+            route(
+                'api.centers.admin.learning.content.publish',
+                $routeParameters
+            )
+        );
+
+        $publishResponse->assertOk();
+        $publishResponse->assertJsonPath('data.status', LessonRevision::STATUS_PUBLISHED);
+
+        $this->assertSame(
+            $revisionId,
+            (int) $context['lesson']->fresh()->published_revision_id
+        );
+    }
+
+    public function test_archived_external_video_can_be_restored_without_cloudflare_credentials(): void
+    {
+        $context = $this->createContext();
+        $asset = LessonAsset::factory()
+            ->forLesson($context['lesson'])
+            ->video()
+            ->archived()
+            ->create([
+                'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'provider_asset_id' => 'M7lc1UVf-VE',
+                'external_url' => 'https://youtu.be/M7lc1UVf-VE',
+            ]);
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($context['user'])
+        )->patchJson(
+            route(
+                'api.centers.admin.learning.assets.restore',
+                $this->assetRouteParameters($context) + ['asset' => $asset->id]
+            )
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('data.status', LessonAsset::STATUS_ACTIVE);
+        $this->assertSame(
+            LessonAsset::STATUS_ACTIVE,
+            $asset->fresh()->status
+        );
+    }
 }

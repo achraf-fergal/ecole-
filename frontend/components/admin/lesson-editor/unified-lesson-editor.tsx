@@ -26,6 +26,7 @@ import {
   restoreAdminHistoricalRevision,
   getAdminLessonAssets,
   uploadAdminLessonAsset,
+  createAdminExternalVideoAsset,
   requestAdminVideoUpload,
   uploadVideoBasic,
   getAdminVideoStatus,
@@ -46,9 +47,11 @@ import type {
 } from "@/lib/learning";
 import LessonTextBlock from "@/components/learning/lesson-text-block";
 import LessonMediaBlock from "@/components/learning/lesson-media-block";
+import LessonAssetViewer from "@/components/learning/lesson-asset-viewer";
 import LessonExerciseBlock from "@/components/learning/lesson-exercise-block";
 import RichTextEditor from "./rich-text-editor";
 import SortableBlockCard from "./sortable-block-card";
+import ExerciseDraftBuilder from "./exercise-draft-builder";
 
 interface UnifiedLessonEditorProps {
   centerSlug: string;
@@ -85,7 +88,7 @@ export default function UnifiedLessonEditor({
   const [metaDuration, setMetaDuration] = useState<number | "">("");
 
   // Block creation states
-  const [composerMode, setComposerMode] = useState<"none" | "text" | "media" | "exercise">("none");
+  const [composerMode, setComposerMode] = useState<"none" | "text" | "media" | "exercise" | "exercise_builder">("none");
 
   // Rich text composer
   const [editingBlockId, setEditingBlockId] = useState<number | null>(null);
@@ -96,8 +99,12 @@ export default function UnifiedLessonEditor({
   const [isUploadingAsset, setIsUploadingAsset] = useState(false);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadAltText, setUploadAltText] = useState("");
+  const [externalVideoUrl, setExternalVideoUrl] = useState("");
+  const [externalVideoCaption, setExternalVideoCaption] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadType, setUploadType] = useState<"image" | "file" | "video">("image");
+  const [uploadType, setUploadType] = useState<
+    "image" | "file" | "video" | "youtube" | "google_drive"
+  >("image");
   const [useResumableVideoUpload, setUseResumableVideoUpload] = useState(false);
   const [videoUploadState, setVideoUploadState] = useState<{
     assetId: number;
@@ -158,6 +165,8 @@ export default function UnifiedLessonEditor({
     || selectedAssetId !== ""
     || uploadTitle.trim() !== ""
     || uploadAltText.trim() !== ""
+    || externalVideoUrl.trim() !== ""
+    || externalVideoCaption.trim() !== ""
   );
   const hasUnsavedChanges = hasUnsavedLessonChanges({
     metadata: metadataIsDirty,
@@ -443,7 +452,7 @@ export default function UnifiedLessonEditor({
   };
 
   const handleSwitchComposer = (
-    nextMode: "text" | "media" | "exercise"
+    nextMode: "text" | "media" | "exercise" | "exercise_builder"
   ) => {
     if (composerMode === nextMode) {
       handleCloseComposer();
@@ -819,15 +828,61 @@ export default function UnifiedLessonEditor({
 
   // Handle Asset Upload
   const handleUploadAsset = async () => {
-    if (!uploadFile) return;
     if (metadataIsDirty || isTextDirty || isExerciseDirty) {
       setError("Save or discard the other unsaved changes before uploading media.");
       return;
     }
     if (uploadType === "video") {
+      if (!uploadFile) return;
       await handleVideoUpload();
       return;
     }
+
+    if (uploadType === "youtube" || uploadType === "google_drive") {
+      const url = externalVideoUrl.trim();
+
+      if (!url) {
+        setError("Enter a video link before adding it.");
+        return;
+      }
+
+      setIsUploadingAsset(true);
+      setError(null);
+
+      try {
+        const newAsset = await createAdminExternalVideoAsset(
+          centerSlug,
+          courseSlug,
+          lessonId,
+          {
+            provider: uploadType,
+            url,
+            title: uploadTitle.trim() || undefined,
+            caption: externalVideoCaption.trim() || undefined,
+          }
+        );
+        const updatedAssets = await getAdminLessonAssets(
+          centerSlug,
+          courseSlug,
+          lessonId
+        );
+
+        setAssets(updatedAssets);
+        setSelectedAssetId(newAsset.id);
+        setExternalVideoUrl("");
+        setExternalVideoCaption("");
+        setUploadTitle("");
+        showSuccess("Video added to the media library. Preview it, then insert it into the lesson.");
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "Failed to add external video.");
+      } finally {
+        setIsUploadingAsset(false);
+      }
+
+      return;
+    }
+
+    if (!uploadFile) return;
 
     setIsUploadingAsset(true);
     setError(null);
@@ -884,6 +939,10 @@ export default function UnifiedLessonEditor({
   // Handle Add Exercise Block
   const handleAddExercise = async () => {
     if (!selectedExerciseId) return;
+    await handleInsertExercise(Number(selectedExerciseId));
+  };
+
+  const handleInsertExercise = async (exerciseId: number) => {
     if (metadataIsDirty || isTextDirty || mediaComposerIsDirty) {
       setError("Save or discard the other unsaved changes before inserting this exercise.");
       return;
@@ -893,7 +952,7 @@ export default function UnifiedLessonEditor({
     setError(null);
     try {
       const draft = await getOrCreateDraft();
-      await addAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, Number(selectedExerciseId));
+      await addAdminExerciseBlock(centerSlug, courseSlug, lessonId, draft.id, exerciseId);
       setSelectedExerciseId("");
       setIsExerciseDirty(false);
       setComposerMode("none");
@@ -1520,6 +1579,18 @@ export default function UnifiedLessonEditor({
             >
               + Add Exercise
             </button>
+
+            <button
+              type="button"
+              onClick={() => handleSwitchComposer("exercise_builder")}
+              className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                composerMode === "exercise_builder"
+                  ? "bg-[#0e8988] text-white"
+                  : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              Exercise Drafts
+            </button>
           </div>
         </div>
 
@@ -1678,6 +1749,15 @@ export default function UnifiedLessonEditor({
               </div>
             )}
 
+            {selectedAsset?.asset_type === "video"
+              && selectedAsset.status === "active"
+              && (
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="mb-2 text-xs font-bold text-slate-700">Preview selected video</p>
+                  <LessonAssetViewer asset={selectedAsset} params={routeParams} />
+                </div>
+              )}
+
             {/* Upload New Asset */}
             <div className="border-t border-slate-200/60 pt-4">
               <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
@@ -1694,6 +1774,8 @@ export default function UnifiedLessonEditor({
                     <option value="image">Image (JPG, PNG, WebP)</option>
                     <option value="file">Document (PDF, Word, etc.)</option>
                     <option value="video">Video (Cloudflare Stream)</option>
+                    <option value="youtube">YouTube video link</option>
+                    <option value="google_drive">Google Drive video link</option>
                   </select>
                 </div>
 
@@ -1722,6 +1804,39 @@ export default function UnifiedLessonEditor({
                   </div>
                 )}
 
+                {(uploadType === "youtube" || uploadType === "google_drive") && (
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-600">
+                      {uploadType === "youtube" ? "YouTube video URL" : "Google Drive video URL"}
+                    </label>
+                    <input
+                      type="url"
+                      required
+                      autoComplete="off"
+                      value={externalVideoUrl}
+                      onChange={(event) => setExternalVideoUrl(event.target.value)}
+                      placeholder={uploadType === "youtube"
+                        ? "https://www.youtube.com/watch?v=..."
+                        : "https://drive.google.com/file/d/.../view"}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                    <p className="mt-1 text-[10px] leading-5 text-slate-500">
+                      Use an HTTPS video link. Drive videos must be shared with the students who need to watch them.
+                    </p>
+                    <label className="mt-3 block text-[11px] font-bold text-slate-600">
+                      Optional caption
+                    </label>
+                    <textarea
+                      value={externalVideoCaption}
+                      onChange={(event) => setExternalVideoCaption(event.target.value)}
+                      maxLength={3000}
+                      rows={2}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2 text-xs"
+                    />
+                  </div>
+                )}
+
+                {uploadType !== "youtube" && uploadType !== "google_drive" && (
                 <div className="sm:col-span-2">
                   <label className="block text-[11px] font-bold text-slate-600">Choose File</label>
                   <input
@@ -1731,6 +1846,7 @@ export default function UnifiedLessonEditor({
                     className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-1 text-xs"
                   />
                 </div>
+                )}
 
                 {uploadType === "video" && (
                   <div className="sm:col-span-2 rounded-lg bg-white p-3">
@@ -1752,13 +1868,21 @@ export default function UnifiedLessonEditor({
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   type="button"
-                  disabled={isUploadingAsset || !uploadFile}
+                  disabled={isUploadingAsset || (
+                    uploadType === "youtube" || uploadType === "google_drive"
+                      ? !externalVideoUrl.trim()
+                      : !uploadFile
+                  )}
                   onClick={() => void handleUploadAsset()}
                   className="rounded-xl bg-[#092443] px-4 py-1.5 text-xs font-bold text-white hover:bg-[#123b64] disabled:opacity-50"
                 >
                   {isUploadingAsset
                     ? "Uploading..."
-                    : uploadType === "video" ? "Start Video Upload" : "Upload Resource"}
+                    : uploadType === "video"
+                      ? "Start Video Upload"
+                      : uploadType === "youtube" || uploadType === "google_drive"
+                        ? "Add External Video"
+                        : "Upload Resource"}
                 </button>
               </div>
             </div>
@@ -2075,6 +2199,16 @@ export default function UnifiedLessonEditor({
               </div>
             )}
           </div>
+        )}
+
+        {composerMode === "exercise_builder" && (
+          <ExerciseDraftBuilder
+            centerSlug={centerSlug}
+            courseSlug={courseSlug}
+            lessonId={lessonId}
+            onDirtyChange={setIsExerciseDirty}
+            onInsert={handleInsertExercise}
+          />
         )}
       </section>
 

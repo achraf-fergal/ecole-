@@ -238,7 +238,7 @@ class E2EFixtureManager
                 $imageKey = $storageRoot.'/diagram.png';
 
                 $imageBytes = base64_decode(
-                    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+                    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==',
                     true
                 );
 
@@ -301,6 +301,7 @@ class E2EFixtureManager
                     'original_filename' => 'handout.pdf',
                     'mime_type' => 'application/pdf',
                     'size_bytes' => strlen($pdfBytes),
+                    'is_downloadable' => true,
                     'status' => LessonAsset::STATUS_ACTIVE,
                 ]);
 

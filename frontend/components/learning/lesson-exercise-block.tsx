@@ -1,10 +1,12 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import type {
   LessonBlock,
   LearningRouteParams,
   ExerciseAttemptData,
+  AttemptQuestion,
+  SaveAttemptAnswerPayload,
   ExerciseCurrentAttemptState,
   PaginatedExerciseAttempts,
 } from "@/lib/learning";
@@ -16,6 +18,39 @@ import {
   getExerciseAttemptHistory,
   LearningApiError,
 } from "@/lib/learning";
+import { isQuestionAnswered, toAttemptAnswerPayload } from "@/lib/exercise-authoring.mjs";
+
+type AnswerValue = number | number[] | string | null;
+
+function answersFromAttempt(questions: AttemptQuestion[]): Record<number, AnswerValue> {
+  return Object.fromEntries(questions.map((question) => {
+    if (question.question_type === "multiple_select") {
+      return [question.id, question.selected_option_ids ?? []];
+    }
+    if (question.question_type === "short_answer") {
+      return [question.id, question.text_answer ?? ""];
+    }
+    return [question.id, question.selected_option_id];
+  }));
+}
+
+function attemptAnswerPayload(
+  questions: AttemptQuestion[],
+  answers: Record<number, AnswerValue>
+): SaveAttemptAnswerPayload[] {
+  return questions.map((question) =>
+    toAttemptAnswerPayload(question.id, question.question_type, answers[question.id])
+  );
+}
+
+function answerSignature(payload: SaveAttemptAnswerPayload[]): string {
+  return JSON.stringify(payload.map((answer) => ({
+    ...answer,
+    selected_option_ids: answer.selected_option_ids
+      ? [...answer.selected_option_ids].sort((left, right) => left - right)
+      : answer.selected_option_ids,
+  })));
+}
 
 interface LessonExerciseBlockProps {
   block: LessonBlock;
@@ -36,8 +71,16 @@ export default function LessonExerciseBlock({
   const [activeAttempt, setActiveAttempt] =
     useState<ExerciseAttemptData | null>(null);
   const [selectedAnswers, setSelectedAnswers] = useState<
-    Record<number, number>
+    Record<number, AnswerValue>
   >({});
+  const latestAnswersRef = useRef(selectedAnswers);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const lastSavedSignatureRef = useRef<string | null>(null);
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const saveInFlightRef = useRef(false);
+  const submitInFlightRef = useRef(false);
+  const autoSaveRetryRef = useRef<{ signature: string; count: number } | null>(null);
+  const saveHandlerRef = useRef<(quiet: boolean) => Promise<void>>(async () => {});
   const [isLoading, setIsLoading] = useState(
     () => !isAdminPreview && Boolean(params) && Boolean(exercise?.id)
   );
@@ -63,7 +106,7 @@ export default function LessonExerciseBlock({
 
   // Administrative preview selection state
   const [previewSelectedAnswers, setPreviewSelectedAnswers] = useState<
-    Record<number, number>
+    Record<number, AnswerValue>
   >({});
 
   const exerciseId = exercise?.id;
@@ -81,13 +124,12 @@ export default function LessonExerciseBlock({
         setInitError(null);
         if (state.active_attempt) {
           setActiveAttempt(state.active_attempt);
-          const initialAnswers: Record<number, number> = {};
-          state.active_attempt.questions.forEach((q) => {
-            if (q.selected_option_id) {
-              initialAnswers[q.id] = q.selected_option_id;
-            }
-          });
+          const initialAnswers = answersFromAttempt(state.active_attempt.questions);
+          latestAnswersRef.current = initialAnswers;
           setSelectedAnswers(initialAnswers);
+          lastSavedSignatureRef.current = answerSignature(
+            attemptAnswerPayload(state.active_attempt.questions, initialAnswers)
+          );
         } else {
           setActiveAttempt(null);
         }
@@ -112,10 +154,6 @@ export default function LessonExerciseBlock({
     };
   }, [isAdminPreview, params, exerciseId, reloadKey]);
 
-  if (!exercise) {
-    return null;
-  }
-
   // --- Student Assessment Handlers ---
 
   const handleRetryInit = () => {
@@ -125,6 +163,21 @@ export default function LessonExerciseBlock({
   };
 
   const canStartNew = Boolean(attemptState?.exercise.can_start_new_attempt);
+  const answeredCount = activeAttempt
+    ? activeAttempt.questions.filter((question) =>
+        isQuestionAnswered(question.question_type, selectedAnswers[question.id])
+      ).length
+    : 0;
+
+  const navigateToQuestion = (index: number) => {
+    if (!activeAttempt) return;
+    const boundedIndex = Math.min(Math.max(index, 0), activeAttempt.questions.length - 1);
+    setCurrentQuestionIndex(boundedIndex);
+    window.setTimeout(() => {
+      document.getElementById(`attempt-question-${activeAttempt.questions[boundedIndex]?.id}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+  };
 
   const handleStartAttempt = async () => {
     if (isStarting || !params || !exerciseId || !canStartNew) return;
@@ -136,13 +189,12 @@ export default function LessonExerciseBlock({
     try {
       const newAttempt = await startExerciseAttempt(params, exerciseId);
       setActiveAttempt(newAttempt);
-      const initialAnswers: Record<number, number> = {};
-      newAttempt.questions.forEach((q) => {
-        if (q.selected_option_id) {
-          initialAnswers[q.id] = q.selected_option_id;
-        }
-      });
+      const initialAnswers = answersFromAttempt(newAttempt.questions);
+      latestAnswersRef.current = initialAnswers;
       setSelectedAnswers(initialAnswers);
+      lastSavedSignatureRef.current = answerSignature(
+        attemptAnswerPayload(newAttempt.questions, initialAnswers)
+      );
       // Reload overall state to update attempts remaining
       const state = await getExerciseCurrentAttempt(params, exerciseId);
       setAttemptState(state);
@@ -157,12 +209,23 @@ export default function LessonExerciseBlock({
     }
   };
 
-  const handleSelectOption = (questionId: number, optionId: number) => {
+  const handleSelectOption = (questionId: number, optionId: number, questionType: string) => {
+    const update = (previous: Record<number, AnswerValue>) => {
+      if (questionType === "multiple_select") {
+        const current = Array.isArray(previous[questionId]) ? previous[questionId] as number[] : [];
+        return {
+          ...previous,
+          [questionId]: current.includes(optionId)
+            ? current.filter((id) => id !== optionId)
+            : [...current, optionId],
+        };
+      }
+
+      return { ...previous, [questionId]: optionId };
+    };
+
     if (isAdminPreview) {
-      setPreviewSelectedAnswers((prev) => ({
-        ...prev,
-        [questionId]: optionId,
-      }));
+      setPreviewSelectedAnswers(update);
       return;
     }
 
@@ -170,32 +233,51 @@ export default function LessonExerciseBlock({
       return;
     }
 
-    setSelectedAnswers((prev) => ({
-      ...prev,
-      [questionId]: optionId,
-    }));
+    const updated = update(selectedAnswers);
+    latestAnswersRef.current = updated;
+    setSelectedAnswers(updated);
     setSaveSuccessMessage(null);
   };
 
-  const handleSaveAnswers = async () => {
-    if (!params || !exerciseId || !activeAttempt) return;
-
-    setIsSaving(true);
-    setActionError(null);
+  const handleSelectTextAnswer = (questionId: number, value: string) => {
+    if (isAdminPreview) {
+      setPreviewSelectedAnswers((previous) => ({ ...previous, [questionId]: value }));
+      return;
+    }
+    if (!activeAttempt || activeAttempt.status !== "in_progress") return;
+    const updated = { ...selectedAnswers, [questionId]: value };
+    latestAnswersRef.current = updated;
+    setSelectedAnswers(updated);
     setSaveSuccessMessage(null);
+  };
 
+  const handleSaveAnswers = useCallback(async (quiet = false) => {
+    if (!params || !exerciseId || !activeAttempt) return;
+    if (saveInFlightRef.current) return;
+
+    const answersPayload = attemptAnswerPayload(activeAttempt.questions, latestAnswersRef.current);
+    const signature = answerSignature(answersPayload);
+    if (signature === lastSavedSignatureRef.current) return;
+
+    saveInFlightRef.current = true;
+    setIsSaving(true);
+    if (!quiet) {
+      setActionError(null);
+      setSaveSuccessMessage(null);
+    }
+
+    let wasSaved = false;
     try {
-      const answersPayload = activeAttempt.questions.map((q) => ({
-        question_id: q.id,
-        selected_option_id: selectedAnswers[q.id] ?? null,
-      }));
-
       const updated = await saveExerciseAttemptAnswers(
         params,
         exerciseId,
         answersPayload
       );
       setActiveAttempt(updated);
+      lastSavedSignatureRef.current = signature;
+      autoSaveRetryRef.current = null;
+      wasSaved = true;
+      setActionError(null);
       setSaveSuccessMessage("Progress saved successfully.");
     } catch (err: unknown) {
       if (err instanceof LearningApiError) {
@@ -203,16 +285,75 @@ export default function LessonExerciseBlock({
       } else {
         setActionError("Failed to save progress.");
       }
+
+      if (quiet) {
+        if (autoSaveRetryRef.current?.signature !== signature) {
+          autoSaveRetryRef.current = { signature, count: 0 };
+        }
+        if (autoSaveRetryRef.current.count < 1) {
+          autoSaveRetryRef.current.count += 1;
+          autoSaveTimerRef.current = window.setTimeout(() => {
+            void saveHandlerRef.current(true);
+          }, 1500);
+        }
+      }
     } finally {
+      saveInFlightRef.current = false;
       setIsSaving(false);
+
+      const latestSignature = answerSignature(
+        attemptAnswerPayload(activeAttempt.questions, latestAnswersRef.current)
+      );
+      if (
+        wasSaved
+        && latestSignature !== lastSavedSignatureRef.current
+        && activeAttempt.status === "in_progress"
+      ) {
+        autoSaveTimerRef.current = window.setTimeout(() => {
+          void saveHandlerRef.current(true);
+        }, 100);
+      }
     }
-  };
+  }, [params, exerciseId, activeAttempt]);
+
+  useEffect(() => {
+    saveHandlerRef.current = handleSaveAnswers;
+  }, [handleSaveAnswers]);
+
+  useEffect(() => {
+    if (
+      isAdminPreview
+      || !activeAttempt
+      || activeAttempt.status !== "in_progress"
+      || isSubmitting
+    ) return;
+
+    const payload = attemptAnswerPayload(activeAttempt.questions, selectedAnswers);
+    const signature = answerSignature(payload);
+    if (signature === lastSavedSignatureRef.current) return;
+
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      void saveHandlerRef.current(true);
+    }, 700);
+
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [activeAttempt, selectedAnswers, isAdminPreview, isSubmitting]);
+
+  if (!exercise) {
+    return null;
+  }
 
   const handleSubmitAttempt = async () => {
     if (!params || !exerciseId || !activeAttempt) return;
+    if (submitInFlightRef.current || isSubmitting || isSaving) return;
 
-    const unansweredCount = activeAttempt.questions.filter(
-      (q) => !selectedAnswers[q.id]
+    if (autoSaveTimerRef.current !== null) window.clearTimeout(autoSaveTimerRef.current);
+    const unansweredCount = activeAttempt.questions.filter((question) =>
+      !isQuestionAnswered(question.question_type, selectedAnswers[question.id])
     ).length;
 
     if (
@@ -227,18 +368,17 @@ export default function LessonExerciseBlock({
     }
 
     setIsSubmitting(true);
+    submitInFlightRef.current = true;
     setActionError(null);
     setSaveSuccessMessage(null);
 
     try {
-      const answersPayload = activeAttempt.questions.map((q) => ({
-        question_id: q.id,
-        selected_option_id: selectedAnswers[q.id] ?? null,
-      }));
+      const answersPayload = attemptAnswerPayload(activeAttempt.questions, latestAnswersRef.current);
 
       await submitExerciseAttempt(
         params,
         exerciseId,
+        activeAttempt.id,
         answersPayload
       );
       setActiveAttempt(null);
@@ -253,6 +393,7 @@ export default function LessonExerciseBlock({
         setActionError("Failed to submit assessment.");
       }
     } finally {
+      submitInFlightRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -350,48 +491,31 @@ export default function LessonExerciseBlock({
                   {question.prompt}
                 </p>
 
-                <div className="mt-4 space-y-2">
-                  {question.options.map((option) => {
-                    const isSelected =
-                      previewSelectedAnswers[question.id] === option.id;
-
-                    return (
-                      <button
-                        type="button"
-                        key={option.id}
-                        onClick={() =>
-                          handleSelectOption(question.id, option.id)
-                        }
-                        className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3.5 text-left text-xs transition ${
-                          isSelected
-                            ? "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold"
-                            : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50/50"
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <span
-                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                              isSelected
-                                ? "border-[#0e8988] bg-[#0e8988] text-white"
-                                : "border-slate-300 bg-white"
-                            }`}
-                          >
-                            {isSelected && (
-                              <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                            )}
+                {question.question_type === "short_answer" ? (
+                  <label className="mt-4 block text-xs font-semibold text-slate-700">
+                    Your answer
+                    <input type="text" value={typeof previewSelectedAnswers[question.id] === "string" ? previewSelectedAnswers[question.id] as string : ""} onChange={(event) => handleSelectTextAnswer(question.id, event.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-3 text-sm" />
+                  </label>
+                ) : (
+                  <fieldset className="mt-4 space-y-2" role={question.question_type === "multiple_select" ? "group" : "radiogroup"} aria-label={`Preview question ${questionIndex + 1} answers`}>
+                    {question.question_type === "multiple_select" && <legend className="mb-2 text-xs text-slate-600">Select all that apply.</legend>}
+                    {question.options.map((option) => {
+                      const answer = previewSelectedAnswers[question.id];
+                      const isSelected = question.question_type === "multiple_select"
+                        ? Array.isArray(answer) && answer.includes(option.id)
+                        : answer === option.id;
+                      return (
+                        <label key={option.id} className={`flex items-center justify-between gap-3 rounded-xl border p-3.5 text-xs ${isSelected ? "border-[#0e8988] bg-teal-50/40 font-bold text-[#102b4c]" : "border-slate-200 bg-white text-slate-700"}`}>
+                          <span className="flex items-center gap-3">
+                            <input type={question.question_type === "multiple_select" ? "checkbox" : "radio"} name={`preview-answer-${question.id}`} checked={isSelected} onChange={() => handleSelectOption(question.id, option.id, question.question_type)} className="h-4 w-4 accent-[#0e8988]" />
+                            {option.option_text}
                           </span>
-                          <span>{option.option_text}</span>
-                        </div>
-
-                        {option.is_correct === true && (
-                          <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[9px] font-extrabold text-emerald-700">
-                            Correct Answer
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
+                          {option.is_correct === true && <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[9px] font-extrabold text-emerald-700">Correct Answer</span>}
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                )}
 
                 {question.explanation && (
                   <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50/80 p-3.5">
@@ -473,10 +597,51 @@ export default function LessonExerciseBlock({
           </div>
         )}
 
+        <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <strong aria-live="polite">Question {Math.min(currentQuestionIndex + 1, activeAttempt.questions.length)} of {activeAttempt.questions.length}</strong>
+            <span>{answeredCount} answered · {activeAttempt.questions.length - answeredCount} unanswered</span>
+          </div>
+          <div
+            className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"
+            role="progressbar"
+            aria-label="Assessment progress"
+            aria-valuemin={0}
+            aria-valuemax={activeAttempt.questions.length}
+            aria-valuenow={answeredCount}
+          >
+            <div className="h-full rounded-full bg-[#0e8988] transition-[width]" style={{ width: `${activeAttempt.questions.length ? (answeredCount / activeAttempt.questions.length) * 100 : 0}%` }} />
+          </div>
+          <nav aria-label="Question navigation" className="mt-3 flex flex-wrap gap-2">
+            {activeAttempt.questions.map((question, index) => {
+              const answered = isQuestionAnswered(question.question_type, selectedAnswers[question.id]);
+              return (
+                <button
+                  key={question.id}
+                  type="button"
+                  aria-label={`Question ${index + 1}, ${answered ? "answered" : "unanswered"}`}
+                  aria-current={index === currentQuestionIndex ? "step" : undefined}
+                  onClick={() => navigateToQuestion(index)}
+                  className={`min-w-10 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : "border-slate-300 bg-white text-slate-700"}`}
+                >
+                  {index + 1} · {answered ? "Answered" : "Open"}
+                </button>
+              );
+            })}
+          </nav>
+          <div className="mt-3 flex justify-between gap-2">
+            <button type="button" disabled={currentQuestionIndex <= 0} onClick={() => navigateToQuestion(currentQuestionIndex - 1)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Previous question</button>
+            <button type="button" disabled={currentQuestionIndex >= activeAttempt.questions.length - 1} onClick={() => navigateToQuestion(currentQuestionIndex + 1)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Next question</button>
+          </div>
+        </div>
+
         <div className="mt-5 space-y-5">
           {activeAttempt.questions.map((question, questionIndex) => (
             <div
               key={question.id}
+              id={`attempt-question-${question.id}`}
+              aria-labelledby={`attempt-question-title-${question.id}`}
+              onFocusCapture={() => setCurrentQuestionIndex(questionIndex)}
               className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 sm:p-5"
             >
               <div className="flex items-center justify-between gap-2">
@@ -484,56 +649,57 @@ export default function LessonExerciseBlock({
                   Question {questionIndex + 1} ({question.points_possible}{" "}
                   {Number(question.points_possible) === 1 ? "point" : "points"})
                 </span>
-                {selectedAnswers[question.id] && (
+                {isQuestionAnswered(question.question_type, selectedAnswers[question.id]) && (
                   <span className="text-[10px] font-bold text-teal-700">
                     Answered
                   </span>
                 )}
               </div>
 
-              <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
+              <p id={`attempt-question-title-${question.id}`} className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
                 {question.prompt}
               </p>
 
-              <div className="mt-4 space-y-2">
-                {question.options.map((option) => {
-                  const isSelected =
-                    selectedAnswers[question.id] === option.id;
+              {question.question_type === "short_answer" ? (
+                <label className="mt-4 block text-xs font-semibold text-slate-700">
+                  Your answer
+                  <input
+                    type="text"
+                    maxLength={5000}
+                    value={typeof selectedAnswers[question.id] === "string" ? selectedAnswers[question.id] as string : ""}
+                    onChange={(event) => handleSelectTextAnswer(question.id, event.target.value)}
+                    aria-describedby={`answer-guide-${question.id}`}
+                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-3 text-sm"
+                  />
+                  <span id={`answer-guide-${question.id}`} className="mt-1 block text-[11px] font-normal text-slate-500">Enter a short answer. Matching follows the teacher&apos;s configured rules.</span>
+                </label>
+              ) : (
+                <fieldset className="mt-4 space-y-2" role={question.question_type === "multiple_select" ? "group" : "radiogroup"} aria-label={question.question_type === "multiple_select" ? `Question ${questionIndex + 1} answers, select all that apply` : `Question ${questionIndex + 1} answers`}>
+                  {question.question_type === "multiple_select" && <legend className="mb-2 text-xs font-semibold text-slate-600">Select all that apply.</legend>}
+                  {question.options.map((option) => {
+                    const answer = selectedAnswers[question.id];
+                    const isSelected = question.question_type === "multiple_select"
+                      ? Array.isArray(answer) && answer.includes(option.id)
+                      : answer === option.id;
 
-                  return (
-                    <button
-                      type="button"
-                      key={option.id}
-                      data-option-id={option.id}
-                      aria-pressed={isSelected}
-                      onClick={() =>
-                        handleSelectOption(question.id, option.id)
-                      }
-                      className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3.5 text-left text-xs transition ${
-                        isSelected
-                          ? "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold"
-                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50/50"
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                            isSelected
-                              ? "border-[#0e8988] bg-[#0e8988] text-white"
-                              : "border-slate-300 bg-white"
-                          }`}
-                        >
-                          {isSelected && (
-                            <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                          )}
-                        </span>
-
+                    return (
+                      <label key={option.id} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3.5 text-xs transition ${isSelected ? "border-[#0e8988] bg-teal-50/40 font-bold text-[#102b4c]" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"}`}>
+                        <input
+                          type={question.question_type === "multiple_select" ? "checkbox" : "radio"}
+                          name={`answer-${question.id}`}
+                          value={option.id}
+                          data-option-id={option.id}
+                          checked={isSelected}
+                          disabled={isSaving || isSubmitting}
+                          onChange={() => handleSelectOption(question.id, option.id, question.question_type)}
+                          className="h-4 w-4 accent-[#0e8988]"
+                        />
                         <span>{option.option_text}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                      </label>
+                    );
+                  })}
+                </fieldset>
+              )}
             </div>
           ))}
         </div>
@@ -542,7 +708,7 @@ export default function LessonExerciseBlock({
           <button
             type="button"
             disabled={isSaving || isSubmitting}
-            onClick={handleSaveAnswers}
+            onClick={() => void handleSaveAnswers()}
             className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
           >
             {isSaving ? "Saving..." : "Save Progress"}
@@ -737,12 +903,23 @@ export default function LessonExerciseBlock({
                 {question.prompt}
               </p>
 
+              {question.question_type === "short_answer" && (
+                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs">
+                  <p><span className="font-bold">Your answer:</span> {question.text_answer || "No answer"}</p>
+                  {completedAttempt.show_correct_answers && question.accepted_answers && (
+                    <p className="mt-2"><span className="font-bold">Accepted answers:</span> {question.accepted_answers.join(" · ")}</p>
+                  )}
+                </div>
+              )}
+
               <div className="mt-4 space-y-2">
                 {question.options.map((option) => {
-                  const wasSelected =
-                    question.selected_option_id === option.id;
+                  const wasSelected = question.selected_option_id === option.id
+                    || (question.selected_option_ids ?? []).includes(option.id);
                   const isCorrect = completedAttempt.show_correct_answers
-                    ? question.correct_option_id === option.id
+                    ? question.correct_option_ids
+                      ? question.correct_option_ids.includes(option.id)
+                      : question.correct_option_id === option.id
                     : undefined;
 
                   let optionBorder = "border-slate-200 bg-white text-slate-700";
@@ -965,12 +1142,23 @@ export default function LessonExerciseBlock({
                                 {q.prompt}
                               </p>
 
+                              {q.question_type === "short_answer" && (
+                                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs">
+                                  <p><span className="font-bold">Your answer:</span> {q.text_answer || "No answer"}</p>
+                                  {hist.show_correct_answers && q.accepted_answers && (
+                                    <p className="mt-1"><span className="font-bold">Accepted answers:</span> {q.accepted_answers.join(" · ")}</p>
+                                  )}
+                                </div>
+                              )}
+
                               <div className="mt-3 space-y-1.5">
                                 {q.options.map((opt) => {
-                                  const wasSelected =
-                                    q.selected_option_id === opt.id;
+                                  const wasSelected = q.selected_option_id === opt.id
+                                    || (q.selected_option_ids ?? []).includes(opt.id);
                                   const isCorrect = hist.show_correct_answers
-                                    ? q.correct_option_id === opt.id
+                                    ? q.correct_option_ids
+                                      ? q.correct_option_ids.includes(opt.id)
+                                      : q.correct_option_id === opt.id
                                     : undefined;
 
                                   let optBorder =

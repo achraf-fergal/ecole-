@@ -422,7 +422,7 @@ class AssessmentEngineTest extends TestCase
                 'exercise' => $exerciseId,
             ])
         );
-        $resubmitRes->assertNotFound(); // No active attempt in progress to submit
+        $resubmitRes->assertStatus(409); // An omitted body differs from the submitted answer payload.
     }
 
     public function test_release_policy_hides_answers_when_disabled(): void
@@ -1073,7 +1073,7 @@ class AssessmentEngineTest extends TestCase
         $originalGradedAt = $attempt->graded_at?->toIso8601String();
 
         // Explicitly send a second POST submit request after first successful submission
-        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+        $retryResponse = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
                 'center' => $ctx['center']->slug,
                 'course' => $ctx['course']->slug,
@@ -1081,7 +1081,22 @@ class AssessmentEngineTest extends TestCase
                 'exercise' => $exerciseId,
             ]),
             ['answers' => []]
-        )->assertNotFound();
+        );
+        $retryResponse->assertOk()
+            ->assertJsonPath('data.id', $attempt->id);
+        $this->assertEquals((float) $originalScore, (float) $retryResponse->json('data.score'));
+
+        // Same endpoint with a changed request body conflicts and does not re-grade.
+        $questionId = (int) $attempt->answers()->value('question_id');
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+                'exercise' => $exerciseId,
+            ]),
+            ['answers' => [['question_id' => $questionId, 'selected_option_id' => null]]]
+        )->assertStatus(409);
 
         // Verify the second submission cannot modify the graded attempt
         $attempt->refresh();
@@ -1672,6 +1687,275 @@ class AssessmentEngineTest extends TestCase
                 ],
             ]
         )->assertOk();
+    }
+
+    public function test_draft_first_exercise_lifecycle_preserves_question_ids_and_uses_seventy_percent_default(): void
+    {
+        $ctx = $this->createAdminContext();
+        $token = $this->tokenFor($ctx['user']);
+        $routeParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+        ];
+
+        $created = $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            ['title' => 'Draft language practice']
+        )->assertCreated()
+            ->assertJsonPath('data.status', Exercise::STATUS_DRAFT)
+            ->assertJsonPath('data.passing_score', 70);
+
+        $exerciseId = (int) $created->json('data.id');
+        $normalization = [
+            'case_sensitive' => false,
+            'trim_whitespace' => true,
+            'collapse_internal_whitespace' => true,
+            'punctuation_sensitive' => true,
+            'diacritic_sensitive' => true,
+        ];
+
+        $savedIncomplete = $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'question_type' => Question::TYPE_SHORT_ANSWER,
+                    'prompt' => '',
+                    'answer_config' => [
+                        'accepted_answers' => [''],
+                        'normalization' => $normalization,
+                    ],
+                    'options' => [],
+                ]],
+            ]
+        )->assertOk()
+            ->assertJsonPath('data.status', Exercise::STATUS_DRAFT);
+
+        $questionId = (int) $savedIncomplete->json('data.questions.0.id');
+        $this->withHeader('Authorization', "Bearer {$token}")->getJson(
+            route('api.centers.admin.learning.exercises.show', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk()
+            ->assertJsonPath('data.questions.0.id', $questionId)
+            ->assertJsonPath('data.questions.0.answer_config.normalization.case_sensitive', false);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['questions']);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $questionId,
+                    'question_type' => Question::TYPE_SHORT_ANSWER,
+                    'prompt' => 'Complete the sentence: I ___ ready.',
+                    'points' => 1,
+                    'answer_config' => [
+                        'accepted_answers' => ['am', "'m"],
+                        'normalization' => $normalization,
+                    ],
+                    'options' => [],
+                ]],
+            ]
+        )->assertOk()
+            ->assertJsonPath('data.questions.0.id', $questionId);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk();
+
+        $this->assertDatabaseHas('exercises', [
+            'id' => $exerciseId,
+            'passing_score' => 70,
+            'status' => Exercise::STATUS_PUBLISHED,
+        ]);
+    }
+
+    public function test_all_four_question_types_grade_from_immutable_snapshots_and_submission_is_idempotent(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+        $routeParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+        ];
+        $normalization = [
+            'case_sensitive' => false,
+            'trim_whitespace' => true,
+            'collapse_internal_whitespace' => true,
+            'punctuation_sensitive' => true,
+            'diacritic_sensitive' => true,
+        ];
+
+        $created = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'Four question type assessment',
+                'passing_score' => 70,
+                'show_correct_answers_after_submission' => true,
+                'questions' => [
+                    [
+                        'question_type' => Question::TYPE_SINGLE_CHOICE,
+                        'prompt' => 'Choose the correct greeting.',
+                        'points' => 1,
+                        'options' => [
+                            ['option_text' => 'Good morning', 'is_correct' => true],
+                            ['option_text' => 'Good evening', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'question_type' => Question::TYPE_TRUE_FALSE,
+                        'prompt' => '"Bonjour" is French.',
+                        'points' => 1,
+                        'options' => [
+                            ['option_text' => 'True', 'is_correct' => true],
+                            ['option_text' => 'False', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'question_type' => Question::TYPE_MULTIPLE_SELECT,
+                        'prompt' => 'Select the two nouns.',
+                        'points' => 1,
+                        'options' => [
+                            ['option_text' => 'teacher', 'is_correct' => true],
+                            ['option_text' => 'student', 'is_correct' => true],
+                            ['option_text' => 'quickly', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'question_type' => Question::TYPE_SHORT_ANSWER,
+                        'prompt' => 'Complete: I ___ ready.',
+                        'points' => 1,
+                        'answer_config' => [
+                            'accepted_answers' => ['am', "'m"],
+                            'normalization' => $normalization,
+                        ],
+                    ],
+                ],
+            ]
+        )->assertCreated();
+
+        $exerciseId = (int) $created->json('data.id');
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $revision = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($revision, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        $studentContext = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentContext['studentUser']);
+        $start = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertCreated()
+            ->assertJsonMissingPath('data.questions.2.correct_option_ids')
+            ->assertJsonMissingPath('data.questions.3.answer_config')
+            ->assertJsonMissingPath('data.questions.3.accepted_answers');
+
+        $attemptId = (int) $start->json('data.id');
+        $questions = $start->json('data.questions');
+        $multiQuestionId = (int) $questions[2]['id'];
+        $multiOptionIds = array_column($questions[2]['options'], 'id');
+
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', [...$routeParameters, 'exercise' => $exerciseId]),
+            ['answers' => [[
+                'question_id' => $multiQuestionId,
+                'selected_option_ids' => [$multiOptionIds[0], $multiOptionIds[0]],
+            ]]]
+        )->assertUnprocessable();
+
+        $singleCorrectId = (int) $questions[0]['options'][0]['id'];
+        $trueFalseCorrectId = (int) $questions[1]['options'][0]['id'];
+        $answerPayload = [
+            ['question_id' => (int) $questions[0]['id'], 'selected_option_id' => $singleCorrectId],
+            ['question_id' => (int) $questions[1]['id'], 'selected_option_id' => $trueFalseCorrectId],
+            ['question_id' => $multiQuestionId, 'selected_option_ids' => [$multiOptionIds[1], $multiOptionIds[0]]],
+            ['question_id' => (int) $questions[3]['id'], 'text_answer' => 'AM'],
+        ];
+
+        $shortQuestion = Question::query()->where('exercise_id', $exerciseId)
+            ->where('question_type', Question::TYPE_SHORT_ANSWER)->firstOrFail();
+        $shortQuestion->update([
+            'prompt' => 'Changed after the attempt started.',
+            'points' => 9,
+            'answer_config' => [
+                'accepted_answers' => ['different'],
+                'normalization' => $normalization,
+            ],
+        ]);
+
+        $submitRoute = route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [
+            ...$routeParameters,
+            'exercise' => $exerciseId,
+            'attempt' => $attemptId,
+        ]);
+
+        $submitted = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            $submitRoute,
+            ['answers' => $answerPayload]
+        )->assertOk()
+            ->assertJsonPath('data.score', 4)
+            ->assertJsonPath('data.max_score', 4)
+            ->assertJsonPath('data.percentage', 100)
+            ->assertJsonPath('data.passed', true)
+            ->assertJsonPath('data.questions.2.correct_option_ids', [$multiOptionIds[0], $multiOptionIds[1]])
+            ->assertJsonPath('data.questions.3.accepted_answers', ['am', "'m"]);
+
+        $originalSubmittedAt = ExerciseAttempt::query()->findOrFail($attemptId)->submitted_at?->toIso8601String();
+
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            $submitRoute,
+            ['answers' => $answerPayload]
+        )->assertOk()
+            ->assertJsonPath('data.id', $attemptId)
+            ->assertJsonPath('data.score', 4);
+
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            $submitRoute,
+            ['answers' => [
+                ...$answerPayload,
+                ['question_id' => (int) $questions[3]['id'], 'text_answer' => 'changed'],
+            ]]
+        )->assertStatus(409);
+
+        $attempt = ExerciseAttempt::query()->with('answers')->findOrFail($attemptId);
+        $this->assertSame($originalSubmittedAt, $attempt->submitted_at?->toIso8601String());
+        $this->assertSame(4.0, (float) $attempt->score);
+        $this->assertSame(1.0, (float) $attempt->answers->firstWhere('question_id', $shortQuestion->id)->points_possible);
+        $this->assertSame('Complete: I ___ ready.', $attempt->answers->firstWhere('question_id', $shortQuestion->id)->prompt_snapshot);
+    }
+
+    public function test_admin_service_rejects_duplicate_option_labels_after_unicode_and_whitespace_normalization(): void
+    {
+        $ctx = $this->createAdminContext();
+        $token = $this->tokenFor($ctx['user']);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.store', [
+                'center' => $ctx['center']->slug,
+                'course' => $ctx['course']->slug,
+                'lesson' => $ctx['lesson']->id,
+            ]),
+            [
+                'title' => 'Duplicate labels',
+                'questions' => [[
+                    'prompt' => 'Choose one.',
+                    'options' => [
+                        ['option_text' => 'New   York', 'is_correct' => true],
+                        ['option_text' => "New\u{00A0}York", 'is_correct' => false],
+                    ],
+                ]],
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['questions.0.options.1.option_text']);
+
+        $this->assertDatabaseCount('exercises', 0);
     }
 
     public function test_published_exercise_immutability_is_protected(): void

@@ -20,6 +20,18 @@ class LessonAsset extends Model
 
     public const TYPE_EXTERNAL_LINK = 'external_link';
 
+    public const VIDEO_PROVIDER_CLOUDFLARE_STREAM = 'cloudflare_stream';
+
+    public const VIDEO_PROVIDER_YOUTUBE = 'youtube';
+
+    public const VIDEO_PROVIDER_GOOGLE_DRIVE = 'google_drive';
+
+    public const VIDEO_PROVIDERS = [
+        self::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
+        self::VIDEO_PROVIDER_YOUTUBE,
+        self::VIDEO_PROVIDER_GOOGLE_DRIVE,
+    ];
+
     public const ASSET_TYPES = [
         self::TYPE_FILE,
         self::TYPE_IMAGE,

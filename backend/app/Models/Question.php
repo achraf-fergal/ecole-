@@ -16,9 +16,15 @@ class Question extends Model
 
     public const TYPE_TRUE_FALSE = 'true_false';
 
+    public const TYPE_MULTIPLE_SELECT = 'multiple_select';
+
+    public const TYPE_SHORT_ANSWER = 'short_answer';
+
     public const TYPES = [
         self::TYPE_SINGLE_CHOICE,
         self::TYPE_TRUE_FALSE,
+        self::TYPE_MULTIPLE_SELECT,
+        self::TYPE_SHORT_ANSWER,
     ];
 
     protected $fillable = [
@@ -27,6 +33,7 @@ class Question extends Model
         'question_type',
         'prompt',
         'explanation',
+        'answer_config',
         'points',
         'sort_order',
     ];
@@ -36,6 +43,7 @@ class Question extends Model
      */
     protected $hidden = [
         'explanation',
+        'answer_config',
     ];
 
     protected function casts(): array
@@ -43,6 +51,7 @@ class Question extends Model
         return [
             'points' => 'decimal:2',
             'sort_order' => 'integer',
+            'answer_config' => 'array',
         ];
     }
 
@@ -91,18 +100,28 @@ class Question extends Model
     public function optionConfigurationErrors(): array
     {
         $options = $this->options()
-            ->get(['id', 'is_correct']);
+            ->get(['id', 'is_correct', 'option_text']);
 
         $optionCount = $options->count();
 
         $correctCount = $options
             ->filter(
-                fn (QuestionOption $option): bool =>
-                    $option->is_correct
+                fn (QuestionOption $option): bool => $option->is_correct
             )
             ->count();
 
+        $hasEmptyOption = $options->contains(
+            fn (QuestionOption $option): bool => preg_match(
+                '/^[\p{Z}\s]*$/u',
+                (string) $option->option_text
+            ) === 1
+        );
+
         $errors = [];
+
+        if ($hasEmptyOption && $this->question_type !== self::TYPE_SHORT_ANSWER) {
+            $errors[] = 'Question options cannot be empty.';
+        }
 
         if ($this->question_type === self::TYPE_SINGLE_CHOICE) {
             if ($optionCount < 2) {
@@ -126,6 +145,26 @@ class Question extends Model
             }
 
             return $errors;
+        }
+
+        if ($this->question_type === self::TYPE_MULTIPLE_SELECT) {
+            if ($optionCount < 3) {
+                $errors[] = 'A multiple-select question requires at least three options.';
+            }
+
+            if ($correctCount < 2) {
+                $errors[] = 'A multiple-select question requires at least two correct options.';
+            }
+
+            if ($correctCount >= $optionCount) {
+                $errors[] = 'A multiple-select question requires at least one incorrect option.';
+            }
+
+            return $errors;
+        }
+
+        if ($this->question_type === self::TYPE_SHORT_ANSWER) {
+            return [];
         }
 
         return [

@@ -12,6 +12,7 @@ use App\Models\ExerciseAttemptAnswer;
 use App\Models\Lesson;
 use App\Models\LessonBlock;
 use App\Models\LessonRevision;
+use App\Models\Question;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -21,7 +22,8 @@ use Illuminate\Validation\ValidationException;
 class ExerciseAttemptService
 {
     public function __construct(
-        protected LearningAccessService $learningAccess
+        protected LearningAccessService $learningAccess,
+        protected ExerciseAnswerGrader $answerGrader
     ) {}
 
     /**
@@ -339,6 +341,27 @@ class ExerciseAttemptService
 
             $maxScore = $questions->sum(fn ($q) => (float) $q->points);
 
+            foreach ($questions as $question) {
+                $configurationErrors = $question->optionConfigurationErrors();
+                if ($configurationErrors !== []) {
+                    throw ValidationException::withMessages([
+                        'exercise' => ["Question #{$question->id} is not configured correctly."],
+                    ]);
+                }
+
+                if ($question->question_type === Question::TYPE_SHORT_ANSWER) {
+                    $configurationErrors = $this->answerGrader->configurationErrors(
+                        $question->answer_config,
+                        true
+                    );
+                    if ($configurationErrors !== []) {
+                        throw ValidationException::withMessages([
+                            'exercise' => ["Question #{$question->id} is not configured correctly."],
+                        ]);
+                    }
+                }
+            }
+
             $attempt = ExerciseAttempt::query()->create([
                 'center_id' => $center->id,
                 'exercise_id' => $lockedExercise->id,
@@ -355,13 +378,16 @@ class ExerciseAttemptService
             ]);
 
             foreach ($questions as $question) {
-                $correctOption = $question->options->firstWhere('is_correct', true);
+                $correctOptionIds = $question->options
+                    ->where('is_correct', true)
+                    ->pluck('id')
+                    ->map(fn ($id): int => (int) $id)
+                    ->values()
+                    ->all();
 
-                if (! $correctOption) {
-                    throw ValidationException::withMessages([
-                        'exercise' => ["Question #{$question->id} has no correct answer configured."],
-                    ]);
-                }
+                $correctOptionId = count($correctOptionIds) === 1
+                    ? $correctOptionIds[0]
+                    : null;
 
                 $optionsSnapshot = $question->options->map(
                     fn ($opt): array => [
@@ -377,7 +403,13 @@ class ExerciseAttemptService
                     'exercise_attempt_id' => $attempt->id,
                     'question_id' => $question->id,
                     'selected_option_id' => null,
-                    'correct_option_id_snapshot' => $correctOption->id,
+                    'selected_option_ids' => null,
+                    'text_answer' => null,
+                    'correct_option_id_snapshot' => $correctOptionId,
+                    'correct_option_ids_snapshot' => $correctOptionIds,
+                    'answer_config_snapshot' => $question->question_type === Question::TYPE_SHORT_ANSWER
+                        ? $question->answer_config
+                        : null,
                     'question_type_snapshot' => $question->question_type,
                     'prompt_snapshot' => $question->prompt,
                     'explanation_snapshot' => $question->explanation,
@@ -430,10 +462,6 @@ class ExerciseAttemptService
                 }
                 $seenQuestionIds[] = $questionId;
 
-                $selectedOptionId = isset($entry['selected_option_id']) && $entry['selected_option_id'] !== null
-                    ? (int) $entry['selected_option_id']
-                    : null;
-
                 $answerRecord = $attemptAnswers->firstWhere('question_id', $questionId);
 
                 if (! $answerRecord) {
@@ -442,22 +470,9 @@ class ExerciseAttemptService
                     ]);
                 }
 
-                if ($selectedOptionId !== null) {
-                    $validOptionIds = array_map(
-                        'intval',
-                        array_column($answerRecord->options_snapshot, 'id')
-                    );
-
-                    if (! in_array($selectedOptionId, $validOptionIds, true)) {
-                        throw ValidationException::withMessages([
-                            'answers' => ["Option ID {$selectedOptionId} is not a valid option for Question ID {$questionId}."],
-                        ]);
-                    }
-                }
-
-                $answerRecord->update([
-                    'selected_option_id' => $selectedOptionId,
-                ]);
+                $answerRecord->update(
+                    $this->answerValuesFromEntry($answerRecord, $entry)
+                );
             }
 
             return $lockedAttempt->fresh('answers');
@@ -469,21 +484,36 @@ class ExerciseAttemptService
      */
     public function submitAttempt(
         ExerciseAttempt $attempt,
-        array $answers = []
+        array $answers = [],
+        bool $answersWereProvided = true
     ): ExerciseAttempt {
-        return DB::transaction(function () use ($attempt, $answers): ExerciseAttempt {
+        return DB::transaction(function () use ($attempt, $answers, $answersWereProvided): ExerciseAttempt {
             $lockedAttempt = ExerciseAttempt::query()
                 ->whereKey($attempt->id)
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            $fingerprint = $this->submissionFingerprint($answers, $answersWereProvided);
+
             if (! $lockedAttempt->isInProgress()) {
-                throw ValidationException::withMessages([
-                    'attempt' => ['Attempt is already submitted.'],
-                ]);
+                if (
+                    $lockedAttempt->submission_fingerprint !== null
+                    && hash_equals((string) $lockedAttempt->submission_fingerprint, $fingerprint)
+                ) {
+                    return $lockedAttempt->fresh('answers');
+                }
+
+                if (
+                    $lockedAttempt->submission_fingerprint === null
+                    && ! $answersWereProvided
+                ) {
+                    return $lockedAttempt->fresh('answers');
+                }
+
+                abort(409, 'This attempt was already submitted with different answers.');
             }
 
-            if ($answers !== []) {
+            if ($answersWereProvided && $answers !== []) {
                 $this->saveAnswers($lockedAttempt, $answers);
             }
 
@@ -496,10 +526,7 @@ class ExerciseAttemptService
                 $pointsPossible = (float) $answer->points_possible;
                 $totalPointsPossible += $pointsPossible;
 
-                $isCorrect = (
-                    $answer->selected_option_id !== null
-                    && (int) $answer->selected_option_id === (int) $answer->correct_option_id_snapshot
-                );
+                $isCorrect = $this->answerGrader->isCorrect($answer);
 
                 $pointsAwarded = $isCorrect ? $pointsPossible : 0.0;
                 $totalPointsAwarded += $pointsAwarded;
@@ -526,6 +553,7 @@ class ExerciseAttemptService
                 'passed' => $passed,
                 'submitted_at' => $now,
                 'graded_at' => $now,
+                'submission_fingerprint' => $fingerprint,
             ]);
 
             return $lockedAttempt->fresh('answers');
@@ -565,6 +593,8 @@ class ExerciseAttemptService
                     'prompt' => $answer->prompt_snapshot,
                     'points_possible' => (float) $answer->points_possible,
                     'selected_option_id' => $answer->selected_option_id,
+                    'selected_option_ids' => $answer->selected_option_ids,
+                    'text_answer' => $answer->text_answer,
                     'options' => $answer->options_snapshot,
                 ];
 
@@ -572,11 +602,142 @@ class ExerciseAttemptService
                     $data['is_correct'] = $answer->is_correct;
                     $data['points_awarded'] = (float) $answer->points_awarded;
                     $data['correct_option_id'] = $answer->correct_option_id_snapshot;
+                    $data['correct_option_ids'] = $answer->correct_option_ids_snapshot ?? [];
+                    if ($answer->question_type_snapshot === Question::TYPE_SHORT_ANSWER) {
+                        $data['accepted_answers'] = $answer->answer_config_snapshot['accepted_answers'] ?? [];
+                    }
                     $data['explanation'] = $answer->explanation_snapshot;
                 }
 
                 return $data;
             })->values()->all(),
         ];
+    }
+
+    /** Validate a type-specific entry against the immutable attempt snapshot. */
+    private function answerValuesFromEntry(
+        ExerciseAttemptAnswer $answer,
+        array $entry
+    ): array {
+        $allowedFields = match ($answer->question_type_snapshot) {
+            Question::TYPE_SINGLE_CHOICE,
+            Question::TYPE_TRUE_FALSE => ['question_id', 'selected_option_id'],
+            Question::TYPE_MULTIPLE_SELECT => ['question_id', 'selected_option_ids'],
+            Question::TYPE_SHORT_ANSWER => ['question_id', 'text_answer'],
+            default => ['question_id'],
+        };
+
+        if (array_diff(array_keys($entry), $allowedFields) !== []) {
+            throw ValidationException::withMessages([
+                'answers' => ["Answer payload contains fields not allowed for Question ID {$answer->question_id}."],
+            ]);
+        }
+
+        $validOptionIds = array_map(
+            'intval',
+            array_column($answer->options_snapshot ?? [], 'id')
+        );
+
+        if (in_array($answer->question_type_snapshot, [Question::TYPE_SINGLE_CHOICE, Question::TYPE_TRUE_FALSE], true)) {
+            $selectedOptionId = array_key_exists('selected_option_id', $entry)
+                && $entry['selected_option_id'] !== null
+                ? (int) $entry['selected_option_id']
+                : null;
+
+            if ($selectedOptionId !== null && ! in_array($selectedOptionId, $validOptionIds, true)) {
+                throw ValidationException::withMessages([
+                    'answers' => ["Option ID {$selectedOptionId} is not a valid option for Question ID {$answer->question_id}."],
+                ]);
+            }
+
+            return [
+                'selected_option_id' => $selectedOptionId,
+                'selected_option_ids' => null,
+                'text_answer' => null,
+            ];
+        }
+
+        if ($answer->question_type_snapshot === Question::TYPE_MULTIPLE_SELECT) {
+            $selectedOptionIds = $entry['selected_option_ids'] ?? [];
+            if (! is_array($selectedOptionIds) || ! array_is_list($selectedOptionIds)) {
+                throw ValidationException::withMessages([
+                    'answers' => ['Multiple-select answers must be a list of option IDs.'],
+                ]);
+            }
+
+            $normalizedIds = array_map('intval', $selectedOptionIds);
+            if (count(array_unique($normalizedIds)) !== count($normalizedIds)) {
+                throw ValidationException::withMessages([
+                    'answers' => ["Duplicate option IDs are not allowed for Question ID {$answer->question_id}."],
+                ]);
+            }
+
+            foreach ($normalizedIds as $optionId) {
+                if (! in_array($optionId, $validOptionIds, true)) {
+                    throw ValidationException::withMessages([
+                        'answers' => ["Option ID {$optionId} is not a valid option for Question ID {$answer->question_id}."],
+                    ]);
+                }
+            }
+
+            sort($normalizedIds, SORT_NUMERIC);
+
+            return [
+                'selected_option_id' => null,
+                'selected_option_ids' => $normalizedIds,
+                'text_answer' => null,
+            ];
+        }
+
+        $textAnswer = $entry['text_answer'] ?? null;
+        if ($textAnswer !== null && (! is_string($textAnswer) || mb_strlen($textAnswer, 'UTF-8') > ExerciseAnswerGrader::MAX_STUDENT_ANSWER_LENGTH)) {
+            throw ValidationException::withMessages([
+                'answers' => ['Short answers may not exceed 5000 characters.'],
+            ]);
+        }
+
+        return [
+            'selected_option_id' => null,
+            'selected_option_ids' => null,
+            'text_answer' => $textAnswer,
+        ];
+    }
+
+    /** Build a stable request fingerprint so retries do not apply grading twice. */
+    private function submissionFingerprint(array $answers, bool $answersWereProvided): string
+    {
+        $normalizedAnswers = [];
+
+        foreach ($answers as $entry) {
+            $normalized = ['question_id' => (int) ($entry['question_id'] ?? 0)];
+
+            if (array_key_exists('selected_option_id', $entry)) {
+                $normalized['selected_option_id'] = $entry['selected_option_id'] === null
+                    ? null
+                    : (int) $entry['selected_option_id'];
+            }
+
+            if (array_key_exists('selected_option_ids', $entry)) {
+                $ids = array_map('intval', $entry['selected_option_ids']);
+                sort($ids, SORT_NUMERIC);
+                $normalized['selected_option_ids'] = $ids;
+            }
+
+            if (array_key_exists('text_answer', $entry)) {
+                $normalized['text_answer'] = $entry['text_answer'];
+            }
+
+            $normalizedAnswers[] = $normalized;
+        }
+
+        usort(
+            $normalizedAnswers,
+            static fn (array $left, array $right): int => $left['question_id'] <=> $right['question_id']
+        );
+
+        return hash('sha256', json_encode([
+            'answers_provided' => $answersWereProvided,
+            'answers' => $normalizedAnswers,
+        ], JSON_THROW_ON_ERROR));
     }
 }

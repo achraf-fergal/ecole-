@@ -13,7 +13,8 @@ use Illuminate\Validation\ValidationException;
 class AdminExerciseService
 {
     public function __construct(
-        protected LessonRevisionService $revisionService
+        protected LessonRevisionService $revisionService,
+        protected ExerciseAnswerGrader $answerGrader
     ) {}
 
     /**
@@ -202,6 +203,49 @@ class AdminExerciseService
                 ->all();
 
             foreach ($questionsData as $qIndex => $qData) {
+                $questionType = $qData['question_type'] ?? Question::TYPE_SINGLE_CHOICE;
+
+                if (! in_array($questionType, Question::TYPES, true)) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.question_type" => ['Unsupported question type.'],
+                    ]);
+                }
+
+                if (
+                    $questionType !== Question::TYPE_SHORT_ANSWER
+                    && isset($qData['answer_config'])
+                ) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.answer_config" => ['Answer configuration is only valid for short-answer questions.'],
+                    ]);
+                }
+
+                if (
+                    $questionType === Question::TYPE_SHORT_ANSWER
+                    && array_key_exists('answer_config', $qData)
+                    && $qData['answer_config'] !== null
+                ) {
+                    $configErrors = $this->answerGrader->configurationErrors(
+                        $qData['answer_config'],
+                        false
+                    );
+
+                    if ($configErrors !== []) {
+                        throw ValidationException::withMessages(
+                            $this->prefixQuestionErrors($configErrors, $qIndex)
+                        );
+                    }
+                }
+
+                if (
+                    $questionType === Question::TYPE_SHORT_ANSWER
+                    && ! empty($qData['options'])
+                ) {
+                    throw ValidationException::withMessages([
+                        "questions.{$qIndex}.options" => ['Short-answer questions do not accept choice options.'],
+                    ]);
+                }
+
                 $qId = $qData['id'] ?? null;
                 if ($qId !== null) {
                     if (! is_numeric($qId) || (int) $qId <= 0) {
@@ -225,6 +269,8 @@ class AdminExerciseService
 
                 // Validate options for this question
                 if (isset($qData['options']) && is_array($qData['options'])) {
+                    $this->assertUniqueOptionLabels($qData['options'], $qIndex);
+
                     $submittedOptionIds = [];
                     $existingOptionIdsForQuestion = [];
                     if ($qId !== null) {
@@ -289,8 +335,13 @@ class AdminExerciseService
 
                     $q->update([
                         'question_type' => $questionType,
-                        'prompt' => $qData['prompt'],
+                        'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
+                        'answer_config' => $questionType === Question::TYPE_SHORT_ANSWER
+                            ? (isset($qData['answer_config'])
+                                ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
+                                : null)
+                            : null,
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
@@ -299,14 +350,24 @@ class AdminExerciseService
                         'center_id' => $lockedExercise->center_id,
                         'exercise_id' => $lockedExercise->id,
                         'question_type' => $questionType,
-                        'prompt' => $qData['prompt'],
+                        'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
+                        'answer_config' => $questionType === Question::TYPE_SHORT_ANSWER
+                            ? (isset($qData['answer_config'])
+                                ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
+                                : null)
+                            : null,
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
                 }
 
-                if (isset($qData['options']) && is_array($qData['options'])) {
+                if ($questionType === Question::TYPE_SHORT_ANSWER) {
+                    QuestionOption::query()
+                        ->where('center_id', $lockedExercise->center_id)
+                        ->where('question_id', $q->id)
+                        ->delete();
+                } elseif (isset($qData['options']) && is_array($qData['options'])) {
                     $submittedOptIds = array_values(array_filter(
                         array_map(fn ($o) => isset($o['id']) && $o['id'] !== null ? (int) $o['id'] : null, $qData['options']),
                         fn ($id) => $id !== null
@@ -331,7 +392,7 @@ class AdminExerciseService
                                 ->findOrFail($oId);
 
                             $opt->update([
-                                'option_text' => $oData['option_text'],
+                                'option_text' => $oData['option_text'] ?? '',
                                 'is_correct' => $isCorrect,
                                 'sort_order' => $oSortOrder,
                             ]);
@@ -339,7 +400,7 @@ class AdminExerciseService
                             QuestionOption::query()->create([
                                 'center_id' => $lockedExercise->center_id,
                                 'question_id' => $q->id,
-                                'option_text' => $oData['option_text'],
+                                'option_text' => $oData['option_text'] ?? '',
                                 'is_correct' => $isCorrect,
                                 'sort_order' => $oSortOrder,
                             ]);
@@ -416,6 +477,32 @@ class AdminExerciseService
                         ),
                     ]);
                 }
+
+                if ($question->question_type === Question::TYPE_SHORT_ANSWER) {
+                    $configErrors = $this->answerGrader->configurationErrors(
+                        $question->answer_config,
+                        true
+                    );
+
+                    if ($configErrors !== []) {
+                        $messages = [];
+                        foreach ($configErrors as $fieldMessages) {
+                            foreach ($fieldMessages as $message) {
+                                $messages[] = "Question #{$question->id}: {$message}";
+                            }
+                        }
+
+                        throw ValidationException::withMessages([
+                            'questions' => $messages,
+                        ]);
+                    }
+                } elseif ($question->answer_config !== null) {
+                    throw ValidationException::withMessages([
+                        'questions' => ["Question #{$question->id} has answer settings for an unsupported question type."],
+                    ]);
+                }
+
+                $this->assertStoredOptionsAreUnique($question);
             }
 
             $lockedExercise->update([
@@ -461,5 +548,60 @@ class AdminExerciseService
             $lockedExercise->questions()->delete();
             $lockedExercise->delete();
         });
+    }
+
+    /**
+     * Reject duplicate option labels using NFC and whitespace normalization.
+     * Case and accents remain meaningful for option labels.
+     */
+    private function assertUniqueOptionLabels(array $options, int|string $questionIndex): void
+    {
+        $seen = [];
+
+        foreach ($options as $optionIndex => $option) {
+            $text = $option['option_text'] ?? '';
+            if (! is_string($text) || trim($text) === '') {
+                continue;
+            }
+
+            $normalized = $this->answerGrader->normalizeOptionLabel($text);
+            if (in_array($normalized, $seen, true)) {
+                throw ValidationException::withMessages([
+                    "questions.{$questionIndex}.options.{$optionIndex}.option_text" => [
+                        'This option duplicates another option in the same question after whitespace and Unicode normalization.',
+                    ],
+                ]);
+            }
+
+            $seen[] = $normalized;
+        }
+    }
+
+    private function assertStoredOptionsAreUnique(Question $question): void
+    {
+        $seen = [];
+
+        foreach ($question->options as $option) {
+            $normalized = $this->answerGrader->normalizeOptionLabel((string) $option->option_text);
+            if (in_array($normalized, $seen, true)) {
+                throw ValidationException::withMessages([
+                    'questions' => ["Question #{$question->id} contains duplicate option text."],
+                ]);
+            }
+
+            $seen[] = $normalized;
+        }
+    }
+
+    /** @param array<string, list<string>> $errors @return array<string, list<string>> */
+    private function prefixQuestionErrors(array $errors, int|string $questionIndex): array
+    {
+        $prefixed = [];
+
+        foreach ($errors as $field => $messages) {
+            $prefixed["questions.{$questionIndex}.{$field}"] = $messages;
+        }
+
+        return $prefixed;
     }
 }

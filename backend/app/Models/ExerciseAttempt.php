@@ -33,6 +33,7 @@ class ExerciseAttempt extends Model
         'started_at',
         'submitted_at',
         'graded_at',
+        'submission_fingerprint',
     ];
 
     protected function casts(): array

@@ -37,6 +37,20 @@ const nextConfig: NextConfig = {
     remotePatterns,
   },
 
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: "frame-src 'self' https://*.cloudflarestream.com https://www.youtube-nocookie.com https://drive.google.com;",
+          },
+        ],
+      },
+    ];
+  },
+
   cacheComponents: true,
   partialPrefetching: true,
 

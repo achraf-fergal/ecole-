@@ -9,7 +9,8 @@ use Symfony\Component\HttpFoundation\Response;
 class LessonAssetAccessService
 {
     public function __construct(
-        protected CloudflareStreamService $cloudflareStream
+        protected CloudflareStreamService $cloudflareStream,
+        protected ExternalVideoService $externalVideo
     ) {}
 
     /**
@@ -29,8 +30,14 @@ class LessonAssetAccessService
             LessonAsset::TYPE_FILE,
             LessonAsset::TYPE_IMAGE => $this->createStorageAccess($asset),
 
-            LessonAsset::TYPE_VIDEO => $this->cloudflareStream
-                ->createPlaybackAccess($asset),
+            LessonAsset::TYPE_VIDEO => match ($asset->video_provider) {
+                LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM => $this->cloudflareStream
+                    ->createPlaybackAccess($asset),
+                LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                LessonAsset::VIDEO_PROVIDER_GOOGLE_DRIVE => $this->externalVideo
+                    ->createPlaybackAccess($asset),
+                default => abort(404, 'Video asset not found.'),
+            },
 
             LessonAsset::TYPE_EXTERNAL_LINK => $this->externalLinkAccess($asset),
 

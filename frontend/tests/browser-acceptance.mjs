@@ -143,6 +143,23 @@ async function main() {
     const adminContext = await browser.newContext();
     const adminPage = await adminContext.newPage();
 
+    // Keep provider pages deterministic: this acceptance verifies our URLs,
+    // authorization, persistence, and iframe wiring, not third-party playback.
+    await adminPage.route("https://www.youtube-nocookie.com/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>Mock YouTube player</title>",
+      })
+    );
+    await adminPage.route("https://drive.google.com/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>Mock Drive preview</title>",
+      })
+    );
+
     adminPage.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(`[Admin Browser Error] ${msg.text()}`);
     });
@@ -307,6 +324,142 @@ async function main() {
     assert.ok(mediaRes.status() === 201 || mediaRes.status() === 200, "Media block API returned success");
     console.log("✓ Media block attached via API.");
 
+    await adminPage.locator('button:has-text("+ Add Media")').click();
+    await adminPage.waitForSelector('h3:has-text("Add Media Block")', { timeout: 5000 });
+    const pdfAssetSelect = adminPage.locator('select').filter({
+      hasText: "Choose an uploaded asset",
+    });
+    await pdfAssetSelect.selectOption(String(fixture.pdfAssetId));
+    const attachPdfPromise = adminPage.waitForResponse(
+      (resp) => resp.url().includes("/blocks/media") && (resp.status() === 201 || resp.status() === 200)
+    );
+    await adminPage.locator('button:has-text("Insert Selected Media")').click();
+    const attachPdfResponse = await attachPdfPromise;
+    assert.ok(
+      attachPdfResponse.status() === 201 || attachPdfResponse.status() === 200,
+      "Downloadable PDF is attached to the lesson revision."
+    );
+
+    const youtubeTitle = "Acceptance YouTube Video";
+    const driveTitle = "Acceptance Google Drive Video";
+    const externalVideoTitles = new Set([youtubeTitle, driveTitle]);
+
+    async function addExternalVideo({ provider, url, title, caption }) {
+      await adminPage.locator('button:has-text("+ Add Media")').click();
+      await adminPage.waitForSelector('h3:has-text("Add Media Block")', { timeout: 5000 });
+
+      const typeSelect = adminPage.locator("select").filter({
+        has: adminPage.locator(`option[value="${provider}"]`),
+      }).first();
+      await typeSelect.selectOption(provider);
+      await adminPage.locator('input[type="url"]').fill(url);
+      await adminPage.locator('input[placeholder="e.g. Vocabulary Worksheet"]').fill(title);
+      await adminPage.locator("textarea").last().fill(caption);
+
+      if (provider === "youtube") {
+        await adminPage.locator('input[type="url"]').fill(
+          "https://youtube.com.evil.test/watch?v=M7lc1UVf-VE"
+        );
+        const rejectedRequest = adminPage.waitForResponse(
+          (response) => {
+            const requestUrl = new URL(response.url());
+            return requestUrl.pathname.endsWith("/assets/external-video")
+              && response.request().method() === "POST";
+          },
+          { timeout: 15000 }
+        );
+        await adminPage.locator('button:has-text("Add External Video")').click();
+        const rejectedResponse = await rejectedRequest;
+        const rejectedBody = await rejectedResponse.text();
+        assert.equal(
+          rejectedResponse.status(),
+          422,
+          `Deceptive YouTube host should be rejected: HTTP ${rejectedResponse.status()}\n${rejectedBody}`
+        );
+        await adminPage.locator('[role="alert"]').filter({ hasText: /YouTube/i }).waitFor({ state: "visible" });
+        await adminPage.locator('input[type="url"]').fill(url);
+      }
+
+      const createRequest = adminPage.waitForResponse(
+        (response) => {
+          const requestUrl = new URL(response.url());
+          return requestUrl.pathname.endsWith("/assets/external-video")
+            && response.request().method() === "POST";
+        },
+        { timeout: 15000 }
+      );
+      await adminPage.locator('button:has-text("Add External Video")').click();
+      const createResponse = await createRequest;
+      const createBody = await createResponse.text();
+      assert.equal(
+        createResponse.status(),
+        201,
+        `Adding ${provider} asset failed: HTTP ${createResponse.status()}\n${createBody}`
+      );
+      const asset = (JSON.parse(createBody).data ?? JSON.parse(createBody));
+
+      const previewSection = adminPage.getByText("Preview selected video", { exact: true }).locator("xpath=..");
+      const previewButton = previewSection.getByRole("button", { name: "Load video" });
+      await previewButton.waitFor({ state: "visible", timeout: 10000 });
+      const accessRequest = adminPage.waitForResponse(
+        (response) => {
+          const requestUrl = new URL(response.url());
+          return requestUrl.pathname.endsWith(`/assets/${asset.id}/access`)
+            && response.request().method() === "GET";
+        },
+        { timeout: 15000 }
+      );
+      await previewButton.click();
+      const accessResponse = await accessRequest;
+      const accessBody = await accessResponse.text();
+      assert.equal(
+        accessResponse.status(),
+        200,
+        `Preview access failed: HTTP ${accessResponse.status()}\n${accessBody}`
+      );
+      const access = (JSON.parse(accessBody).data ?? JSON.parse(accessBody));
+      assert.equal(access.type, "external_video");
+      assert.equal(access.provider, provider);
+      assert.ok(access.embed_url.startsWith("https://"));
+      await adminPage.locator(`iframe[title="${title}"]`).waitFor({ state: "visible" });
+
+      const mediaRequest = adminPage.waitForResponse(
+        (response) => response.url().includes("/blocks/media")
+          && response.request().method() === "POST",
+        { timeout: 15000 }
+      );
+      await adminPage.locator('button:has-text("Insert Selected Media")').click();
+      const mediaResponse = await mediaRequest;
+      const mediaBody = await mediaResponse.text();
+      assert.equal(
+        mediaResponse.status(),
+        201,
+        `Inserting ${provider} video failed: HTTP ${mediaResponse.status()}\n${mediaBody}`
+      );
+      await adminPage.waitForSelector('h3:has-text("Add Media Block")', { state: "hidden" });
+
+      return { assetId: asset.id, access };
+    }
+
+    console.log("\n[Assertion 8a] Adding, previewing, and inserting YouTube video...");
+    await addExternalVideo({
+      provider: "youtube",
+      url: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+      title: youtubeTitle,
+      caption: "YouTube video acceptance caption.",
+    });
+    console.log("✓ YouTube asset created, safely previewed, and inserted into the draft.");
+
+    console.log("\n[Assertion 8b] Adding, previewing, and inserting Google Drive video...");
+    const driveFileId = "1AbCdEfGhIjKlMnOpQrStUvWxYz123456";
+    await addExternalVideo({
+      provider: "google_drive",
+      url: `https://drive.google.com/file/d/${driveFileId}/view?usp=sharing`,
+      title: driveTitle,
+      caption: "Google Drive video acceptance caption.",
+    });
+    console.log("✓ Google Drive asset created, safely previewed, and inserted into the draft.");
+
     // -----------------------------------------------------------------------
     // ASSERTION 9: Adding an Exercise Block
     // -----------------------------------------------------------------------
@@ -327,6 +480,10 @@ async function main() {
     await attachExerciseBtn.click();
     const exerciseRes = await saveExercisePromise;
     assert.ok(exerciseRes.status() === 201 || exerciseRes.status() === 200, "Exercise block API returned success");
+    await adminPage.getByText("E2E Assessment Quiz", { exact: true }).first().waitFor({
+      state: "visible",
+      timeout: 10000,
+    });
     console.log("✓ Exercise block attached via API.");
 
     
@@ -341,7 +498,7 @@ async function main() {
     const dragHandles = adminPage.locator(
       'button[aria-label^="Reorder"]'
     );
-    
+
     const dragCount = await dragHandles.count();
     
     assert.ok(
@@ -449,9 +606,28 @@ async function main() {
       }
     );
     
-    // Perform actual UI keyboard operation.
+    // Move the keyboard drag pointer until the adjacent block is the active
+    // drop target. A fixed number of arrow presses is layout-dependent.
+    const secondBlockArticle = dragHandles
+      .nth(1)
+      .locator("xpath=ancestor::article[1]");
     await adminPage.keyboard.press("Space");
-    await adminPage.keyboard.press("ArrowDown");
+    let adjacentBlockIsDropTarget = false;
+    for (let step = 0; step < 40; step += 1) {
+      await adminPage.keyboard.press("ArrowDown");
+      adjacentBlockIsDropTarget = await secondBlockArticle.evaluate(
+        (element) => element.className.includes("before:bg-[#0e8988]")
+      );
+      if (adjacentBlockIsDropTarget) break;
+    }
+
+    if (!adjacentBlockIsDropTarget) {
+      await adminPage.keyboard.press("Escape");
+    }
+    assert.ok(
+      adjacentBlockIsDropTarget,
+      "Keyboard drag did not reach the immediately following block."
+    );
     await adminPage.keyboard.press("Space");
     
     const capturedReorder = await reorderResponsePromise;
@@ -558,6 +734,22 @@ async function main() {
       expectedOrderedIds,
       "Persisted order must exactly match the order submitted by the UI."
     );
+
+    const expectedVideoTitleOrder = draftAfterReorder.blocks
+      .filter((block) => block.block_type === "media" && externalVideoTitles.has(block.asset?.title))
+      .map((block) => block.asset.title);
+    assert.deepEqual(
+      [...expectedVideoTitleOrder].sort(),
+      [youtubeTitle, driveTitle].sort(),
+      "Both external videos must persist in the ordered draft."
+    );
+    const editorAfterReload = await adminPage.locator("main").innerText();
+    for (const title of externalVideoTitles) {
+      assert.ok(
+        editorAfterReload.includes(title),
+        `Reloaded editor displays saved video ${title}.`
+      );
+    }
     
     console.log(
       "✓ Block ordering persisted across reload and matches the canonical API order."
@@ -581,7 +773,7 @@ async function main() {
     console.log("\n[Assertion 11] Opening Live Student Preview...");
     const previewTab = adminPage.locator('button:has-text("Live Student Preview")');
     await previewTab.click();
-    await adminPage.waitForSelector('main h1', { timeout: 5000 });
+    await adminPage.waitForSelector('h1', { state: "visible", timeout: 10000 });
 
     const previewH1 = await adminPage.locator("h1").first().innerText();
     assert.ok(previewH1.length > 0, `Preview has proper semantic H1: ${previewH1}`);
@@ -656,17 +848,20 @@ async function main() {
     const studentContext = await browser.newContext();
     const studentPage = await studentContext.newPage();
 
-    studentPage.on("console", (msg) => {
-      if (msg.type() === "error") consoleErrors.push(`[Student Browser Error] ${msg.text()}`);
-    });
-    studentPage.on("pageerror", (err) => {
-      consoleErrors.push(`[Student Page Error] ${err.message}`);
-    });
-    studentPage.on("response", (resp) => {
-      if (resp.status() >= 400 && !resp.url().includes("/favicon.ico")) {
-        failedRequests.push({ url: resp.url(), status: resp.status() });
-      }
-    });
+    await studentPage.route("https://www.youtube-nocookie.com/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>Mock YouTube player</title>",
+      })
+    );
+    await studentPage.route("https://drive.google.com/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>Mock Drive preview</title>",
+      })
+    );
 
     await studentPage.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
     await studentPage.fill('input[name="email"]', fixture.studentEmail);
@@ -689,6 +884,17 @@ async function main() {
     const studentLessonUrl = `${BASE_URL}/courses/${fixture.courseSlug}/learn/lessons/${fixture.lessonId}?center=${fixture.centerSlug}`;
     const studentRes = await studentPage.goto(studentLessonUrl, { waitUntil: "networkidle" });
     assert.equal(studentRes.status(), 200, "Student lesson page returned HTTP 200");
+    studentPage.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(`[Student Browser Error] ${msg.text()}`);
+    });
+    studentPage.on("pageerror", (err) => {
+      consoleErrors.push(`[Student Page Error] ${err.message}`);
+    });
+    studentPage.on("response", (resp) => {
+      if (resp.status() >= 400 && !resp.url().includes("/favicon.ico")) {
+        failedRequests.push({ url: resp.url(), status: resp.status() });
+      }
+    });
 
     const studentMain = await studentPage.locator("main").innerText();
     assert.ok(
@@ -696,9 +902,77 @@ async function main() {
       "Student sees the published revision text content!"
     );
 
+    const renderedVideoTitles = (await studentPage.locator("article h3").allInnerTexts())
+      .filter((title) => externalVideoTitles.has(title));
+    assert.deepEqual(
+      renderedVideoTitles,
+      expectedVideoTitleOrder,
+      "The student sees both external videos in the exact published order."
+    );
+
+    for (const title of expectedVideoTitleOrder) {
+      const videoHeading = studentPage.locator("article h3").filter({ hasText: title });
+      const videoCard = videoHeading.locator("xpath=ancestor::article[1]");
+      const loadButton = videoCard.getByRole("button", { name: "Load video" });
+      const expectedProvider = title === youtubeTitle ? "youtube" : "google_drive";
+      const accessRequest = studentPage.waitForResponse(
+        (response) => {
+          const requestUrl = new URL(response.url());
+          return requestUrl.pathname.endsWith("/access")
+            && response.request().method() === "GET";
+        },
+        { timeout: 15000 }
+      );
+      await loadButton.click();
+      const accessResponse = await accessRequest;
+      const accessBody = await accessResponse.text();
+      assert.equal(
+        accessResponse.status(),
+        200,
+        `Student video access failed: HTTP ${accessResponse.status()}\n${accessBody}`
+      );
+      const access = (JSON.parse(accessBody).data ?? JSON.parse(accessBody));
+      assert.equal(access.provider, expectedProvider);
+      await videoCard.locator(`iframe[title="${title}"]`).waitFor({ state: "visible" });
+    }
+    console.log("✓ Student sees and can request playback for external videos in published order (provider pages mocked).");
+
     // 16a. Verify Media Retrieval (Image Asset)
+    const imageCard = studentPage.locator("article").filter({
+      has: studentPage.locator("h3").filter({ hasText: "E2E Diagram Asset" }),
+    });
+    const imageAccessPromise = studentPage.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return url.pathname.endsWith(`/assets/${fixture.imageAssetId}/access`)
+          && response.request().method() === "GET";
+      },
+      { timeout: 15000 }
+    );
+    const imageFileResponsePromise = studentPage.waitForResponse(
+      (response) => new URL(response.url()).pathname.includes("/private-storage/"),
+      { timeout: 15000 }
+    );
+    await imageCard.getByRole("button", { name: "View image" }).click();
+    const imageAccessResponse = await imageAccessPromise;
+    const imageAccessBody = await imageAccessResponse.text();
+    assert.equal(
+      imageAccessResponse.status(),
+      200,
+      `Student image access failed: HTTP ${imageAccessResponse.status()}\n${imageAccessBody}`
+    );
+    const imageFileResponse = await imageFileResponsePromise;
+    assert.equal(
+      imageFileResponse.status(),
+      200,
+      `Student image file failed: HTTP ${imageFileResponse.status()}`
+    );
+    assert.match(imageFileResponse.headers()["content-type"] ?? "", /^image\/png/);
+
     const imgElement = studentPage.locator('img[alt="E2E Diagram Asset"]');
     await imgElement.waitFor({ state: "visible", timeout: 10000 });
+    await imgElement.scrollIntoViewIfNeeded();
+    await imgElement.evaluate((img) => img.decode());
     const imgLoaded = await imgElement.evaluate((img) => img.complete && img.naturalWidth > 0);
     assert.ok(imgLoaded, "Image 'E2E Diagram Asset' is fully loaded in DOM with naturalWidth > 0");
     const imgSrc = await imgElement.getAttribute("src");
@@ -708,7 +982,7 @@ async function main() {
     // 16b. Authorized Student PDF Download Verification
     const authorizedPdfDownload = await studentPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, pdfAssetId }) => {
       const res = await fetch(
-        `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/assets/${pdfAssetId}/download`,
+        `${apiUrl}/api/centers/${centerSlug}/courses/${courseSlug}/learn/lessons/${lessonId}/assets/${pdfAssetId}/download`,
         { credentials: "include" }
       );
       const buffer = await res.arrayBuffer();
@@ -742,9 +1016,10 @@ async function main() {
     // 16c. Unenrolled User PDF Access Rejection
     const anonContext = await browser.newContext();
     const anonPage = await anonContext.newPage();
+    await anonPage.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
     const anonPdfDownload = await anonPage.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId, pdfAssetId }) => {
       const res = await fetch(
-        `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/assets/${pdfAssetId}/download`
+        `${apiUrl}/api/centers/${centerSlug}/courses/${courseSlug}/learn/lessons/${lessonId}/assets/${pdfAssetId}/download`
       );
       return { status: res.status };
     }, {
@@ -790,20 +1065,20 @@ async function main() {
     );
 
     // 1. Select correct answer.
-    const correctOptionButton = studentPage.locator(
-      `button[data-option-id="${expectedOptionId}"]`
+    const correctOptionInput = studentPage.locator(
+      `input[data-option-id="${expectedOptionId}"]`
     );
 
-    await correctOptionButton.waitFor({
+    await correctOptionInput.waitFor({
       state: "visible",
       timeout: 10000,
     });
 
-    await correctOptionButton.click();
+    await correctOptionInput.check();
 
     assert.equal(
-      await correctOptionButton.getAttribute("aria-pressed"),
-      "true",
+      await correctOptionInput.isChecked(),
+      true,
       "Selected answer must be marked as selected."
     );
 
@@ -846,9 +1121,12 @@ async function main() {
     const savePayload = saveJson.data ?? saveJson;
 
     assert.ok(
-      Array.isArray(savePayload.answers) &&
-      savePayload.answers.length > 0,
-      "Backend must return saved attempt answers."
+      Array.isArray(savePayload.questions) &&
+      savePayload.questions.some((question) =>
+        Number(question.id) === Number(fixture.questionId) &&
+        Number(question.selected_option_id) === Number(expectedOptionId)
+      ),
+      "Backend must return the saved selected option in the question payload."
     );
 
     // 3. Reload the actual browser page.
@@ -858,22 +1136,22 @@ async function main() {
     });
 
     // 4. Wait until the same answer is restored.
-    const restoredOptionButton = studentPage.locator(
-      `button[data-option-id="${expectedOptionId}"]`
+    const restoredOptionInput = studentPage.locator(
+      `input[data-option-id="${expectedOptionId}"]`
     );
 
-    await restoredOptionButton.waitFor({
+    await restoredOptionInput.waitFor({
       state: "visible",
       timeout: 15000,
     });
 
     await studentPage.waitForFunction(
       (optionId) => {
-        const button = document.querySelector(
-          `button[data-option-id="${optionId}"]`
+        const input = document.querySelector(
+          `input[data-option-id="${optionId}"]`
         );
 
-        return button?.getAttribute("aria-pressed") === "true";
+        return input?.checked === true;
       },
       expectedOptionId,
       {
@@ -882,8 +1160,8 @@ async function main() {
     );
 
     assert.equal(
-      await restoredOptionButton.getAttribute("aria-pressed"),
-      "true",
+      await restoredOptionInput.isChecked(),
+      true,
       "The same answer must be restored from the persisted attempt after reload."
     );
 
@@ -901,11 +1179,9 @@ async function main() {
       (response) => {
         const pathname = new URL(response.url()).pathname;
 
-        return (
-          response.request().method() === "POST" &&
-          pathname.endsWith("/attempts/current/submit") &&
-          response.status() === 200
-        );
+        return response.request().method() === "POST"
+          && /\/attempts\/\d+\/submit$/.test(pathname)
+          && response.status() === 200;
       },
       { timeout: 15000 }
     );
@@ -920,11 +1196,17 @@ async function main() {
       "Assessment submission must return HTTP 200."
     );
 
+    const submittedJson = await submitResponse.json();
+    const submittedAttempt = submittedJson.data ?? submittedJson;
+    assert.equal(submittedAttempt.passed, true, "Correct answer must pass the assessment.");
+    assert.equal(Number(submittedAttempt.percentage), 100, "Correct answer must score 100%.");
+
     // 6. Verify result.
-    await studentPage.waitForSelector(
-      'text=Passed, text=PASSED, text=Assessment Passed',
-      { timeout: 15000 }
-    );
+    await studentPage.reload({ waitUntil: "networkidle" });
+    await studentPage.getByText("Passed", { exact: true }).waitFor({
+      state: "visible",
+      timeout: 15000,
+    });
 
     const resultText = await studentPage.locator("main").innerText();
 
@@ -1041,6 +1323,8 @@ async function main() {
   const unexpectedFailedRequests = failedRequests.filter((r) => {
     // Exclude deliberate student admin probe which must return 403
     if (r.status === 403 && r.url.includes("/admin/courses/")) return false;
+    // Exclude deliberate deceptive-host validation which must return 422.
+    if (r.status === 422 && r.url.endsWith("/assets/external-video")) return false;
     // Exclude favicon
     if (r.url.includes("/favicon.ico")) return false;
     return true;
@@ -1049,6 +1333,7 @@ async function main() {
   const criticalConsoleErrors = consoleErrors.filter((e) => {
     if (e.includes("favicon")) return false;
     if (e.includes("Failed to load resource") && e.includes("403")) return false;
+    if (e.includes("Failed to load resource") && e.includes("422 (Unprocessable Content)")) return false;
     return true;
   });
 

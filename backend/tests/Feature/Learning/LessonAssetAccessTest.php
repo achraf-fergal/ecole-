@@ -571,6 +571,154 @@ class LessonAssetAccessTest extends TestCase
         ]);
     }
 
+    public function test_published_external_videos_return_only_validated_provider_descriptors(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $driveFileId = '1AbCdEfGhIjKlMnOpQrStUvWxYz123456';
+        $videos = [
+            [
+                'provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'asset_id' => 'M7lc1UVf-VE',
+                'url' => 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
+                'embed_url' => 'https://www.youtube-nocookie.com/embed/M7lc1UVf-VE?cc_load_policy=1&playsinline=1',
+                'open_url' => 'https://www.youtube.com/watch?v=M7lc1UVf-VE',
+            ],
+            [
+                'provider' => LessonAsset::VIDEO_PROVIDER_GOOGLE_DRIVE,
+                'asset_id' => $driveFileId,
+                'url' => "https://drive.google.com/file/d/{$driveFileId}/view?usp=sharing",
+                'embed_url' => "https://drive.google.com/file/d/{$driveFileId}/preview",
+                'open_url' => "https://drive.google.com/file/d/{$driveFileId}/view",
+            ],
+        ];
+
+        foreach ($videos as $video) {
+            $asset = LessonAsset::factory()
+                ->forLesson($lesson)
+                ->video()
+                ->create([
+                    'title' => 'External lesson video',
+                    'video_provider' => $video['provider'],
+                    'provider_asset_id' => $video['asset_id'],
+                    'external_url' => $video['url'],
+                ]);
+
+            $this->linkAssetToPublishedRevision($lesson, $asset);
+
+            $response = $this->withHeader(
+                'Authorization',
+                'Bearer '.$this->tokenFor($user)
+            )->getJson(
+                $this->assetAccessUrl($center, $course, $lesson, $asset)
+            );
+
+            $response->assertOk();
+            $response->assertJsonPath('data.type', 'external_video');
+            $response->assertJsonPath('data.provider', $video['provider']);
+            $response->assertJsonPath('data.embed_url', $video['embed_url']);
+            $response->assertJsonPath('data.open_url', $video['open_url']);
+            $response->assertJsonPath('data.expires_at', null);
+            $response->assertJsonMissingPath('data.provider_asset_id');
+            $response->assertJsonMissingPath('data.external_url');
+            $response->assertJsonMissingPath('data.storage_disk');
+            $response->assertJsonMissingPath('data.storage_key');
+        }
+    }
+
+    public function test_student_cannot_access_external_video_missing_from_current_published_revision(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->video()
+            ->create([
+                'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'provider_asset_id' => 'M7lc1UVf-VE',
+                'external_url' => 'https://youtu.be/M7lc1UVf-VE',
+            ]);
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($user)
+        )->getJson(
+            $this->assetAccessUrl($center, $course, $lesson, $asset)
+        );
+
+        $response->assertNotFound();
+    }
+
+    public function test_student_without_enrollment_cannot_access_external_video(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext(withEnrollment: false);
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->video()
+            ->create([
+                'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'provider_asset_id' => 'M7lc1UVf-VE',
+                'external_url' => 'https://youtu.be/M7lc1UVf-VE',
+            ]);
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($user)
+        )->getJson(
+            $this->assetAccessUrl($center, $course, $lesson, $asset)
+        );
+
+        $response->assertForbidden();
+    }
+
+    public function test_external_video_playback_rejects_a_provider_id_that_does_not_match_its_url(): void
+    {
+        [
+            'center' => $center,
+            'user' => $user,
+            'course' => $course,
+            'lesson' => $lesson,
+        ] = $this->createLearningContext();
+
+        $asset = LessonAsset::factory()
+            ->forLesson($lesson)
+            ->video()
+            ->create([
+                'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                'provider_asset_id' => 'M7lc1UVf-VE',
+                'external_url' => 'https://youtu.be/aaaaaaaaaaa',
+            ]);
+
+        $this->linkAssetToPublishedRevision($lesson, $asset);
+
+        $response = $this->withHeader(
+            'Authorization',
+            'Bearer '.$this->tokenFor($user)
+        )->getJson(
+            $this->assetAccessUrl($center, $course, $lesson, $asset)
+        );
+
+        $response->assertNotFound();
+    }
+
     public function test_processing_video_cannot_be_played_even_if_a_block_references_it(): void
     {
         [

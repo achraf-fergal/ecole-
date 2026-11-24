@@ -37,7 +37,22 @@ export type LessonAssetType =
 
 export type QuestionType =
   | "single_choice"
-  | "true_false";
+  | "true_false"
+  | "multiple_select"
+  | "short_answer";
+
+export interface ShortAnswerNormalization {
+  case_sensitive: boolean;
+  trim_whitespace: boolean;
+  collapse_internal_whitespace: boolean;
+  punctuation_sensitive: boolean;
+  diacritic_sensitive: boolean;
+}
+
+export interface ShortAnswerConfig {
+  accepted_answers: string[];
+  normalization: ShortAnswerNormalization;
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -218,6 +233,7 @@ export interface LearningQuestion {
   points: number | string;
   sort_order: number;
   options: LearningExerciseOption[];
+  answer_config?: ShortAnswerConfig | null;
 }
 
 export interface LearningExercise {
@@ -355,10 +371,19 @@ export interface CloudflareVideoAccess {
   expires_at: string;
 }
 
+export interface ExternalVideoAccess {
+  type: "external_video";
+  provider: "youtube" | "google_drive";
+  embed_url: string;
+  open_url: string;
+  expires_at: null;
+}
+
 export type LessonAssetAccess =
   | StoredAssetAccess
   | ExternalAssetAccess
-  | CloudflareVideoAccess;
+  | CloudflareVideoAccess
+  | ExternalVideoAccess;
 
 /*
 |--------------------------------------------------------------------------
@@ -844,10 +869,14 @@ export interface AttemptQuestion {
   prompt: string;
   points_possible: number;
   selected_option_id: number | null;
+  selected_option_ids?: number[] | null;
+  text_answer?: string | null;
   options: AttemptQuestionOption[];
   is_correct?: boolean;
   points_awarded?: number;
   correct_option_id?: number;
+  correct_option_ids?: number[];
+  accepted_answers?: string[];
   explanation?: string | null;
 }
 
@@ -898,7 +927,9 @@ export interface PaginatedExerciseAttempts {
 
 export interface SaveAttemptAnswerPayload {
   question_id: number;
-  selected_option_id: number | null;
+  selected_option_id?: number | null;
+  selected_option_ids?: number[];
+  text_answer?: string | null;
 }
 
 /**
@@ -951,9 +982,10 @@ export async function saveExerciseAttemptAnswers(
 export async function submitExerciseAttempt(
   params: LearningRouteParams,
   exerciseId: number,
+  attemptId: number,
   answers?: SaveAttemptAnswerPayload[]
 ): Promise<ExerciseAttemptData> {
-  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/current/submit`;
+  const endpoint = `${buildLessonPath(params)}/exercises/${exerciseId}/attempts/${attemptId}/submit`;
 
   return requestLearningData<ExerciseAttemptData>(endpoint, {
     method: "POST",

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "test:editor": "node --test tests/admin-block-ordering.test.mjs",
+    "test:assessment": "node --test tests/exercise-authoring.test.mjs",
     "test:acceptance": "node tests/browser-acceptance.mjs",
     "start": "next start",
     "lint": "eslint"

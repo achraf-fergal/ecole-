@@ -26,7 +26,7 @@ class LessonAssetFactory extends Factory
 
             'storage_disk' => 'private',
 
-            'storage_key' => 'pending/' . Str::uuid() . '.pdf',
+            'storage_key' => 'pending/'.Str::uuid().'.pdf',
 
             'original_filename' => 'learning-resource.pdf',
 
@@ -106,7 +106,6 @@ class LessonAssetFactory extends Factory
 
             'storage_disk' => 'private',
 
-
             'original_filename' => 'lesson-image.jpg',
 
             'mime_type' => 'image/jpeg',
@@ -137,7 +136,7 @@ class LessonAssetFactory extends Factory
             'mime_type' => null,
             'size_bytes' => null,
 
-            'video_provider' => 'cloudflare_stream',
+            'video_provider' => LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM,
 
             'provider_asset_id' => (string) Str::uuid(),
 

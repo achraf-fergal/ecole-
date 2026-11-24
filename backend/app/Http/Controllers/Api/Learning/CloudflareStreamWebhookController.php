@@ -49,7 +49,7 @@ class CloudflareStreamWebhookController extends Controller
 
         $asset = LessonAsset::query()
             ->where('asset_type', LessonAsset::TYPE_VIDEO)
-            ->where('video_provider', 'cloudflare_stream')
+            ->where('video_provider', LessonAsset::VIDEO_PROVIDER_CLOUDFLARE_STREAM)
             ->where('provider_asset_id', $uid)
             ->first();
 

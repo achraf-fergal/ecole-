@@ -88,11 +88,28 @@ async function handleResponse<T>(response: Response, defaultMessage: string): Pr
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
     const message = errorData?.message || defaultMessage;
-    throw new Error(message);
+    throw new AdminLearningApiError(
+      message,
+      response.status,
+      errorData && typeof errorData === "object" && "errors" in errorData
+        ? (errorData.errors as Record<string, string[]>)
+        : undefined
+    );
   }
 
   const json = await response.json();
   return json.data ?? json;
+}
+
+export class AdminLearningApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly errors?: Record<string, string[]>
+  ) {
+    super(message);
+    this.name = "AdminLearningApiError";
+  }
 }
 
 /**
@@ -394,6 +411,32 @@ export async function uploadAdminLessonAsset(
   return handleResponse<LearningLessonAsset>(response, "Failed to upload asset.");
 }
 
+/** Add a YouTube or Google Drive video to the lesson asset library. */
+export async function createAdminExternalVideoAsset(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  payload: {
+    provider: "youtube" | "google_drive";
+    url: string;
+    title?: string;
+    caption?: string;
+  }
+): Promise<LearningLessonAsset> {
+  const response = await authFetch(
+    `${buildAssetBasePath(centerSlug, courseSlug, lessonId)}/external-video`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }
+  );
+
+  return handleResponse<LearningLessonAsset>(
+    response,
+    "Failed to add external video."
+  );
+}
+
 export interface AdminVideoUploadProvision {
   asset: LearningLessonAsset;
   upload_url: string;
@@ -511,10 +554,24 @@ export interface CreateExerciseOptionPayload {
   sort_order?: number;
 }
 
+export interface ShortAnswerNormalizationPayload {
+  case_sensitive: boolean;
+  trim_whitespace: boolean;
+  collapse_internal_whitespace: boolean;
+  punctuation_sensitive: boolean;
+  diacritic_sensitive: boolean;
+}
+
+export interface ShortAnswerConfigPayload {
+  accepted_answers: string[];
+  normalization: ShortAnswerNormalizationPayload;
+}
+
 export interface CreateQuestionPayload {
   id?: number;
   prompt: string;
-  question_type: "single_choice" | "true_false";
+  question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer";
+  answer_config?: ShortAnswerConfigPayload | null;
   explanation?: string | null;
   points?: number;
   sort_order?: number;
@@ -543,7 +600,8 @@ export interface AdminFullExercise {
   published_at: string | null;
   questions: {
     id: number;
-    question_type: "single_choice" | "true_false";
+    question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer";
+    answer_config: ShortAnswerConfigPayload | null;
     prompt: string;
     explanation: string | null;
     points: number;
@@ -643,5 +701,21 @@ export async function publishAdminExercise(
 
   const response = await authFetch(endpoint, { method: "POST" });
   return handleResponse<AdminFullExercise>(response, "Failed to publish exercise.");
+}
+
+/** Delete a draft exercise that is not referenced by a protected revision. */
+export async function deleteAdminExercise(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  exerciseId: number
+): Promise<void> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises/${exerciseId}`;
+
+  const response = await authFetch(endpoint, { method: "DELETE" });
+  await handleResponse<null>(response, "Failed to delete exercise.");
 }
 

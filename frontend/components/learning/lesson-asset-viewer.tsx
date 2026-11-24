@@ -9,11 +9,13 @@ import {
   LearningApiError,
   type CloudflareVideoAccess,
   type ExternalAssetAccess,
+  type ExternalVideoAccess,
   type LearningLessonAsset,
   type LearningRouteParams,
   type LessonAssetAccess,
   type StoredAssetAccess,
 } from "@/lib/learning";
+import LessonVideoPlayer from "@/components/learning/lesson-video-player";
 
 function isStoredAsset(access: LessonAssetAccess): access is StoredAssetAccess {
   return "type" in access && access.type === "stored_asset";
@@ -25,6 +27,10 @@ function isExternalAsset(access: LessonAssetAccess): access is ExternalAssetAcce
 
 function isCloudflareVideo(access: LessonAssetAccess): access is CloudflareVideoAccess {
   return "provider" in access && access.provider === "cloudflare_stream";
+}
+
+function isExternalVideo(access: LessonAssetAccess): access is ExternalVideoAccess {
+  return "type" in access && access.type === "external_video";
 }
 
 interface LessonAssetViewerProps {
@@ -284,23 +290,19 @@ export default function LessonAssetViewer({
               </div>
             )}
 
-          {isCloudflareVideo(access) && (
+          {(isCloudflareVideo(access) || isExternalVideo(access)) && (
               <div>
-                <div className="relative aspect-video overflow-hidden rounded-xl bg-[#071d36]">
-                  <iframe
-                    src={access.player_url}
-                    title={title}
-                    className="absolute inset-0 h-full w-full"
-                    allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                    referrerPolicy="strict-origin-when-cross-origin"
-                  />
-                </div>
-
+                <LessonVideoPlayer
+                  access={access}
+                  title={title}
+                  caption={asset.caption}
+                />
+                {isCloudflareVideo(access) && (
                 <p className="mt-3 text-[10px] text-slate-400">
                   Secure video access expires at{" "}
                   {new Date(access.expires_at).toLocaleTimeString()}
                 </p>
+                )}
               </div>
             )}
 

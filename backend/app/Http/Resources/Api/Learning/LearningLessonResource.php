@@ -8,6 +8,7 @@ use App\Models\Lesson;
 use App\Models\LessonAsset;
 use App\Models\LessonBlock;
 use App\Models\LessonRevision;
+use App\Models\Question;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Collection;
@@ -197,6 +198,9 @@ class LearningLessonResource extends JsonResource
 
                     if ($isAdminPreview) {
                         $questionData['explanation'] = $question->explanation;
+                        if ($question->question_type === Question::TYPE_SHORT_ANSWER) {
+                            $questionData['answer_config'] = $question->answer_config;
+                        }
                     }
 
                     return $questionData;

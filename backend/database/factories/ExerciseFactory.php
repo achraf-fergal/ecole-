@@ -28,7 +28,7 @@ class ExerciseFactory extends Factory
             'max_attempts' => 3,
 
             // Default passing percentage.
-            'passing_score' => 60.00,
+            'passing_score' => 70.00,
 
             // Answer key is hidden by default.
             'show_correct_answers_after_submission' => false,

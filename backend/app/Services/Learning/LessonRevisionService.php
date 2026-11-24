@@ -966,7 +966,25 @@ class LessonRevisionService
 
         if (
             $asset->asset_type === LessonAsset::TYPE_VIDEO
-            && ! $asset->isProviderVideo()
+            && (
+                ! $asset->isProviderVideo()
+                || ! in_array(
+                    $asset->video_provider,
+                    LessonAsset::VIDEO_PROVIDERS,
+                    true
+                )
+                || (
+                    in_array($asset->video_provider, [
+                        LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+                        LessonAsset::VIDEO_PROVIDER_GOOGLE_DRIVE,
+                    ], true)
+                    && ! ExternalVideoUrlParser::isValidAssetReference(
+                        $asset->video_provider,
+                        (string) $asset->external_url,
+                        (string) $asset->provider_asset_id
+                    )
+                )
+            )
         ) {
             $this->fail(
                 'asset_id',

@@ -7,13 +7,14 @@ use App\Models\Center;
 use App\Models\Course;
 use App\Models\Exercise;
 use App\Models\Lesson;
+use App\Models\Question;
 use App\Models\User;
 use App\Services\Learning\AdminExerciseService;
 use App\Services\Learning\LessonRevisionService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\ValidationException;
+use Illuminate\Validation\Rule;
 
 class AdminExerciseController extends Controller
 {
@@ -72,14 +73,27 @@ class AdminExerciseController extends Controller
             'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'questions' => ['sometimes', 'array'],
-            'questions.*.prompt' => ['required', 'string'],
-            'questions.*.question_type' => ['sometimes', 'string', 'in:single_choice,true_false'],
-            'questions.*.explanation' => ['nullable', 'string'],
+            'questions.*' => ['array:id,prompt,question_type,answer_config,explanation,points,sort_order,options'],
+            'questions.*.id' => ['prohibited'],
+            'questions.*.prompt' => ['sometimes', 'nullable', 'string', 'max:10000'],
+            'questions.*.question_type' => ['sometimes', 'string', Rule::in(Question::TYPES)],
+            'questions.*.answer_config' => ['sometimes', 'nullable', 'array:accepted_answers,normalization'],
+            'questions.*.answer_config.accepted_answers' => ['sometimes', 'array', 'max:20'],
+            'questions.*.answer_config.accepted_answers.*' => ['nullable', 'string', 'max:500'],
+            'questions.*.answer_config.normalization' => ['sometimes', 'array:case_sensitive,trim_whitespace,collapse_internal_whitespace,punctuation_sensitive,diacritic_sensitive'],
+            'questions.*.answer_config.normalization.case_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.trim_whitespace' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.collapse_internal_whitespace' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.punctuation_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.diacritic_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.explanation' => ['sometimes', 'nullable', 'string', 'max:10000'],
             'questions.*.points' => ['sometimes', 'numeric', 'min:0.01'],
             'questions.*.sort_order' => ['sometimes', 'integer', 'min:0'],
-            'questions.*.options' => ['required', 'array', 'min:2'],
-            'questions.*.options.*.option_text' => ['required', 'string'],
-            'questions.*.options.*.is_correct' => ['required', 'boolean'],
+            'questions.*.options' => ['sometimes', 'array', 'max:100'],
+            'questions.*.options.*' => ['array:id,option_text,is_correct,sort_order'],
+            'questions.*.options.*.id' => ['prohibited'],
+            'questions.*.options.*.option_text' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'questions.*.options.*.is_correct' => ['sometimes', 'boolean'],
             'questions.*.options.*.sort_order' => ['sometimes', 'integer', 'min:0'],
         ]);
 
@@ -112,16 +126,27 @@ class AdminExerciseController extends Controller
             'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
             'sort_order' => ['sometimes', 'integer', 'min:0'],
             'questions' => ['sometimes', 'array'],
+            'questions.*' => ['array:id,prompt,question_type,answer_config,explanation,points,sort_order,options'],
             'questions.*.id' => ['sometimes', 'nullable', 'integer'],
-            'questions.*.prompt' => ['required', 'string'],
-            'questions.*.question_type' => ['sometimes', 'string', 'in:single_choice,true_false'],
-            'questions.*.explanation' => ['nullable', 'string'],
+            'questions.*.prompt' => ['sometimes', 'nullable', 'string', 'max:10000'],
+            'questions.*.question_type' => ['sometimes', 'string', Rule::in(Question::TYPES)],
+            'questions.*.answer_config' => ['sometimes', 'nullable', 'array:accepted_answers,normalization'],
+            'questions.*.answer_config.accepted_answers' => ['sometimes', 'array', 'max:20'],
+            'questions.*.answer_config.accepted_answers.*' => ['nullable', 'string', 'max:500'],
+            'questions.*.answer_config.normalization' => ['sometimes', 'array:case_sensitive,trim_whitespace,collapse_internal_whitespace,punctuation_sensitive,diacritic_sensitive'],
+            'questions.*.answer_config.normalization.case_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.trim_whitespace' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.collapse_internal_whitespace' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.punctuation_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.answer_config.normalization.diacritic_sensitive' => ['sometimes', 'boolean'],
+            'questions.*.explanation' => ['sometimes', 'nullable', 'string', 'max:10000'],
             'questions.*.points' => ['sometimes', 'numeric', 'min:0.01'],
             'questions.*.sort_order' => ['sometimes', 'integer', 'min:0'],
-            'questions.*.options' => ['required', 'array', 'min:2'],
+            'questions.*.options' => ['sometimes', 'array', 'max:100'],
+            'questions.*.options.*' => ['array:id,option_text,is_correct,sort_order'],
             'questions.*.options.*.id' => ['sometimes', 'nullable', 'integer'],
-            'questions.*.options.*.option_text' => ['required', 'string'],
-            'questions.*.options.*.is_correct' => ['required', 'boolean'],
+            'questions.*.options.*.option_text' => ['sometimes', 'nullable', 'string', 'max:2000'],
+            'questions.*.options.*.is_correct' => ['sometimes', 'boolean'],
             'questions.*.options.*.sort_order' => ['sometimes', 'integer', 'min:0'],
         ]);
 
@@ -248,6 +273,9 @@ class AdminExerciseController extends Controller
                     'id' => $q->id,
                     'question_type' => $q->question_type,
                     'prompt' => $q->prompt,
+                    'answer_config' => $q->question_type === Question::TYPE_SHORT_ANSWER
+                        ? $q->answer_config
+                        : null,
                     'explanation' => $q->explanation,
                     'points' => (float) $q->points,
                     'sort_order' => $q->sort_order,
