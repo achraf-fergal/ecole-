@@ -14,6 +14,222 @@ const FIXTURE_PHP = path.join(REPO_ROOT, "backend/tests/fixtures/E2EFixtureManag
 const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:3000";
 const API_URL = process.env.API_URL || "http://127.0.0.1:8000";
 
+async function getAdminExercises(page, fixture) {
+  return page.evaluate(async ({ apiUrl, centerSlug, courseSlug, lessonId }) => {
+    const response = await fetch(
+      `${apiUrl}/api/centers/${encodeURIComponent(centerSlug)}/admin/courses/${encodeURIComponent(courseSlug)}/lessons/${lessonId}/exercises`,
+      {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      }
+    );
+    const json = await response.json();
+    return { status: response.status, exercises: json.data ?? json };
+  }, {
+    apiUrl: API_URL,
+    centerSlug: fixture.centerSlug,
+    courseSlug: fixture.courseSlug,
+    lessonId: fixture.lessonId,
+  });
+}
+
+async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailures) {
+  await page.getByRole("button", { name: "Exercise Drafts", exact: true }).click();
+  const builder = page.getByRole("region", { name: "Exercise draft builder" });
+  await builder.waitFor({ state: "visible" });
+
+  const title = "E2E V2 Four Type Assessment";
+  const createPromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/exercises") && response.request().method() === "POST";
+  }, { timeout: 15000 });
+  await builder.getByRole("button", { name: "+ New Draft", exact: true }).click();
+  const createResponse = await createPromise;
+  assert.equal(createResponse.status(), 201, "Creating an exercise draft returns HTTP 201.");
+  const createBody = await createResponse.json();
+  const exerciseId = Number((createBody.data ?? createBody).id);
+  assert.ok(exerciseId > 0, "Created exercise draft has an ID.");
+
+  await builder.getByLabel("Exercise title").fill(title);
+  const questionCards = builder.locator("fieldset.rounded-xl.border-slate-200");
+  const addQuestion = builder.getByRole("button", { name: "+ Add question", exact: true });
+  for (let index = 0; index < 4; index += 1) await addQuestion.click();
+  assert.equal(await questionCards.count(), 4, "Draft builder adds four questions.");
+
+  const prompts = [
+    "Choose the greeting.",
+    "The sky is blue.",
+    "Select the primary colors.",
+    "Translate hello into French.",
+  ];
+  for (let index = 0; index < prompts.length; index += 1) {
+    await questionCards.nth(index).getByLabel("Prompt").fill(prompts[index]);
+  }
+
+  await questionCards.nth(0).getByLabel("Question type").selectOption("single_choice");
+  await questionCards.nth(0).getByLabel("Question 1 option 1").fill("Salut");
+  await questionCards.nth(0).getByLabel("Question 1 option 2").fill("Au revoir");
+  await questionCards.nth(0).getByLabel("Mark option 2 correct").check();
+  await questionCards.nth(0).getByRole("button", { name: "+ Add option", exact: true }).click();
+  await questionCards.nth(0).getByLabel("Question 1 option 3").fill("Temporary option");
+  await questionCards.nth(0).getByRole("button", { name: "Remove option 3", exact: true }).click();
+  assert.equal(await questionCards.nth(0).getByLabel("Question 1 option 3").count(), 0, "Draft builder removes an unused option.");
+
+  await questionCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
+  await questionCards.nth(1).getByLabel("Question type").selectOption("true_false");
+  await questionCards.nth(1).getByLabel("Mark option 2 correct").check();
+
+  await questionCards.nth(2).getByLabel("Question type").selectOption("multiple_select");
+  await questionCards.nth(2).getByLabel("Question 3 option 1").fill("Red");
+  await questionCards.nth(2).getByLabel("Question 3 option 2").fill("Blue");
+  await questionCards.nth(2).getByLabel("Question 3 option 3").fill("Green");
+  await questionCards.nth(2).getByLabel("Mark option 2 correct").uncheck();
+  await questionCards.nth(2).getByLabel("Mark option 3 correct").check();
+
+  await questionCards.nth(3).getByLabel("Question type").selectOption("short_answer");
+  await questionCards.nth(3).getByLabel("Explanation (shown only when answer review is allowed)").fill("Bonjour means hello.");
+
+  let prematurePublishRequests = 0;
+  const onPrematurePublish = (request) => {
+    if (new URL(request.url()).pathname.endsWith(`/exercises/${exerciseId}/publish`)) {
+      prematurePublishRequests += 1;
+    }
+  };
+  page.on("request", onPrematurePublish);
+  await builder.getByRole("button", { name: "Publish", exact: true }).click();
+  await builder.getByRole("alert").filter({ hasText: "Review the marked fields before publishing." }).waitFor({ timeout: 5000 });
+  await builder.getByRole("alert").filter({ hasText: "Add at least one accepted answer." }).waitFor({ timeout: 5000 });
+  await page.waitForTimeout(100);
+  page.off("request", onPrematurePublish);
+  assert.equal(prematurePublishRequests, 0, "Invalid exercise configuration is rejected before publishing.");
+  const invalidDraft = await getAdminExercises(page, fixture);
+  assert.equal(invalidDraft.status, 200);
+  assert.equal(invalidDraft.exercises.find((row) => row.id === exerciseId)?.status, "draft", "Failed publish leaves the exercise as a draft.");
+
+  await questionCards.nth(3).locator('input[aria-label="Accepted answer 1"]').fill("bonjour");
+  await questionCards.nth(3).getByRole("button", { name: "+ Add accepted answer", exact: true }).click();
+  await questionCards.nth(3).locator('input[aria-label="Accepted answer 2"]').fill("salut");
+  await builder.getByLabel("Show correct answers and explanations after submission").check();
+
+  const exerciseUrl = `${API_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises/${exerciseId}`;
+  const exercisePath = new URL(exerciseUrl).pathname;
+  intentionalFailures.add(`500:${exercisePath}`);
+  let failedSaveInjected = false;
+  await page.route(exerciseUrl, async (route) => {
+    if (route.request().method() === "PATCH" && !failedSaveInjected) {
+      failedSaveInjected = true;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "Injected one-time E2E save failure." }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const failedSavePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
+  { timeout: 15000 });
+  await builder.getByRole("button", { name: "Save Draft", exact: true }).click();
+  const failedSaveResponse = await failedSavePromise;
+  assert.equal(failedSaveResponse.status(), 500, "Injected transient exercise save fails as expected.");
+  await builder.getByRole("alert").first().waitFor({ state: "visible", timeout: 5000 });
+  assert.equal(await builder.getByLabel("Exercise title").inputValue(), title, "Failed save preserves the exercise title.");
+  assert.equal(await questionCards.nth(3).locator('input[aria-label="Accepted answer 1"]').inputValue(), "bonjour", "Failed save preserves accepted-answer edits.");
+  await page.unroute(exerciseUrl);
+
+  const initialSavePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
+  { timeout: 15000 });
+  await builder.getByRole("button", { name: "Save Draft", exact: true }).click();
+  const initialSaveResponse = await initialSavePromise;
+  assert.equal(initialSaveResponse.status(), 200, "Exercise draft saves after retry.");
+
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Exercise Drafts", exact: true }).click();
+  const reopenedBuilder = page.getByRole("region", { name: "Exercise draft builder" });
+  const savedExerciseButton = reopenedBuilder.getByRole("button").filter({ hasText: title });
+  await savedExerciseButton.waitFor({ state: "visible", timeout: 10000 });
+  await savedExerciseButton.click();
+
+  const beforeResponse = await getAdminExercises(page, fixture);
+  assert.equal(beforeResponse.status, 200);
+  const before = beforeResponse.exercises.find((row) => row.id === exerciseId);
+  assert.ok(before, "Saved exercise reopens from the server.");
+  assert.deepEqual(before.questions.map((question) => question.question_type), [
+    "single_choice", "true_false", "multiple_select", "short_answer",
+  ]);
+  assert.deepEqual(before.questions.map((question) => question.prompt), prompts);
+  assert.deepEqual(before.questions[3].answer_config.accepted_answers, ["bonjour", "salut"]);
+  const originalQuestionIds = before.questions.map((question) => Number(question.id));
+  const originalSingleOptionIds = before.questions[0].options.map((option) => Number(option.id));
+  const originalMultipleOptionIds = before.questions[2].options.map((option) => Number(option.id));
+
+  const reopenedCards = reopenedBuilder.locator("fieldset.rounded-xl.border-slate-200");
+  await reopenedCards.nth(0).getByLabel("Question 1 option 2").fill("Goodbye");
+  await reopenedCards.nth(0).getByLabel("Mark option 1 correct").check();
+  await reopenedCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
+  await reopenedCards.nth(1).getByLabel("Question type").selectOption("true_false");
+  await reopenedCards.nth(2).getByRole("button", { name: "+ Add option", exact: true }).click();
+  await reopenedCards.nth(2).getByLabel("Question 3 option 4").fill("Temporary option");
+  await reopenedCards.nth(2).getByRole("button", { name: "Remove option 4", exact: true }).click();
+  await reopenedCards.nth(3).locator('input[aria-label="Accepted answer 1"]').fill("Bonjour");
+  await reopenedCards.nth(3).locator('input[aria-label="Accepted answer 2"]').fill("salut");
+
+  const editSavePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
+  { timeout: 15000 });
+  await reopenedBuilder.getByRole("button", { name: "Save Draft", exact: true }).click();
+  const editSaveResponse = await editSavePromise;
+  assert.equal(editSaveResponse.status(), 200, "Edited exercise draft saves.");
+
+  const afterResponse = await getAdminExercises(page, fixture);
+  const after = afterResponse.exercises.find((row) => row.id === exerciseId);
+  assert.deepEqual(after.questions.map((question) => Number(question.id)), originalQuestionIds, "Question IDs remain stable after edits and a type change.");
+  assert.deepEqual(after.questions[0].options.map((option) => Number(option.id)), originalSingleOptionIds, "Single-choice option IDs remain stable when edited.");
+  assert.deepEqual(after.questions[2].options.map((option) => Number(option.id)), originalMultipleOptionIds, "Multiple-select option IDs remain stable after add/remove.");
+  assert.equal(after.questions[0].options[0].is_correct, true, "Correct-answer edits persist.");
+  assert.deepEqual(after.questions[3].answer_config.accepted_answers, ["Bonjour", "salut"], "Accepted-answer edits persist.");
+
+  await reopenedBuilder.getByRole("button", { name: "Preview", exact: true }).click();
+  const preview = page.getByRole("dialog");
+  await preview.waitFor({ state: "visible" });
+  assert.ok((await preview.innerText()).includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
+  for (const prompt of prompts) assert.ok((await preview.innerText()).includes(prompt), `Preview includes: ${prompt}`);
+  await preview.getByRole("button", { name: "Close", exact: true }).click();
+
+  const finalSavePromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
+  { timeout: 15000 });
+  const publishPromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith(`/exercises/${exerciseId}/publish`) && response.request().method() === "POST";
+  }, { timeout: 15000 });
+  await reopenedBuilder.getByRole("button", { name: "Publish", exact: true }).click();
+  const [finalSaveResponse, publishResponse] = await Promise.all([finalSavePromise, publishPromise]);
+  assert.equal(finalSaveResponse.status(), 200, "Publish saves the latest exercise draft first.");
+  assert.equal(publishResponse.status(), 200, "Valid exercise publishes successfully.");
+
+  const publishedResponse = await getAdminExercises(page, fixture);
+  const published = publishedResponse.exercises.find((row) => row.id === exerciseId);
+  assert.equal(published?.status, "published", "Published status persists.");
+  assert.deepEqual(published.questions.map((question) => question.question_type), [
+    "single_choice", "true_false", "multiple_select", "short_answer",
+  ]);
+
+  const insertPromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/blocks/exercise") && response.request().method() === "POST";
+  }, { timeout: 15000 });
+  await reopenedBuilder.getByRole("button", { name: "Insert into lesson", exact: true }).click();
+  const insertResponse = await insertPromise;
+  assert.ok([200, 201].includes(insertResponse.status()), "Published exercise inserts into the draft lesson revision.");
+  await page.getByText(title, { exact: true }).first().waitFor({ state: "visible", timeout: 10000 });
+
+  return published;
+}
+
 /**
  * Resolve a Chromium-compatible browser without assuming hardcoded paths.
  */
@@ -121,6 +337,8 @@ async function main() {
   let fixture = null;
   let browser = null;
   let primaryError = null;
+  let authoredExercise = null;
+  const intentionalAcceptanceFailures = new Set();
   const consoleErrors = [];
   const failedRequests = [];
 
@@ -495,6 +713,14 @@ async function main() {
       "\n[Assertion 10] Testing Block Reordering in Timeline via Accessible UI..."
     );
     
+    console.log("\n[Assertion 9a] Admin exercise draft lifecycle and four question types...");
+    authoredExercise = await verifyAdminExerciseDraftBuilder(
+      adminPage,
+      fixture,
+      intentionalAcceptanceFailures
+    );
+    console.log("âœ“ Draft saved/reopened/edited; IDs, validation, failed-save recovery, preview, publication, and lesson insertion verified.");
+
     const dragHandles = adminPage.locator(
       'button[aria-label^="Reorder"]'
     );
@@ -1321,6 +1547,8 @@ async function main() {
 
   // Strictly assert no unexpected failed requests or critical errors occurred
   const unexpectedFailedRequests = failedRequests.filter((r) => {
+    const failureKey = `${r.status}:${new URL(r.url).pathname}`;
+    if (intentionalAcceptanceFailures.has(failureKey)) return false;
     // Exclude deliberate student admin probe which must return 403
     if (r.status === 403 && r.url.includes("/admin/courses/")) return false;
     // Exclude deliberate deceptive-host validation which must return 422.

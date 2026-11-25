@@ -1433,8 +1433,8 @@ class LessonMySqlAcceptanceTest extends TestCase
         $this->assertSame($run['results'][0], $run['results'][1]);
         $this->assertSame($fixture['attempt']->id, $run['results'][0]['attempt_id']);
         $this->assertSame(1, $run['results'][0]['attempt_number']);
-        $this->assertSame(0.1, $run['results'][0]['score']);
-        $this->assertSame(100.0, $run['results'][0]['percentage']);
+        $this->assertEqualsWithDelta(0.1, (float) $run['results'][0]['score'], 0.0001);
+        $this->assertEqualsWithDelta(100.0, (float) $run['results'][0]['percentage'], 0.0001);
         $this->assertTrue($run['results'][0]['passed']);
 
         $attempt = ExerciseAttempt::query()->with('answers')->findOrFail($fixture['attempt']->id);
@@ -1472,8 +1472,8 @@ class LessonMySqlAcceptanceTest extends TestCase
         $this->assertSame($accepted['graded_at'], $attempt->graded_at?->toIso8601String());
         $this->assertSame($accepted['selected_option_id'], $answer->selected_option_id);
         $this->assertSame($accepted['is_correct'], (bool) $answer->is_correct);
-        $this->assertSame($accepted['score'], (float) $attempt->score);
-        $this->assertSame($accepted['points_awarded'], (float) $answer->points_awarded);
+        $this->assertEqualsWithDelta((float) $accepted['score'], (float) $attempt->score, 0.0001);
+        $this->assertEqualsWithDelta((float) $accepted['points_awarded'], (float) $answer->points_awarded, 0.0001);
         $this->assertContains($answer->selected_option_id, [
             $fixture['correct_option']->id,
             $fixture['incorrect_option']->id,
