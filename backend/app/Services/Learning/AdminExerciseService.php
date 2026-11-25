@@ -340,8 +340,23 @@ class AdminExerciseService
             foreach ($questionsData as $qIndex => $qData) {
                 $qId = isset($qData['id']) && $qData['id'] !== null ? (int) $qData['id'] : null;
                 $questionType = $qData['question_type'] ?? Question::TYPE_SINGLE_CHOICE;
-                $points = $qData['points'] ?? 1.00;
                 $sortOrder = $qData['sort_order'] ?? ($qIndex + 1);
+
+                $normalizedAnswerConfig = match ($questionType) {
+                    Question::TYPE_SHORT_ANSWER => isset($qData['answer_config'])
+                        ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
+                        : null,
+                    Question::TYPE_FILL_IN_THE_BLANKS => isset($qData['answer_config'])
+                        ? $this->answerGrader->normalizeBlankConfiguration($qData['answer_config'])
+                        : null,
+                    default => null,
+                };
+
+                $points = $questionType === Question::TYPE_FILL_IN_THE_BLANKS
+                    ? $this->answerGrader->minorUnitsToDecimalString(
+                        $this->answerGrader->sumBlankPointsMinorUnits($normalizedAnswerConfig)
+                    )
+                    : ($qData['points'] ?? 1.00);
 
                 if ($qId !== null) {
                     $q = Question::query()
@@ -354,15 +369,7 @@ class AdminExerciseService
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
-                        'answer_config' => match ($questionType) {
-                            Question::TYPE_SHORT_ANSWER => isset($qData['answer_config'])
-                                ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
-                                : null,
-                            Question::TYPE_FILL_IN_THE_BLANKS => isset($qData['answer_config'])
-                                ? $this->answerGrader->normalizeBlankConfiguration($qData['answer_config'])
-                                : null,
-                            default => null,
-                        },
+                        'answer_config' => $normalizedAnswerConfig,
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
@@ -373,15 +380,7 @@ class AdminExerciseService
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
-                        'answer_config' => match ($questionType) {
-                            Question::TYPE_SHORT_ANSWER => isset($qData['answer_config'])
-                                ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
-                                : null,
-                            Question::TYPE_FILL_IN_THE_BLANKS => isset($qData['answer_config'])
-                                ? $this->answerGrader->normalizeBlankConfiguration($qData['answer_config'])
-                                : null,
-                            default => null,
-                        },
+                        'answer_config' => $normalizedAnswerConfig,
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
@@ -527,9 +526,23 @@ class AdminExerciseService
                         true
                     );
 
-                    if ($configErrors !== []) {
+                    $placeholderErrors = $this->answerGrader->promptPlaceholderErrors(
+                        (string) $question->prompt,
+                        $question->answer_config
+                    );
+
+                    $allErrors = array_merge_recursive($configErrors, $placeholderErrors);
+
+                    $blankTotalMinorUnits = $this->answerGrader->sumBlankPointsMinorUnits($question->answer_config);
+                    $questionPointsMinorUnits = $this->answerGrader->decimalToMinorUnits($question->points);
+
+                    if ($blankTotalMinorUnits <= 0 || $blankTotalMinorUnits !== $questionPointsMinorUnits) {
+                        $allErrors['points'][] = 'Question points must equal the positive sum of all blank points.';
+                    }
+
+                    if ($allErrors !== []) {
                         $messages = [];
-                        foreach ($configErrors as $fieldMessages) {
+                        foreach ($allErrors as $fieldMessages) {
                             foreach ($fieldMessages as $message) {
                                 $messages[] = "Question #{$question->id}: {$message}";
                             }

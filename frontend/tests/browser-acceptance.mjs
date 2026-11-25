@@ -53,14 +53,15 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await builder.getByLabel("Exercise title").fill(title);
   const questionCards = builder.locator("fieldset.rounded-xl.border-slate-200");
   const addQuestion = builder.getByRole("button", { name: "+ Add question", exact: true });
-  for (let index = 0; index < 4; index += 1) await addQuestion.click();
-  assert.equal(await questionCards.count(), 4, "Draft builder adds four questions.");
+  for (let index = 0; index < 5; index += 1) await addQuestion.click();
+  assert.equal(await questionCards.count(), 5, "Draft builder adds five questions.");
 
   const prompts = [
     "Choose the greeting.",
     "The sky is blue.",
     "Select the colors of the Irish flag.",
     "Translate hello into French.",
+    "I [blank_1] learning English because it [blank_2] useful.",
   ];
   for (let index = 0; index < prompts.length; index += 1) {
     await questionCards.nth(index).getByLabel("Prompt").fill(prompts[index]);
@@ -110,6 +111,19 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await questionCards.nth(3).locator('input[aria-label="Accepted answer 1"]').fill("bonjour");
   await questionCards.nth(3).getByRole("button", { name: "+ Add accepted answer", exact: true }).click();
   await questionCards.nth(3).locator('input[aria-label="Accepted answer 2"]').fill("salut");
+
+  // Question 5: Fill in the Blanks
+  await questionCards.nth(4).getByLabel("Question type").selectOption("fill_in_the_blanks");
+  await questionCards.nth(4).getByLabel("Prompt").fill(prompts[4]);
+  await questionCards.nth(4).locator('input[aria-label="Blank 1 accepted answer 1"]').fill("am");
+  await questionCards.nth(4).getByRole("button", { name: "+ Add blank", exact: true }).click();
+  await questionCards.nth(4).locator('input[aria-label="Blank 2 accepted answer 1"]').fill("is");
+  assert.equal(
+    await questionCards.nth(4).getByLabel("Total points (from blanks)").inputValue(),
+    "2",
+    "FITB question total points automatically equals sum of blank points (2)."
+  );
+
   await builder.getByLabel("Show correct answers and explanations after submission").check();
 
   const exerciseUrl = `${API_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises/${exerciseId}`;
@@ -159,10 +173,18 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   const before = beforeResponse.exercises.find((row) => row.id === exerciseId);
   assert.ok(before, "Saved exercise reopens from the server.");
   assert.deepEqual(before.questions.map((question) => question.question_type), [
-    "single_choice", "true_false", "multiple_select", "short_answer",
+    "single_choice", "true_false", "multiple_select", "short_answer", "fill_in_the_blanks",
   ]);
   assert.deepEqual(before.questions.map((question) => question.prompt), prompts);
   assert.deepEqual(before.questions[3].answer_config.accepted_answers, ["bonjour", "salut"]);
+  assert.deepEqual(
+    before.questions[4].answer_config.blanks.map((b) => ({ id: b.id, accepted: b.accepted_answers, points: Number(b.points) })),
+    [
+      { id: "blank_1", accepted: ["am"], points: 1 },
+      { id: "blank_2", accepted: ["is"], points: 1 },
+    ],
+    "FITB blank IDs, points, and accepted answers persist after reload."
+  );
   const originalQuestionIds = before.questions.map((question) => Number(question.id));
   const originalSingleOptionIds = before.questions[0].options.map((option) => Number(option.id));
   const originalMultipleOptionIds = before.questions[2].options.map((option) => Number(option.id));
@@ -197,8 +219,10 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await reopenedBuilder.getByRole("button", { name: "Preview", exact: true }).click();
   const preview = page.getByRole("dialog");
   await preview.waitFor({ state: "visible" });
-  assert.ok((await preview.innerText()).includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
-  for (const prompt of prompts) assert.ok((await preview.innerText()).includes(prompt), `Preview includes: ${prompt}`);
+  const previewText = await preview.innerText();
+  assert.ok(previewText.includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
+  for (const prompt of prompts.slice(0, 4)) assert.ok(previewText.includes(prompt), `Preview includes: ${prompt}`);
+  assert.ok(previewText.includes("learning English because it"), "Preview includes FITB inline prompt.");
   await preview.getByRole("button", { name: "Close", exact: true }).click();
 
   const finalSavePromise = page.waitForResponse((response) =>
@@ -217,7 +241,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   const published = publishedResponse.exercises.find((row) => row.id === exerciseId);
   assert.equal(published?.status, "published", "Published status persists.");
   assert.deepEqual(published.questions.map((question) => question.question_type), [
-    "single_choice", "true_false", "multiple_select", "short_answer",
+    "single_choice", "true_false", "multiple_select", "short_answer", "fill_in_the_blanks",
   ]);
 
   const insertPromise = page.waitForResponse((response) => {
@@ -1337,6 +1361,9 @@ async function main() {
     const q4 = authoredExercise.questions.find((q) => q.question_type === "short_answer");
     assert.ok(q4?.id, "Short answer question found.");
 
+    const q5 = authoredExercise.questions.find((q) => q.question_type === "fill_in_the_blanks");
+    assert.ok(q5?.id, "Fill in the Blanks question found.");
+
     // Select answers across all four question types while testing navigation:
     // Question 1: Single Choice ("Salut")
     const salutInput = authoredBlock.locator(`input[data-option-id="${salutOption.id}"]`);
@@ -1384,6 +1411,33 @@ async function main() {
     await authoredBlock.getByRole("button", { name: "Next question" }).click();
     await authoredBlock.getByRole("button", { name: "Next question" }).click();
     assert.equal(await shortAnswerInput.inputValue(), "BONJOUR", "Navigation forward preserves Q4 text.");
+
+    // Navigate to Question 5 (Fill in the Blanks)
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    const q5Card = authoredBlock.locator(`#attempt-question-${q5.id}`);
+    const q5CardText = await q5Card.innerText();
+    assert.equal(
+      q5CardText.split("learning English because it").length - 1,
+      1,
+      "FITB prompt renders exactly once without duplicate question text."
+    );
+    assert.ok(!q5CardText.includes("[blank_1]"), "FITB prompt replaces [blank_1] placeholder with inline input.");
+
+    const q5Blank1 = q5Card.locator('input[data-blank-id="blank_1"]');
+    const q5Blank2 = q5Card.locator('input[data-blank-id="blank_2"]');
+    await q5Blank1.waitFor({ state: "visible", timeout: 10000 });
+    await q5Blank1.fill("am");
+
+    const q5Nav = authoredBlock.getByRole("navigation", { name: "Question navigation" }).locator("button").nth(4);
+    assert.ok((await q5Nav.innerText()).includes("Incomplete"), "Q5 shows Incomplete when only 1 of 2 blanks is filled.");
+
+    await q5Blank2.fill("is");
+    assert.ok((await q5Nav.innerText()).includes("Answered"), "Q5 shows Answered when both blanks are filled.");
+
+    await authoredBlock.getByRole("button", { name: "Previous question" }).click();
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    assert.equal(await q5Blank1.inputValue(), "am", "Navigation preserves Q5 blank_1.");
+    assert.equal(await q5Blank2.inputValue(), "is", "Navigation preserves Q5 blank_2.");
     console.log("✓ Question navigation state preservation verified.");
 
     // Save progress
@@ -1426,6 +1480,8 @@ async function main() {
     );
     const savedQ4 = savePayload.questions.find((q) => Number(q.id) === Number(q4.id));
     assert.equal(savedQ4.text_answer, "BONJOUR", "Saved Q4 text answer matches.");
+    const savedQ5 = savePayload.questions.find((q) => Number(q.id) === Number(q5.id));
+    assert.deepEqual(savedQ5.blank_answers, { blank_1: "am", blank_2: "is" }, "Saved Q5 blank answers match.");
     console.log("✓ Progress saved to backend and response privacy validated.");
 
     // Reload page to prove persistence from database across browser refresh
@@ -1452,7 +1508,10 @@ async function main() {
 
     const reloadedTextInput = reloadedBlock.locator(`#attempt-question-${q4.id}`).locator('input[type="text"]');
     assert.equal(await reloadedTextInput.inputValue(), "BONJOUR", "Text answer BONJOUR restored from server after reload.");
-    console.log("✓ All 4 answers restored accurately from database after page reload.");
+    const reloadedQ5Card = reloadedBlock.locator(`#attempt-question-${q5.id}`);
+    assert.equal(await reloadedQ5Card.locator('input[data-blank-id="blank_1"]').inputValue(), "am", "FITB blank_1 restored after reload.");
+    assert.equal(await reloadedQ5Card.locator('input[data-blank-id="blank_2"]').inputValue(), "is", "FITB blank_2 restored after reload.");
+    console.log("✓ All 5 answers restored accurately from database after page reload.");
 
     // Submit attempt
     const submitButton = reloadedBlock.locator('button:has-text("Submit Assessment")');
@@ -1562,6 +1621,41 @@ async function main() {
     const historyEntry = completedBlock.getByText(/Attempt\s*#?\s*1/);
     await historyEntry.first().waitFor({ state: "visible", timeout: 10000 });
     assert.ok(await historyEntry.first().isVisible(), "Completed Attempt #1 must appear in history.");
+
+    // Partial-credit FITB verification on a fresh attempt
+    const retakeBtn = completedBlock.getByRole("button", { name: /Start New Attempt|Retake/i });
+    await retakeBtn.waitFor({ state: "visible", timeout: 10000 });
+    const retakeStartPromise = studentPage.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith(`/exercises/${authoredExercise.id}/attempts`) &&
+        response.request().method() === "POST" &&
+        response.status() === 201,
+      { timeout: 15000 }
+    );
+    await retakeBtn.click();
+    const retakeStartRes = await retakeStartPromise;
+    const retakeAttempt = (await retakeStartRes.json()).data ?? (await retakeStartRes.json());
+    const retakeAttemptId = Number(retakeAttempt.id);
+
+    const partialQ5Card = studentPage.locator("article").filter({ hasText: authoredExercise.title }).locator(`#attempt-question-${q5.id}`);
+    await partialQ5Card.locator('input[data-blank-id="blank_1"]').fill("am");
+    await partialQ5Card.locator('input[data-blank-id="blank_2"]').fill("wrong");
+
+    const partialSubmitPromise = studentPage.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith(`/exercises/${authoredExercise.id}/attempts/${retakeAttemptId}/submit`) &&
+        response.request().method() === "POST" &&
+        response.status() === 200,
+      { timeout: 15000 }
+    );
+    studentPage.once("dialog", (dialog) => dialog.accept());
+    await studentPage.locator("article").filter({ hasText: authoredExercise.title }).locator('button:has-text("Submit Assessment")').click();
+    const partialSubmitRes = await partialSubmitPromise;
+    const partialSubmitData = (await partialSubmitRes.json()).data ?? (await partialSubmitRes.json());
+    const partialQ5Result = partialSubmitData.questions.find((q) => Number(q.id) === Number(q5.id));
+    assert.equal(Number(partialQ5Result.points_awarded), 1, "Partial-credit FITB awards 1 of 2 points (50%).");
+    assert.equal(Number(partialQ5Result.points_possible), 2, "FITB question possible points is 2.");
+    console.log("✓ Partial-credit FITB attempt verified (1 / 2 pts = 50% on FITB question).");
 
     console.log(
       "✓ Assessment lifecycle fully verified across all 4 question types: Start, Privacy, Navigate, Save, Reload, Submit, Idempotency, Conflict-rejection, Result, and History."

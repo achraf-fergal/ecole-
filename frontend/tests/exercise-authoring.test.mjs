@@ -2,13 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
+  areAllBlanksAnswered,
   createQuestionDraft,
   findDuplicateAcceptedAnswerIndexes,
   findDuplicateOptionIndexes,
+  generateUniqueBlankId,
+  getBlankCompletionState,
   isQuestionAnswered,
   normalizeOptionLabel,
   normalizeShortAnswer,
+  sumBlankPoints,
   toAttemptAnswerPayload,
+  validateFitbPromptPlaceholders,
 } from "../lib/exercise-authoring.mjs";
 
 const normalizationFixtures = JSON.parse(
@@ -59,4 +64,60 @@ test("attempt answer helpers use the type-specific API field and answered state"
   assert.equal(isQuestionAnswered("multiple_select", [5]), true);
   assert.equal(isQuestionAnswered("short_answer", "  "), false);
   assert.equal(isQuestionAnswered("true_false", 0), true);
+});
+
+test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, and placeholder validation", () => {
+  const draft = createQuestionDraft("fill_in_the_blanks");
+  assert.equal(draft.question_type, "fill_in_the_blanks");
+  assert.equal(draft.prompt, "The capital of France is [blank_1].");
+  assert.equal(draft.points, 1);
+  assert.equal(draft.answer_config.blanks.length, 1);
+  assert.equal(draft.answer_config.blanks[0].id, "blank_1");
+  assert.equal(draft.answer_config.blanks[0].normalization.case_sensitive, false);
+
+  // Completion state
+  const blankIds = ["blank_1", "blank_2", "blank_3"];
+  assert.equal(areAllBlanksAnswered([], { blank_1: "a" }), false);
+  assert.equal(areAllBlanksAnswered(blankIds, {}), false);
+  assert.equal(areAllBlanksAnswered(blankIds, { blank_1: "a" }), false);
+  assert.equal(areAllBlanksAnswered(blankIds, { blank_1: "a", blank_2: "   ", blank_3: "c" }), false);
+  assert.equal(areAllBlanksAnswered(blankIds, { blank_1: "a", blank_2: "b", blank_3: "c" }), true);
+
+  assert.equal(getBlankCompletionState(blankIds, {}), "unanswered");
+  assert.equal(getBlankCompletionState(blankIds, { blank_1: "a" }), "partial");
+  assert.equal(getBlankCompletionState(blankIds, { blank_1: "a", blank_2: "b", blank_3: "c" }), "answered");
+  assert.equal(isQuestionAnswered("fill_in_the_blanks", { blank_1: "a" }, blankIds), false);
+  assert.equal(isQuestionAnswered("fill_in_the_blanks", { blank_1: "a", blank_2: "b", blank_3: "c" }, blankIds), true);
+
+  // Payload
+  assert.deepEqual(
+    toAttemptAnswerPayload(10, "fill_in_the_blanks", { blank_1: "is", blank_2: "going" }),
+    { question_id: 10, blank_answers: { blank_1: "is", blank_2: "going" } }
+  );
+
+  // Unique blank ID generation after deletion
+  const blanksAfterDelete = [{ id: "blank_2" }, { id: "blank_3" }];
+  const generated = generateUniqueBlankId(blanksAfterDelete, "I [blank_2] and [blank_3] and [blank_1]");
+  assert.equal(generated, "blank_4");
+
+  // Sum blank points
+  assert.equal(sumBlankPoints([{ points: 0.5 }, { points: 1 }, { points: 1.5 }]), 3);
+
+  // Prompt placeholder validation
+  assert.equal(
+    validateFitbPromptPlaceholders("I [blank_1] to [blank_2].", [{ id: "blank_1" }, { id: "blank_2" }]).valid,
+    true
+  );
+  assert.equal(
+    validateFitbPromptPlaceholders("I [blank_3].", [{ id: "blank_1" }]).valid,
+    false
+  );
+  assert.equal(
+    validateFitbPromptPlaceholders("I [blank_1].", [{ id: "blank_1" }, { id: "blank_2" }]).valid,
+    false
+  );
+  assert.equal(
+    validateFitbPromptPlaceholders("[blank_1] and [blank_1].", [{ id: "blank_1" }]).valid,
+    false
+  );
 });

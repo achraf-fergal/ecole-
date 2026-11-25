@@ -18,9 +18,66 @@ import {
   getExerciseAttemptHistory,
   LearningApiError,
 } from "@/lib/learning";
-import { isQuestionAnswered, toAttemptAnswerPayload } from "@/lib/exercise-authoring.mjs";
+import {
+  extractPromptPlaceholders,
+  getBlankCompletionState,
+  isQuestionAnswered,
+  toAttemptAnswerPayload,
+} from "@/lib/exercise-authoring.mjs";
 
 type AnswerValue = number | number[] | string | Record<string, string> | null;
+
+function getQuestionBlankIds(prompt: string): string[] {
+  return extractPromptPlaceholders(prompt).ids;
+}
+
+function getQuestionCompletionStatus(
+  question: { id: number; question_type: AttemptQuestion["question_type"]; prompt: string },
+  answer: AnswerValue
+): "answered" | "partial" | "unanswered" {
+  if (question.question_type === "fill_in_the_blanks") {
+    const state = getBlankCompletionState(getQuestionBlankIds(question.prompt), answer);
+    return state === "invalid" ? "unanswered" : state;
+  }
+  return isQuestionAnswered(question.question_type, answer) ? "answered" : "unanswered";
+}
+
+function renderFitbReviewPrompt(
+  prompt: string,
+  blanks: AttemptQuestion["blanks"] | undefined,
+  blankAnswers: Record<string, string> | null | undefined,
+  showCorrectAnswers: boolean
+) {
+  return prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
+    const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
+    if (!match) {
+      return <span key={pIdx}>{part}</span>;
+    }
+    const blankId = match[1];
+    const fb = (blanks ?? []).find((b) => b.id === blankId);
+    const studentAns = fb?.student_answer ?? blankAnswers?.[blankId] ?? "";
+    const isCorrect = fb?.is_correct;
+    return (
+      <span
+        key={pIdx}
+        className={`mx-1 inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
+          isCorrect === true
+            ? "border-emerald-300 bg-emerald-50 font-bold text-emerald-900"
+            : isCorrect === false
+            ? "border-rose-300 bg-rose-50 font-bold text-rose-900"
+            : "border-slate-300 bg-slate-50 text-slate-700"
+        }`}
+      >
+        <span>{studentAns || "—"}</span>
+        {showCorrectAnswers && isCorrect !== undefined && (
+          <span className={isCorrect ? "text-emerald-700" : "text-rose-700"}>
+            {isCorrect ? "✓" : "✗"}
+          </span>
+        )}
+      </span>
+    );
+  });
+}
 
 function answersFromAttempt(questions: AttemptQuestion[]): Record<number, AnswerValue> {
   return Object.fromEntries(questions.map((question) => {
@@ -185,7 +242,7 @@ export default function LessonExerciseBlock({
   const canStartNew = Boolean(attemptState?.exercise.can_start_new_attempt);
   const answeredCount = activeAttempt
     ? activeAttempt.questions.filter((question) =>
-        isQuestionAnswered(question.question_type, selectedAnswers[question.id])
+        getQuestionCompletionStatus(question, selectedAnswers[question.id]) === "answered"
       ).length
     : 0;
 
@@ -397,15 +454,15 @@ export default function LessonExerciseBlock({
     if (submitInFlightRef.current || isSubmitting || isSaving) return;
 
     if (autoSaveTimerRef.current !== null) window.clearTimeout(autoSaveTimerRef.current);
-    const unansweredCount = activeAttempt.questions.filter((question) =>
-      !isQuestionAnswered(question.question_type, selectedAnswers[question.id])
+    const incompleteCount = activeAttempt.questions.filter((question) =>
+      getQuestionCompletionStatus(question, selectedAnswers[question.id]) !== "answered"
     ).length;
 
     if (
-      unansweredCount > 0 &&
+      incompleteCount > 0 &&
       !window.confirm(
-        `You have ${unansweredCount} unanswered ${
-          unansweredCount === 1 ? "question" : "questions"
+        `You have ${incompleteCount} unanswered or incomplete ${
+          incompleteCount === 1 ? "question" : "questions"
         }. Do you want to submit your assessment anyway?`
       )
     ) {
@@ -532,35 +589,41 @@ export default function LessonExerciseBlock({
                   </span>
                 </div>
 
-                <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
-                  {question.prompt}
-                </p>
-
                 {question.question_type === "fill_in_the_blanks" ? (
-                  <div className="mt-4 leading-relaxed text-sm font-semibold text-[#102b4c]">
-                    {question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
-                      const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
-                      if (match) {
-                        const blankId = match[1];
-                        const blankValues = (typeof previewSelectedAnswers[question.id] === "object" && previewSelectedAnswers[question.id] !== null
-                          ? previewSelectedAnswers[question.id]
-                          : {}) as Record<string, string>;
-                        return (
-                          <input
-                            key={`preview-blank-${blankId}-${pIdx}`}
-                            type="text"
-                            data-blank-id={blankId}
-                            aria-label={`Preview blank ${blankId}`}
-                            value={blankValues[blankId] ?? ""}
-                            onChange={(e) => handleBlankAnswer(question.id, blankId, e.target.value)}
-                            className="mx-1.5 inline-block w-36 rounded-lg border border-[#0e8988]/60 bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:ring-1 focus:ring-[#0e8988]"
-                          />
-                        );
-                      }
-                      return <span key={pIdx}>{part}</span>;
-                    })}
+                  <div className="mt-2 leading-relaxed text-sm font-semibold text-[#102b4c]">
+                    {(() => {
+                      let blankCounter = 0;
+                      return question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
+                        const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
+                        if (match) {
+                          blankCounter += 1;
+                          const blankId = match[1];
+                          const blankValues = (typeof previewSelectedAnswers[question.id] === "object" && previewSelectedAnswers[question.id] !== null
+                            ? previewSelectedAnswers[question.id]
+                            : {}) as Record<string, string>;
+                          return (
+                            <input
+                              key={`preview-blank-${blankId}-${pIdx}`}
+                              id={`preview-exercise-${exercise.id}-q-${question.id}-blank-${blankId}`}
+                              type="text"
+                              data-blank-id={blankId}
+                              aria-label={`Question ${questionIndex + 1}, Blank ${blankCounter}`}
+                              value={blankValues[blankId] ?? ""}
+                              onChange={(e) => handleBlankAnswer(question.id, blankId, e.target.value)}
+                              className="mx-1.5 inline-block w-28 sm:w-36 max-w-full rounded-lg border border-[#0e8988]/60 bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:outline-none focus:ring-2 focus:ring-[#0e8988]/40"
+                            />
+                          );
+                        }
+                        return <span key={pIdx}>{part}</span>;
+                      });
+                    })()}
                   </div>
-                ) : question.question_type === "short_answer" ? (
+                ) : (
+                  <>
+                    <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
+                      {question.prompt}
+                    </p>
+                    {question.question_type === "short_answer" ? (
                   <label className="mt-4 block text-xs font-semibold text-slate-700">
                     Your answer
                     <input type="text" value={typeof previewSelectedAnswers[question.id] === "string" ? previewSelectedAnswers[question.id] as string : ""} onChange={(event) => handleSelectTextAnswer(question.id, event.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-3 text-sm" />
@@ -584,6 +647,8 @@ export default function LessonExerciseBlock({
                       );
                     })}
                   </fieldset>
+                    )}
+                  </>
                 )}
 
                 {question.explanation && (
@@ -683,17 +748,19 @@ export default function LessonExerciseBlock({
           </div>
           <nav aria-label="Question navigation" className="mt-3 flex flex-wrap gap-2">
             {activeAttempt.questions.map((question, index) => {
-              const answered = isQuestionAnswered(question.question_type, selectedAnswers[question.id]);
+              const status = getQuestionCompletionStatus(question, selectedAnswers[question.id]);
+              const statusLabel = status === "answered" ? "answered" : status === "partial" ? "incomplete" : "unanswered";
+              const shortLabel = status === "answered" ? "Answered" : status === "partial" ? "Incomplete" : "Open";
               return (
                 <button
                   key={question.id}
                   type="button"
-                  aria-label={`Question ${index + 1}, ${answered ? "answered" : "unanswered"}`}
+                  aria-label={`Question ${index + 1}, ${statusLabel}`}
                   aria-current={index === currentQuestionIndex ? "step" : undefined}
                   onClick={() => navigateToQuestion(index)}
-                  className={`min-w-10 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : "border-slate-300 bg-white text-slate-700"}`}
+                  className={`min-w-10 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : status === "partial" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-300 bg-white text-slate-700"}`}
                 >
-                  {index + 1} · {answered ? "Answered" : "Open"}
+                  {index + 1} · {shortLabel}
                 </button>
               );
             })}
@@ -705,7 +772,9 @@ export default function LessonExerciseBlock({
         </div>
 
         <div className="mt-5 space-y-5">
-          {activeAttempt.questions.map((question, questionIndex) => (
+          {activeAttempt.questions.map((question, questionIndex) => {
+            const completionStatus = getQuestionCompletionStatus(question, selectedAnswers[question.id]);
+            return (
             <div
               key={question.id}
               id={`attempt-question-${question.id}`}
@@ -718,45 +787,70 @@ export default function LessonExerciseBlock({
                   Question {questionIndex + 1} ({question.points_possible}{" "}
                   {Number(question.points_possible) === 1 ? "point" : "points"})
                 </span>
-                {isQuestionAnswered(question.question_type, selectedAnswers[question.id]) && (
+                {completionStatus === "answered" && (
                   <span className="text-[10px] font-bold text-teal-700">
                     Answered
                   </span>
                 )}
+                {completionStatus === "partial" && (
+                  <span className="text-[10px] font-bold text-amber-700">
+                    Incomplete
+                  </span>
+                )}
               </div>
 
-              <p id={`attempt-question-title-${question.id}`} className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
-                {question.prompt}
-              </p>
-
               {question.question_type === "fill_in_the_blanks" ? (
-                <div className="mt-4 leading-relaxed text-sm font-semibold text-[#102b4c]">
-                  {question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
-                    const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
-                    if (match) {
-                      const blankId = match[1];
-                      const blankValues = (typeof selectedAnswers[question.id] === "object" && selectedAnswers[question.id] !== null
-                        ? selectedAnswers[question.id]
-                        : {}) as Record<string, string>;
-                      return (
-                        <input
-                          key={`attempt-blank-${blankId}-${pIdx}`}
-                          type="text"
-                          data-blank-id={blankId}
-                          aria-label={`Blank ${blankId}`}
-                          maxLength={5000}
-                          value={blankValues[blankId] ?? ""}
-                          disabled={isSaving || isSubmitting}
-                          onChange={(e) => handleBlankAnswer(question.id, blankId, e.target.value)}
-                          className="mx-1.5 inline-block w-36 rounded-lg border border-[#0e8988]/60 bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:ring-1 focus:ring-[#0e8988]"
-                        />
-                      );
-                    }
-                    return <span key={pIdx}>{part}</span>;
-                  })}
-                  <p className="mt-2 text-[11px] font-normal text-slate-500">Fill in each blank field.</p>
+                <div
+                  id={`attempt-question-title-${question.id}`}
+                  className="mt-2 leading-relaxed text-sm font-semibold text-[#102b4c]"
+                >
+                  {(() => {
+                    let blankCounter = 0;
+                    return question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
+                      const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
+                      if (match) {
+                        blankCounter += 1;
+                        const blankId = match[1];
+                        const blankValues = (typeof selectedAnswers[question.id] === "object" && selectedAnswers[question.id] !== null
+                          ? selectedAnswers[question.id]
+                          : {}) as Record<string, string>;
+                        const isBlankEmpty = !(blankValues[blankId] ?? "").trim();
+                        return (
+                          <input
+                            key={`attempt-blank-${blankId}-${pIdx}`}
+                            id={`exercise-${exercise.id}-q-${question.id}-blank-${blankId}`}
+                            type="text"
+                            data-blank-id={blankId}
+                            aria-label={`Question ${questionIndex + 1}, Blank ${blankCounter}`}
+                            aria-describedby={`fitb-guide-${question.id}`}
+                            aria-invalid={completionStatus === "partial" && isBlankEmpty ? "true" : undefined}
+                            maxLength={5000}
+                            value={blankValues[blankId] ?? ""}
+                            disabled={isSaving || isSubmitting}
+                            onChange={(e) => handleBlankAnswer(question.id, blankId, e.target.value)}
+                            className={`mx-1.5 inline-block w-28 sm:w-36 max-w-full rounded-lg border bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:outline-none focus:ring-2 focus:ring-[#0e8988]/40 ${
+                              completionStatus === "partial" && isBlankEmpty
+                                ? "border-amber-400"
+                                : "border-[#0e8988]/60"
+                            }`}
+                          />
+                        );
+                      }
+                      return <span key={pIdx}>{part}</span>;
+                    });
+                  })()}
+                  <p id={`fitb-guide-${question.id}`} className="mt-2 text-[11px] font-normal text-slate-500">
+                    {completionStatus === "partial"
+                      ? "Some blanks are still empty. Fill in all blanks to complete this question."
+                      : "Fill in each blank field."}
+                  </p>
                 </div>
-              ) : question.question_type === "short_answer" ? (
+              ) : (
+                <>
+                  <p id={`attempt-question-title-${question.id}`} className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
+                    {question.prompt}
+                  </p>
+                  {question.question_type === "short_answer" ? (
                 <label className="mt-4 block text-xs font-semibold text-slate-700">
                   Your answer
                   <input
@@ -795,9 +889,12 @@ export default function LessonExerciseBlock({
                     );
                   })}
                 </fieldset>
+                  )}
+                </>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-5">
@@ -988,49 +1085,22 @@ export default function LessonExerciseBlock({
                         : "text-rose-700"
                     }`}
                   >
-                    {question.is_correct
+                    {Number(question.points_awarded ?? 0) > 0
                       ? `+${question.points_awarded ?? question.points_possible} pts`
                       : "0 pts"}
                   </span>
                 )}
               </div>
 
-              <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
-                {question.prompt}
-              </p>
-
               {question.question_type === "fill_in_the_blanks" ? (
                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs space-y-2">
                   <div className="font-semibold text-slate-800 leading-relaxed">
-                    {question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
-                      const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
-                      if (match) {
-                        const blankId = match[1];
-                        const fb = (question.blanks ?? []).find((b) => b.id === blankId);
-                        const studentAns = fb?.student_answer ?? question.blank_answers?.[blankId] ?? "—";
-                        const isCorrect = fb?.is_correct;
-                        return (
-                          <span
-                            key={pIdx}
-                            className={`mx-1 inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
-                              isCorrect === true
-                                ? "border-emerald-300 bg-emerald-50 text-emerald-900 font-bold"
-                                : isCorrect === false
-                                ? "border-rose-300 bg-rose-50 text-rose-900 font-bold"
-                                : "border-slate-300 bg-slate-50 text-slate-700"
-                            }`}
-                          >
-                            <span>{studentAns || "—"}</span>
-                            {completedAttempt.show_correct_answers && isCorrect !== undefined && (
-                              <span className={isCorrect ? "text-emerald-700" : "text-rose-700"}>
-                                {isCorrect ? "✓" : "✗"}
-                              </span>
-                            )}
-                          </span>
-                        );
-                      }
-                      return <span key={pIdx}>{part}</span>;
-                    })}
+                    {renderFitbReviewPrompt(
+                      question.prompt,
+                      question.blanks,
+                      question.blank_answers,
+                      Boolean(completedAttempt.show_correct_answers)
+                    )}
                   </div>
                   {completedAttempt.show_correct_answers && question.blanks && question.blanks.length > 0 && (
                     <div className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">
@@ -1044,7 +1114,12 @@ export default function LessonExerciseBlock({
                     </div>
                   )}
                 </div>
-              ) : question.question_type === "short_answer" ? (
+              ) : (
+                <>
+                  <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
+                    {question.prompt}
+                  </p>
+                  {question.question_type === "short_answer" ? (
                 <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs">
                   <p><span className="font-bold">Your answer:</span> {question.text_answer || "No answer"}</p>
                   {completedAttempt.show_correct_answers && question.accepted_answers && (
@@ -1119,6 +1194,8 @@ export default function LessonExerciseBlock({
                   );
                 })}
               </div>
+                  )}
+                </>
               )}
 
               {completedAttempt.show_correct_answers && question.explanation && (
@@ -1271,7 +1348,7 @@ export default function LessonExerciseBlock({
                                         : "text-rose-700"
                                     }`}
                                   >
-                                    {q.is_correct
+                                    {Number(q.points_awarded ?? 0) > 0
                                       ? `+${
                                           q.points_awarded ?? q.points_possible
                                         } pts`
@@ -1280,42 +1357,15 @@ export default function LessonExerciseBlock({
                                 )}
                               </div>
 
-                              <p className="mt-1 text-xs font-semibold leading-5 text-[#102b4c]">
-                                {q.prompt}
-                              </p>
-
                               {q.question_type === "fill_in_the_blanks" ? (
                                 <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs space-y-1.5">
                                   <div className="font-semibold text-slate-800 leading-relaxed">
-                                    {q.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
-                                      const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
-                                      if (match) {
-                                        const blankId = match[1];
-                                        const fb = (q.blanks ?? []).find((b) => b.id === blankId);
-                                        const studentAns = fb?.student_answer ?? q.blank_answers?.[blankId] ?? "—";
-                                        const isCorrect = fb?.is_correct;
-                                        return (
-                                          <span
-                                            key={pIdx}
-                                            className={`mx-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs ${
-                                              isCorrect === true
-                                                ? "border-emerald-300 bg-emerald-50 text-emerald-900 font-bold"
-                                                : isCorrect === false
-                                                ? "border-rose-300 bg-rose-50 text-rose-900 font-bold"
-                                                : "border-slate-300 bg-slate-50 text-slate-700"
-                                            }`}
-                                          >
-                                            <span>{studentAns || "—"}</span>
-                                            {hist.show_correct_answers && isCorrect !== undefined && (
-                                              <span className={isCorrect ? "text-emerald-700" : "text-rose-700"}>
-                                                {isCorrect ? "✓" : "✗"}
-                                              </span>
-                                            )}
-                                          </span>
-                                        );
-                                      }
-                                      return <span key={pIdx}>{part}</span>;
-                                    })}
+                                    {renderFitbReviewPrompt(
+                                      q.prompt,
+                                      q.blanks,
+                                      q.blank_answers,
+                                      Boolean(hist.show_correct_answers)
+                                    )}
                                   </div>
                                   {hist.show_correct_answers && q.blanks && q.blanks.length > 0 && (
                                     <div className="mt-1 space-y-0.5 border-t border-slate-100 pt-1 text-[10px] text-slate-600">
@@ -1328,7 +1378,12 @@ export default function LessonExerciseBlock({
                                     </div>
                                   )}
                                 </div>
-                              ) : q.question_type === "short_answer" ? (
+                              ) : (
+                                <>
+                                  <p className="mt-1 text-xs font-semibold leading-5 text-[#102b4c]">
+                                    {q.prompt}
+                                  </p>
+                                  {q.question_type === "short_answer" ? (
                                 <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs">
                                   <p><span className="font-bold">Your answer:</span> {q.text_answer || "No answer"}</p>
                                   {hist.show_correct_answers && q.accepted_answers && (
@@ -1407,6 +1462,8 @@ export default function LessonExerciseBlock({
                                   );
                                 })}
                               </div>
+                                  )}
+                                </>
                               )}
 
                               {hist.show_correct_answers && q.explanation && (

@@ -128,13 +128,170 @@ export function findDuplicateAcceptedAnswerIndexes(values, settings = {}) {
   return duplicateIndexes(values, (value) => normalizeShortAnswer(value, settings));
 }
 
-/** @param {"single_choice"|"true_false"|"multiple_select"|"short_answer"|"fill_in_the_blanks"} type @param {number|string|number[]|Record<string, string>|null|undefined} value */
-export function isQuestionAnswered(type, value) {
+/**
+ * Extract placeholder IDs and any invalid `[...]` tokens from a FITB prompt.
+ * @param {string} prompt
+ * @returns {{ ids: string[], counts: Record<string, number>, invalidTokens: string[] }}
+ */
+export function extractPromptPlaceholders(prompt) {
+  const ids = [];
+  /** @type {Record<string, number>} */
+  const counts = {};
+  /** @type {string[]} */
+  const invalidTokens = [];
+  const matches = String(prompt ?? "").matchAll(/\[([^\[\]]*)\]/g);
+  for (const match of matches) {
+    const token = match[1] ?? "";
+    if (!/^[a-zA-Z0-9_\-]+$/.test(token)) {
+      invalidTokens.push(token);
+      continue;
+    }
+    ids.push(token);
+    counts[token] = (counts[token] ?? 0) + 1;
+  }
+  return { ids, counts, invalidTokens };
+}
+
+/**
+ * Validate 1-to-1 mapping between prompt `[blank_id]` placeholders and blank definitions.
+ * @param {string} prompt
+ * @param {Array<{ id?: string }>} blanks
+ * @returns {{ valid: boolean, promptErrors: string[], blanksErrors: string[] }}
+ */
+export function validateFitbPromptPlaceholders(prompt, blanks) {
+  /** @type {string[]} */
+  const promptErrors = [];
+  /** @type {string[]} */
+  const blanksErrors = [];
+  const definedIds = (Array.isArray(blanks) ? blanks : [])
+    .map((b) => (typeof b?.id === "string" ? b.id.trim() : ""))
+    .filter((id) => id !== "");
+
+  const { counts, invalidTokens } = extractPromptPlaceholders(prompt);
+
+  for (const invalid of invalidTokens) {
+    promptErrors.push(
+      `Invalid placeholder syntax '[${invalid}]'. Use alphanumeric characters, underscores, or hyphens.`
+    );
+  }
+
+  for (const [id, count] of Object.entries(counts)) {
+    if (count > 1) {
+      promptErrors.push(
+        `Placeholder '[${id}]' appears ${count} times in the prompt. Each placeholder may appear only once.`
+      );
+    }
+    if (!definedIds.includes(id)) {
+      promptErrors.push(`Placeholder '[${id}]' has no matching blank definition.`);
+    }
+  }
+
+  for (const definedId of definedIds) {
+    if (!counts[definedId]) {
+      blanksErrors.push(
+        `Blank '${definedId}' is defined but not referenced as '[${definedId}]' in the prompt.`
+      );
+    }
+  }
+
+  return {
+    valid: promptErrors.length === 0 && blanksErrors.length === 0,
+    promptErrors,
+    blanksErrors,
+  };
+}
+
+/**
+ * Generate a collision-free blank ID considering existing blanks and prompt placeholders.
+ * @param {Array<{ id?: string }>} existingBlanks
+ * @param {string} [prompt]
+ * @returns {string}
+ */
+export function generateUniqueBlankId(existingBlanks, prompt = "") {
+  const used = new Set(
+    (Array.isArray(existingBlanks) ? existingBlanks : [])
+      .map((b) => (typeof b?.id === "string" ? b.id.trim() : ""))
+      .filter(Boolean)
+  );
+  for (const id of extractPromptPlaceholders(prompt).ids) {
+    used.add(id);
+  }
+  let counter = 1;
+  while (used.has(`blank_${counter}`)) {
+    counter += 1;
+  }
+  return `blank_${counter}`;
+}
+
+/**
+ * Sum blank points in integer minor units (hundredths) and return a 2-decimal number.
+ * @param {Array<{ points?: number | string }>} blanks
+ * @returns {number}
+ */
+export function sumBlankPoints(blanks) {
+  if (!Array.isArray(blanks)) return 0;
+  let totalMinorUnits = 0;
+  for (const blank of blanks) {
+    const num = Number(blank?.points);
+    if (Number.isFinite(num) && num > 0) {
+      totalMinorUnits += Math.round(num * 100);
+    }
+  }
+  return totalMinorUnits / 100;
+}
+
+/**
+ * Check whether every blank ID has a non-whitespace student answer.
+ * @param {string[]} blankIds
+ * @param {Record<string, string>|number|string|number[]|null|undefined} studentAnswers
+ * @returns {boolean}
+ */
+export function areAllBlanksAnswered(blankIds, studentAnswers) {
+  if (!Array.isArray(blankIds) || blankIds.length === 0) return false;
+  if (typeof studentAnswers !== "object" || studentAnswers === null || Array.isArray(studentAnswers)) {
+    return false;
+  }
+  return blankIds.every((id) => {
+    const val = studentAnswers[id];
+    return typeof val === "string" && val.trim().length > 0;
+  });
+}
+
+/**
+ * Return completion state for a Fill in the Blanks question.
+ * @param {string[]} blankIds
+ * @param {Record<string, string>|number|string|number[]|null|undefined} studentAnswers
+ * @returns {"answered"|"partial"|"unanswered"|"invalid"}
+ */
+export function getBlankCompletionState(blankIds, studentAnswers) {
+  if (!Array.isArray(blankIds) || blankIds.length === 0) return "invalid";
+  if (typeof studentAnswers !== "object" || studentAnswers === null || Array.isArray(studentAnswers)) {
+    return "unanswered";
+  }
+  const answeredCount = blankIds.filter((id) => {
+    const val = studentAnswers[id];
+    return typeof val === "string" && val.trim().length > 0;
+  }).length;
+  if (answeredCount === 0) return "unanswered";
+  if (answeredCount === blankIds.length) return "answered";
+  return "partial";
+}
+
+/**
+ * @param {"single_choice"|"true_false"|"multiple_select"|"short_answer"|"fill_in_the_blanks"} type
+ * @param {number|string|number[]|Record<string, string>|null|undefined} value
+ * @param {string[]} [blankIds]
+ */
+export function isQuestionAnswered(type, value, blankIds) {
   if (type === "multiple_select") return Array.isArray(value) && value.length > 0;
   if (type === "short_answer") return typeof value === "string" && value.trim().length > 0;
   if (type === "fill_in_the_blanks") {
-    if (typeof value !== "object" || value === null) return false;
-    return Object.values(value).some((v) => typeof v === "string" && v.trim().length > 0);
+    if (Array.isArray(blankIds) && blankIds.length > 0) {
+      return areAllBlanksAnswered(blankIds, value);
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const vals = Object.values(value);
+    return vals.length > 0 && vals.every((v) => typeof v === "string" && v.trim().length > 0);
   }
   return typeof value === "number" && Number.isFinite(value);
 }

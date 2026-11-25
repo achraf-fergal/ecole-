@@ -178,9 +178,13 @@ class ExerciseAnswerGrader
                     : [];
                 $normalization = $blank['normalization'] ?? [];
 
+                $pointsMinorUnits = isset($blank['points']) && is_numeric($blank['points'])
+                    ? $this->decimalToMinorUnits((string) $blank['points'])
+                    : 100;
+
                 $normalizedBlanks[] = [
                     'id' => isset($blank['id']) && is_string($blank['id']) ? trim($blank['id']) : 'blank_'.($index + 1),
-                    'points' => isset($blank['points']) && is_numeric($blank['points']) ? round((float) $blank['points'], 2) : 1.0,
+                    'points' => (float) $this->minorUnitsToDecimalString($pointsMinorUnits),
                     'accepted_answers' => $accepted,
                     'normalization' => array_merge(
                         $this->defaultNormalization(),
@@ -418,10 +422,9 @@ class ExerciseAnswerGrader
 
         foreach ($blanks as $blank) {
             $blankId = (string) ($blank['id'] ?? '');
-            $pointsPossible = isset($blank['points']) && is_numeric($blank['points'])
-                ? (float) $blank['points']
-                : 1.0;
-            $blankPossibleMinorUnits = (int) round($pointsPossible * 100);
+            $blankPossibleMinorUnits = isset($blank['points']) && is_numeric($blank['points'])
+                ? $this->decimalToMinorUnits((string) $blank['points'])
+                : 100;
             $totalPossibleMinorUnits += $blankPossibleMinorUnits;
 
             $normalization = array_merge(
@@ -460,8 +463,8 @@ class ExerciseAnswerGrader
                 'is_correct' => $isMatch,
                 'student_answer' => $rawStudentAnswer,
                 'accepted_answers' => $blank['accepted_answers'] ?? [],
-                'points_awarded' => round($blankAwardedMinorUnits / 100, 2),
-                'points_possible' => round($blankPossibleMinorUnits / 100, 2),
+                'points_awarded' => (float) $this->minorUnitsToDecimalString($blankAwardedMinorUnits),
+                'points_possible' => (float) $this->minorUnitsToDecimalString($blankPossibleMinorUnits),
             ];
         }
 
@@ -523,6 +526,104 @@ class ExerciseAnswerGrader
         $normalized = Normalizer::normalize($value, Normalizer::FORM_C);
 
         return $normalized === false ? $value : $normalized;
+    }
+
+    /**
+     * Sum all configured blank points in integer minor units (hundredths).
+     */
+    public function sumBlankPointsMinorUnits(mixed $configuration): int
+    {
+        if (! is_array($configuration) || ! is_array($configuration['blanks'] ?? null)) {
+            return 0;
+        }
+
+        $total = 0;
+        foreach ($configuration['blanks'] as $blank) {
+            if (! is_array($blank)) {
+                continue;
+            }
+            $points = $blank['points'] ?? null;
+            if (is_numeric($points)) {
+                $total += $this->decimalToMinorUnits((string) $points);
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Validate that prompt `[blank_id]` placeholders map 1-to-1 to configured blank IDs.
+     *
+     * @return array<string, list<string>>
+     */
+    public function promptPlaceholderErrors(string $prompt, mixed $configuration): array
+    {
+        $errors = [];
+
+        $definedIds = [];
+        if (is_array($configuration) && is_array($configuration['blanks'] ?? null)) {
+            foreach ($configuration['blanks'] as $blank) {
+                if (is_array($blank) && is_string($blank['id'] ?? null) && trim($blank['id']) !== '') {
+                    $definedIds[] = trim($blank['id']);
+                }
+            }
+        }
+
+        preg_match_all('/\[([^\[\]]*)\]/', $prompt, $matches);
+        $rawTokens = $matches[1] ?? [];
+
+        $placeholderCounts = [];
+        foreach ($rawTokens as $token) {
+            if (! preg_match('/^[a-zA-Z0-9_\-]+$/', $token)) {
+                $errors['prompt'][] = "Invalid placeholder syntax '[{$token}]'. Use alphanumeric characters, underscores, or hyphens.";
+
+                continue;
+            }
+            $placeholderCounts[$token] = ($placeholderCounts[$token] ?? 0) + 1;
+        }
+
+        foreach ($placeholderCounts as $id => $count) {
+            if ($count > 1) {
+                $errors['prompt'][] = "Placeholder '[{$id}]' appears {$count} times in the prompt. Each placeholder may appear only once.";
+            }
+            if (! in_array($id, $definedIds, true)) {
+                $errors['prompt'][] = "Placeholder '[{$id}]' has no matching blank definition.";
+            }
+        }
+
+        foreach ($definedIds as $definedId) {
+            if (! isset($placeholderCounts[$definedId])) {
+                $errors['answer_config.blanks'][] = "Blank '{$definedId}' is defined but not referenced as '[{$definedId}]' in the prompt.";
+            }
+        }
+
+        return $errors;
+    }
+
+    /** Convert a DECIMAL(..., 2) value to integer hundredths without float arithmetic. */
+    public function decimalToMinorUnits(string|int|float $value): int
+    {
+        $normalized = trim((string) $value);
+        if (! preg_match('/^(-?)(\d+)(?:\.(\d+))?$/', $normalized, $matches)) {
+            throw new \InvalidArgumentException("Invalid decimal score value: {$normalized}");
+        }
+
+        $whole = (int) $matches[2];
+        $fractionDigits = substr(str_pad($matches[3] ?? '', 2, '0'), 0, 2);
+        $fraction = (int) $fractionDigits;
+        $minorUnits = ($whole * 100) + $fraction;
+
+        return ($matches[1] ?? '') === '-' ? -$minorUnits : $minorUnits;
+    }
+
+    public function minorUnitsToDecimalString(int $minorUnits): string
+    {
+        $sign = $minorUnits < 0 ? '-' : '';
+        $absolute = abs($minorUnits);
+        $whole = intdiv($absolute, 100);
+        $fraction = $absolute % 100;
+
+        return sprintf('%s%d.%02d', $sign, $whole, $fraction);
     }
 
     private function trimWhitespace(string $value): string

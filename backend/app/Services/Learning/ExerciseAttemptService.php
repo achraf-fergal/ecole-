@@ -362,6 +362,28 @@ class ExerciseAttemptService
                             'exercise' => ["Question #{$question->id} is not configured correctly."],
                         ]);
                     }
+                } elseif ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $configurationErrors = $this->answerGrader->blankConfigurationErrors(
+                        $question->answer_config,
+                        true
+                    );
+                    $placeholderErrors = $this->answerGrader->promptPlaceholderErrors(
+                        (string) $question->prompt,
+                        $question->answer_config
+                    );
+                    $blankTotalMinorUnits = $this->answerGrader->sumBlankPointsMinorUnits($question->answer_config);
+                    $questionPointsMinorUnits = $this->decimalToMinorUnits($question->points);
+
+                    if (
+                        $configurationErrors !== []
+                        || $placeholderErrors !== []
+                        || $blankTotalMinorUnits <= 0
+                        || $blankTotalMinorUnits !== $questionPointsMinorUnits
+                    ) {
+                        throw ValidationException::withMessages([
+                            'exercise' => ["Question #{$question->id} is not configured correctly."],
+                        ]);
+                    }
                 }
             }
 
@@ -532,7 +554,10 @@ class ExerciseAttemptService
                 if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
                     $gradeResult = $this->answerGrader->gradeFillInTheBlanks($answer);
                     $isCorrect = $gradeResult['is_correct'];
-                    $pointsAwardedMinorUnits = $gradeResult['points_awarded_minor_units'];
+                    $pointsAwardedMinorUnits = min(
+                        max(0, (int) $gradeResult['points_awarded_minor_units']),
+                        $pointsPossibleMinorUnits
+                    );
                 } else {
                     $isCorrect = $this->answerGrader->isCorrect($answer);
                     $pointsAwardedMinorUnits = $isCorrect ? $pointsPossibleMinorUnits : 0;
@@ -714,14 +739,41 @@ class ExerciseAttemptService
         }
 
         if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
-            $rawBlankAnswers = $entry['blank_answers'] ?? null;
-            if ($rawBlankAnswers === null && array_key_exists('text_answer', $entry)) {
-                $rawBlankAnswers = is_string($entry['text_answer'])
-                    ? json_decode($entry['text_answer'], true)
-                    : null;
+            $snapshotBlanks = is_array($answer->answer_config_snapshot['blanks'] ?? null)
+                ? $answer->answer_config_snapshot['blanks']
+                : [];
+            $validBlankIds = array_values(array_filter(
+                array_map(
+                    static fn (mixed $blank): string => is_array($blank) && is_string($blank['id'] ?? null)
+                        ? trim($blank['id'])
+                        : '',
+                    $snapshotBlanks
+                ),
+                static fn (string $id): bool => $id !== ''
+            ));
+
+            $rawBlankAnswers = null;
+            if (array_key_exists('blank_answers', $entry)) {
+                $rawBlankAnswers = $entry['blank_answers'];
+            } elseif (array_key_exists('text_answer', $entry) && $entry['text_answer'] !== null) {
+                if (! is_string($entry['text_answer'])) {
+                    throw ValidationException::withMessages([
+                        'answers' => ["Blank answers for Question ID {$answer->question_id} must be valid JSON text."],
+                    ]);
+                }
+                $decoded = json_decode($entry['text_answer'], true);
+                if (json_last_error() !== JSON_ERROR_NONE || ! is_array($decoded)) {
+                    throw ValidationException::withMessages([
+                        'answers' => ["Blank answers for Question ID {$answer->question_id} contain invalid JSON."],
+                    ]);
+                }
+                $rawBlankAnswers = $decoded;
             }
 
-            if ($rawBlankAnswers !== null && ! is_array($rawBlankAnswers)) {
+            if (
+                $rawBlankAnswers !== null
+                && (! is_array($rawBlankAnswers) || ($rawBlankAnswers !== [] && array_is_list($rawBlankAnswers)))
+            ) {
                 throw ValidationException::withMessages([
                     'answers' => ["Blank answers for Question ID {$answer->question_id} must be an object of key-value pairs."],
                 ]);
@@ -731,7 +783,14 @@ class ExerciseAttemptService
             if (is_array($rawBlankAnswers)) {
                 foreach ($rawBlankAnswers as $bId => $val) {
                     if (! is_string($bId)) {
-                        continue;
+                        throw ValidationException::withMessages([
+                            'answers' => ["Blank IDs for Question ID {$answer->question_id} must be strings."],
+                        ]);
+                    }
+                    if (! in_array($bId, $validBlankIds, true)) {
+                        throw ValidationException::withMessages([
+                            'answers' => ["Blank ID '{$bId}' is not a valid blank for Question ID {$answer->question_id}."],
+                        ]);
                     }
                     if ($val !== null && ! is_string($val)) {
                         throw ValidationException::withMessages([
@@ -746,6 +805,8 @@ class ExerciseAttemptService
                     $sanitized[$bId] = is_string($val) ? $val : '';
                 }
             }
+
+            ksort($sanitized);
 
             return [
                 'selected_option_id' => null,

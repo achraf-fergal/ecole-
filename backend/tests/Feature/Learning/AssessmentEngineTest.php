@@ -2388,4 +2388,242 @@ class AssessmentEngineTest extends TestCase
         )->assertUnprocessable()
             ->assertJsonValidationErrors(['exercise']);
     }
+
+    public function test_fill_in_the_blanks_authoring_placeholder_validation_derived_points_and_partial_credit(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+        $routeParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+        ];
+        $normalization = [
+            'case_sensitive' => false,
+            'trim_whitespace' => true,
+            'collapse_internal_whitespace' => true,
+            'punctuation_sensitive' => true,
+            'diacritic_sensitive' => true,
+        ];
+
+        // 1. Create draft with conflicting frontend points (1.00) vs blanks (0.50 + 1.00 + 1.50 = 3.00)
+        $created = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'FITB Assessment',
+                'passing_score' => 60,
+                'show_correct_answers_after_submission' => true,
+                'questions' => [[
+                    'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                    'prompt' => 'I [blank_1] learning [blank_2] because it is [blank_3].',
+                    'points' => 1,
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am'], 'normalization' => $normalization],
+                            ['id' => 'blank_2', 'points' => 1.00, 'accepted_answers' => ['English'], 'normalization' => $normalization],
+                            ['id' => 'blank_3', 'points' => 1.50, 'accepted_answers' => ['useful'], 'normalization' => $normalization],
+                        ],
+                    ],
+                    'options' => [],
+                ]],
+            ]
+        )->assertCreated()
+            ->assertJsonPath('data.questions.0.points', 3);
+
+        $exerciseId = (int) $created->json('data.id');
+        $questionId = (int) $created->json('data.questions.0.id');
+
+        // Reopen draft and verify derived points & blanks persisted
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->getJson(
+            route('api.centers.admin.learning.exercises.show', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk()
+            ->assertJsonPath('data.questions.0.points', 3)
+            ->assertJsonCount(3, 'data.questions.0.answer_config.blanks');
+
+        // 2. Placeholder validation failures on publish:
+        // 2a. Missing definition ([blank_99] in prompt)
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $questionId,
+                    'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                    'prompt' => 'I [blank_1] [blank_2] [blank_3] [blank_99].',
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am'], 'normalization' => $normalization],
+                            ['id' => 'blank_2', 'points' => 1.00, 'accepted_answers' => ['English'], 'normalization' => $normalization],
+                            ['id' => 'blank_3', 'points' => 1.50, 'accepted_answers' => ['useful'], 'normalization' => $normalization],
+                        ],
+                    ],
+                ]],
+            ]
+        )->assertOk();
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['questions']);
+
+        // 2b. Unused blank definition (blank_3 missing from prompt)
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $questionId,
+                    'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                    'prompt' => 'I [blank_1] learning [blank_2].',
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am'], 'normalization' => $normalization],
+                            ['id' => 'blank_2', 'points' => 1.00, 'accepted_answers' => ['English'], 'normalization' => $normalization],
+                            ['id' => 'blank_3', 'points' => 1.50, 'accepted_answers' => ['useful'], 'normalization' => $normalization],
+                        ],
+                    ],
+                ]],
+            ]
+        )->assertOk();
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['questions']);
+
+        // 2c. Duplicate prompt placeholder ([blank_1] twice)
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $questionId,
+                    'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                    'prompt' => '[blank_1] and [blank_1] and [blank_2] and [blank_3].',
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am'], 'normalization' => $normalization],
+                            ['id' => 'blank_2', 'points' => 1.00, 'accepted_answers' => ['English'], 'normalization' => $normalization],
+                            ['id' => 'blank_3', 'points' => 1.50, 'accepted_answers' => ['useful'], 'normalization' => $normalization],
+                        ],
+                    ],
+                ]],
+            ]
+        )->assertOk();
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['questions']);
+
+        // 3. Restore valid 1-to-1 prompt & publish + attach to published lesson revision
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $questionId,
+                    'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                    'prompt' => 'I [blank_1] learning [blank_2] because it is [blank_3].',
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am'], 'normalization' => $normalization],
+                            ['id' => 'blank_2', 'points' => 1.00, 'accepted_answers' => ['English'], 'normalization' => $normalization],
+                            ['id' => 'blank_3', 'points' => 1.50, 'accepted_answers' => ['useful'], 'normalization' => $normalization],
+                        ],
+                    ],
+                ]],
+            ]
+        )->assertOk();
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $exerciseId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        // 4. Enrolled student starts attempt
+        $studentContext = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentContext['studentUser']);
+        $attemptRouteParams = [
+            ...$routeParameters,
+            'exercise' => $exerciseId,
+        ];
+
+        $started = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $attemptRouteParams)
+        )->assertCreated()
+            ->assertJsonPath('data.max_score', 3);
+
+        // Accepted answers must be hidden before submission
+        $this->assertArrayNotHasKey('blanks', $started->json('data.questions.0'));
+        $this->assertArrayNotHasKey('answer_config_snapshot', $started->json('data.questions.0'));
+
+        $attemptId = (int) $started->json('data.id');
+
+        // 5. Unknown blank ID must return 422
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', $attemptRouteParams),
+            [
+                'answers' => [[
+                    'question_id' => $questionId,
+                    'blank_answers' => [
+                        'blank_1' => 'am',
+                        'blank_999' => 'unexpected',
+                    ],
+                ]],
+            ]
+        )->assertUnprocessable()
+            ->assertJsonValidationErrors(['answers']);
+
+        // 6. Save partial blank answer & reload
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', $attemptRouteParams),
+            [
+                'answers' => [[
+                    'question_id' => $questionId,
+                    'blank_answers' => [
+                        'blank_1' => 'am',
+                    ],
+                ]],
+            ]
+        )->assertOk()
+            ->assertJsonPath('data.questions.0.blank_answers.blank_1', 'am');
+
+        // 7. Submit with 1st and 3rd correct (0.50 + 1.50 = 2.00 / 3.00 -> 66.67%)
+        $submitted = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [
+                ...$attemptRouteParams,
+                'attempt' => $attemptId,
+            ]),
+            [
+                'answers' => [[
+                    'question_id' => $questionId,
+                    'blank_answers' => [
+                        'blank_1' => 'am',
+                        'blank_2' => 'French',
+                        'blank_3' => 'useful',
+                    ],
+                ]],
+            ]
+        )->assertOk()
+            ->assertJsonPath('data.score', 2)
+            ->assertJsonPath('data.max_score', 3)
+            ->assertJsonPath('data.percentage', 66.67)
+            ->assertJsonPath('data.passed', true)
+            ->assertJsonPath('data.questions.0.is_correct', false)
+            ->assertJsonPath('data.questions.0.points_awarded', 2)
+            ->assertJsonCount(3, 'data.questions.0.blanks');
+
+        $this->assertTrue($submitted->json('data.questions.0.blanks.0.is_correct'));
+        $this->assertFalse($submitted->json('data.questions.0.blanks.1.is_correct'));
+        $this->assertTrue($submitted->json('data.questions.0.blanks.2.is_correct'));
+
+        // Unenrolled user is forbidden
+        $otherStudent = User::factory()->create();
+        $otherToken = $this->tokenFor($otherStudent);
+        $this->withHeader('Authorization', "Bearer {$otherToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $attemptRouteParams)
+        )->assertForbidden();
+    }
 }

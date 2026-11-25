@@ -21,7 +21,10 @@ import {
   createQuestionDraft,
   findDuplicateAcceptedAnswerIndexes,
   findDuplicateOptionIndexes,
+  generateUniqueBlankId,
   normalizeShortAnswer,
+  sumBlankPoints,
+  validateFitbPromptPlaceholders,
 } from "@/lib/exercise-authoring.mjs";
 
 interface ExerciseDraftBuilderProps {
@@ -118,6 +121,17 @@ function validationErrors(draft: ExerciseDraft): Record<string, string> {
             }
           });
         });
+
+        const placeholderCheck = validateFitbPromptPlaceholders(question.prompt, blanks);
+        if (placeholderCheck.promptErrors.length > 0 && !errors[`${prefix}.prompt`]) {
+          errors[`${prefix}.prompt`] = placeholderCheck.promptErrors[0];
+        }
+        if (placeholderCheck.blanksErrors.length > 0 && !errors[`${prefix}.answer_config.blanks`]) {
+          errors[`${prefix}.answer_config.blanks`] = placeholderCheck.blanksErrors[0];
+        }
+        if (sumBlankPoints(blanks) <= 0) {
+          errors[`${prefix}.points`] = "Total blank points must be greater than zero.";
+        }
       }
       return;
     }
@@ -251,6 +265,10 @@ export default function ExerciseDraftBuilder({
     sort_order: value.sort_order,
     questions: value.questions.map((question, index) => ({
       ...question,
+      points:
+        question.question_type === "fill_in_the_blanks"
+          ? sumBlankPoints((question.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
+          : question.points,
       sort_order: index,
       answer_config:
         question.question_type === "short_answer" || question.question_type === "fill_in_the_blanks"
@@ -409,7 +427,7 @@ export default function ExerciseDraftBuilder({
         const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).map(
           (b, bi) => (bi === blankIdx ? { ...b, ...patch } : b)
         );
-        return { ...q, answer_config: { blanks } };
+        return { ...q, points: sumBlankPoints(blanks), answer_config: { blanks } };
       }),
     }));
 
@@ -421,7 +439,7 @@ export default function ExerciseDraftBuilder({
         const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).filter(
           (_, bi) => bi !== blankIdx
         );
-        return { ...q, answer_config: { blanks } };
+        return { ...q, points: sumBlankPoints(blanks), answer_config: { blanks } };
       }),
     }));
 
@@ -432,7 +450,7 @@ export default function ExerciseDraftBuilder({
         if (qi !== qIdx) return q;
         const blanks = (q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [];
         const newBlank: BlankDefinitionPayload = {
-          id: `blank_${blanks.length + 1}`,
+          id: generateUniqueBlankId(blanks, q.prompt),
           points: 1,
           accepted_answers: [""],
           normalization: {
@@ -443,7 +461,8 @@ export default function ExerciseDraftBuilder({
             diacritic_sensitive: true,
           },
         };
-        return { ...q, answer_config: { blanks: [...blanks, newBlank] } };
+        const nextBlanks = [...blanks, newBlank];
+        return { ...q, points: sumBlankPoints(nextBlanks), answer_config: { blanks: nextBlanks } };
       }),
     }));
 
@@ -632,8 +651,25 @@ export default function ExerciseDraftBuilder({
                       </select>
                     </label>
                     <label className="text-xs font-semibold text-slate-700">
-                      Points
-                      <input type="number" min={0.01} step={0.25} value={question.points ?? 1} onChange={(event) => updateQuestion(questionIndex, { points: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-300 p-2" />
+                      {question.question_type === "fill_in_the_blanks" ? "Total points (from blanks)" : "Points"}
+                      <input
+                        type="number"
+                        min={0.01}
+                        step={0.25}
+                        readOnly={question.question_type === "fill_in_the_blanks"}
+                        aria-readonly={question.question_type === "fill_in_the_blanks" ? "true" : undefined}
+                        value={
+                          question.question_type === "fill_in_the_blanks"
+                            ? sumBlankPoints((question.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
+                            : (question.points ?? 1)
+                        }
+                        onChange={(event) => {
+                          if (question.question_type !== "fill_in_the_blanks") {
+                            updateQuestion(questionIndex, { points: Number(event.target.value) });
+                          }
+                        }}
+                        className={`mt-1 w-full rounded-lg border border-slate-300 p-2 ${question.question_type === "fill_in_the_blanks" ? "bg-slate-100 text-slate-600 cursor-not-allowed" : ""}`}
+                      />
                       {readError(`questions.${questionIndex}.points`) && <span role="alert" className="mt-1 block text-rose-700">{readError(`questions.${questionIndex}.points`)}</span>}
                     </label>
                     <label className="text-xs font-semibold text-slate-700 sm:col-span-2">

@@ -231,12 +231,13 @@ class ExerciseAttemptController extends Controller
 
         $rules = [
             'answers' => [$answersRequired ? 'required' : 'sometimes', 'array'],
-            'answers.*' => ['required', 'array:question_id,selected_option_id,selected_option_ids,text_answer'],
+            'answers.*' => ['required', 'array:question_id,selected_option_id,selected_option_ids,text_answer,blank_answers'],
             'answers.*.question_id' => ['required', 'integer', 'min:1'],
             'answers.*.selected_option_id' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'answers.*.selected_option_ids' => ['sometimes', 'array', 'max:100'],
             'answers.*.selected_option_ids.*' => ['integer', 'min:1'],
             'answers.*.text_answer' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'answers.*.blank_answers' => ['sometimes', 'nullable', 'array'],
         ];
 
         return Validator::make($request->all(), $rules)->validate();
