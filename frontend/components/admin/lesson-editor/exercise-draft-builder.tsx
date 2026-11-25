@@ -9,9 +9,12 @@ import {
   publishAdminExercise,
   updateAdminExercise,
   type AdminFullExercise,
+  type BlankAnswerConfigPayload,
+  type BlankDefinitionPayload,
   type CreateExerciseOptionPayload,
   type CreateExercisePayload,
   type CreateQuestionPayload,
+  type ShortAnswerConfigPayload,
 } from "@/lib/admin-learning";
 import type { QuestionType } from "@/lib/learning";
 import {
@@ -43,6 +46,7 @@ const QUESTION_TYPES: { value: QuestionType; label: string }[] = [
   { value: "true_false", label: "True / False" },
   { value: "multiple_select", label: "Multiple select" },
   { value: "short_answer", label: "Short answer" },
+  { value: "fill_in_the_blanks", label: "Fill in the Blanks" },
 ];
 
 function toDraftQuestion(question: AdminFullExercise["questions"][number]): DraftQuestion {
@@ -77,9 +81,51 @@ function validationErrors(draft: ExerciseDraft): Record<string, string> {
       errors[`${prefix}.points`] = "Points must be greater than zero.";
     }
 
+    if (question.question_type === "fill_in_the_blanks") {
+      const blanksConfig = question.answer_config as { blanks?: Array<{ id?: string; points?: number; accepted_answers?: string[]; normalization?: Record<string, boolean> }> } | undefined;
+      const blanks = blanksConfig?.blanks ?? [];
+      if (!blanks || blanks.length === 0) {
+        errors[`${prefix}.answer_config.blanks`] = "Add at least one blank.";
+      } else {
+        const seenIds = new Set<string>();
+        blanks.forEach((blank, blankIndex) => {
+          const bPrefix = `${prefix}.answer_config.blanks.${blankIndex}`;
+          if (!blank.id || !blank.id.trim()) {
+            errors[`${bPrefix}.id`] = "Blank ID is required.";
+          } else if (!/^[a-zA-Z0-9_\-]+$/.test(blank.id)) {
+            errors[`${bPrefix}.id`] = "Blank ID must contain only alphanumeric characters, underscores, and hyphens.";
+          } else if (seenIds.has(blank.id)) {
+            errors[`${bPrefix}.id`] = `Blank ID '${blank.id}' is duplicated.`;
+          } else {
+            seenIds.add(blank.id);
+          }
+
+          if (blank.points !== undefined && (!Number.isFinite(Number(blank.points)) || Number(blank.points) <= 0)) {
+            errors[`${bPrefix}.points`] = "Points must be greater than zero.";
+          }
+
+          const accepted = blank.accepted_answers ?? [];
+          if (!accepted.some((a) => a.trim() !== "")) {
+            errors[`${bPrefix}.accepted_answers`] = "Add at least one accepted answer.";
+          }
+          const duplicateAccepted = findDuplicateAcceptedAnswerIndexes(accepted, blank.normalization ?? {});
+          if (duplicateAccepted.length > 0) {
+            errors[`${bPrefix}.accepted_answers`] = `Accepted answer ${duplicateAccepted[0] + 1} duplicates an earlier answer.`;
+          }
+          accepted.forEach((ans, aIdx) => {
+            if (ans.length > 500) {
+              errors[`${bPrefix}.accepted_answers.${aIdx}`] = "Accepted answers may not exceed 500 characters.";
+            }
+          });
+        });
+      }
+      return;
+    }
+
     if (question.question_type === "short_answer") {
-      const accepted = question.answer_config?.accepted_answers ?? [];
-      const normalization = question.answer_config?.normalization;
+      const shortConfig = question.answer_config as ShortAnswerConfigPayload | null | undefined;
+      const accepted = shortConfig?.accepted_answers ?? [];
+      const normalization = shortConfig?.normalization;
       if (!accepted.some((answer) => answer.trim() !== "")) {
         errors[`${prefix}.answer_config.accepted_answers`] = "Add at least one accepted answer.";
       }
@@ -138,7 +184,7 @@ export default function ExerciseDraftBuilder({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewAnswers, setPreviewAnswers] = useState<Record<number, number | number[] | string>>({});
+  const [previewAnswers, setPreviewAnswers] = useState<Record<number, number | number[] | string | Record<string, string>>>({});
 
   const loadExercises = async (preferredId?: number) => {
     const rows = await getAdminExercises(centerSlug, courseSlug, lessonId);
@@ -206,10 +252,14 @@ export default function ExerciseDraftBuilder({
     questions: value.questions.map((question, index) => ({
       ...question,
       sort_order: index,
-      answer_config: question.question_type === "short_answer" ? question.answer_config : null,
-      options: question.question_type === "short_answer"
-        ? []
-        : question.options.map((option, optionIndex) => ({ ...option, sort_order: optionIndex })),
+      answer_config:
+        question.question_type === "short_answer" || question.question_type === "fill_in_the_blanks"
+          ? question.answer_config
+          : null,
+      options:
+        question.question_type === "short_answer" || question.question_type === "fill_in_the_blanks"
+          ? []
+          : question.options.map((option, optionIndex) => ({ ...option, sort_order: optionIndex })),
     })),
   });
 
@@ -323,11 +373,12 @@ export default function ExerciseDraftBuilder({
 
   const updateAcceptedAnswer = (questionIndex: number, answerIndex: number, value: string) => {
     const question = draft?.questions[questionIndex];
-    const answers = question?.answer_config?.accepted_answers;
-    if (!question || !answers) return;
+    const shortConfig = question?.answer_config as ShortAnswerConfigPayload | null | undefined;
+    const answers = shortConfig?.accepted_answers;
+    if (!question || !shortConfig || !answers) return;
     updateQuestion(questionIndex, {
       answer_config: {
-        ...question.answer_config!,
+        ...shortConfig,
         accepted_answers: answers.map((answer, index) => index === answerIndex ? value : answer),
       },
     });
@@ -335,18 +386,94 @@ export default function ExerciseDraftBuilder({
 
   const updateNormalization = (
     questionIndex: number,
-    key: keyof NonNullable<DraftQuestion["answer_config"]>["normalization"],
+    key: keyof ShortAnswerConfigPayload["normalization"],
     value: boolean
   ) => {
     const question = draft?.questions[questionIndex];
-    if (!question?.answer_config) return;
+    const shortConfig = question?.answer_config as ShortAnswerConfigPayload | null | undefined;
+    if (!shortConfig) return;
     updateQuestion(questionIndex, {
       answer_config: {
-        ...question.answer_config,
-        normalization: { ...question.answer_config.normalization, [key]: value },
+        ...shortConfig,
+        normalization: { ...shortConfig.normalization, [key]: value },
       },
     });
   };
+
+  // ── FITB blank helpers ──────────────────────────────────────────────────
+  const updateBlank = (qIdx: number, blankIdx: number, patch: Partial<BlankDefinitionPayload>) =>
+    updateDraft((current) => ({
+      ...current,
+      questions: current.questions.map((q, qi) => {
+        if (qi !== qIdx) return q;
+        const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).map(
+          (b, bi) => (bi === blankIdx ? { ...b, ...patch } : b)
+        );
+        return { ...q, answer_config: { blanks } };
+      }),
+    }));
+
+  const removeBlank = (qIdx: number, blankIdx: number) =>
+    updateDraft((current) => ({
+      ...current,
+      questions: current.questions.map((q, qi) => {
+        if (qi !== qIdx) return q;
+        const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).filter(
+          (_, bi) => bi !== blankIdx
+        );
+        return { ...q, answer_config: { blanks } };
+      }),
+    }));
+
+  const addBlank = (qIdx: number) =>
+    updateDraft((current) => ({
+      ...current,
+      questions: current.questions.map((q, qi) => {
+        if (qi !== qIdx) return q;
+        const blanks = (q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [];
+        const newBlank: BlankDefinitionPayload = {
+          id: `blank_${blanks.length + 1}`,
+          points: 1,
+          accepted_answers: [""],
+          normalization: {
+            case_sensitive: false,
+            trim_whitespace: true,
+            collapse_internal_whitespace: true,
+            punctuation_sensitive: true,
+            diacritic_sensitive: true,
+          },
+        };
+        return { ...q, answer_config: { blanks: [...blanks, newBlank] } };
+      }),
+    }));
+
+  const updateBlankAnswer = (qIdx: number, blankIdx: number, ansIdx: number, value: string) =>
+    updateDraft((current) => ({
+      ...current,
+      questions: current.questions.map((q, qi) => {
+        if (qi !== qIdx) return q;
+        const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).map((b, bi) => {
+          if (bi !== blankIdx) return b;
+          const accepted = [...(b.accepted_answers ?? [])];
+          accepted[ansIdx] = value;
+          return { ...b, accepted_answers: accepted };
+        });
+        return { ...q, answer_config: { blanks } };
+      }),
+    }));
+
+  const removeBlankAnswer = (qIdx: number, blankIdx: number, ansIdx: number) =>
+    updateDraft((current) => ({
+      ...current,
+      questions: current.questions.map((q, qi) => {
+        if (qi !== qIdx) return q;
+        const blanks = ((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).map((b, bi) => {
+          if (bi !== blankIdx) return b;
+          return { ...b, accepted_answers: (b.accepted_answers ?? []).filter((_, ai) => ai !== ansIdx) };
+        });
+        return { ...q, answer_config: { blanks } };
+      }),
+    }));
 
   const handleDeleteDraft = async () => {
     if (!draft || draft.status !== "draft") return;
@@ -380,10 +507,18 @@ export default function ExerciseDraftBuilder({
       id: undefined,
       sort_order: index + 1,
       answer_config: source.answer_config
-        ? {
-            accepted_answers: [...source.answer_config.accepted_answers],
-            normalization: { ...source.answer_config.normalization },
-          }
+        ? source.question_type === "fill_in_the_blanks"
+          ? {
+              blanks: ((source.answer_config as BlankAnswerConfigPayload).blanks ?? []).map((b) => ({
+                ...b,
+                accepted_answers: [...(b.accepted_answers ?? [])],
+                normalization: { ...b.normalization },
+              })),
+            }
+          : {
+              accepted_answers: [...(source.answer_config as ShortAnswerConfigPayload).accepted_answers],
+              normalization: { ...(source.answer_config as ShortAnswerConfigPayload).normalization },
+            }
         : null,
       options: source.options.map(({ option_text, is_correct, sort_order }) => ({
         option_text,
@@ -508,18 +643,121 @@ export default function ExerciseDraftBuilder({
                     </label>
                   </div>
 
-                  {question.question_type === "short_answer" ? (
+                  {question.question_type === "fill_in_the_blanks" ? (
+                    <div className="mt-3 space-y-3 rounded-lg bg-slate-50 p-3">
+                      <div>
+                        <h5 className="text-xs font-bold text-slate-700">Prompt with Blanks</h5>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          Use [blank_id] syntax in the prompt above. e.g. &quot;The capital of France is [blank_1].&quot;
+                        </p>
+                      </div>
+                      <div className="space-y-3">
+                        {((question.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? []).map((blank, blankIndex) => (
+                          <div key={blankIndex} className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <label className="w-16 text-xs font-semibold text-slate-700">Blank ID</label>
+                              <input
+                                value={blank.id ?? ""}
+                                maxLength={50}
+                                aria-label={`Blank ${blankIndex + 1} ID`}
+                                onChange={(event) => updateBlank(questionIndex, blankIndex, { id: event.target.value })}
+                                className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white p-2 font-mono text-xs"
+                              />
+                              <label className="text-xs font-semibold text-slate-700">Points</label>
+                              <input
+                                type="number"
+                                min={0.01}
+                                step={0.25}
+                                value={blank.points ?? 1}
+                                aria-label={`Blank ${blankIndex + 1} points`}
+                                onChange={(event) => updateBlank(questionIndex, blankIndex, { points: Number(event.target.value) })}
+                                className="w-20 rounded-lg border border-slate-300 bg-white p-2 text-xs"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => removeBlank(questionIndex, blankIndex)}
+                                className="rounded border border-rose-200 px-2 py-1 text-xs text-rose-700"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.id`) && (
+                              <p role="alert" className="text-xs text-rose-700">
+                                {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.id`)}
+                              </p>
+                            )}
+                            {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.points`) && (
+                              <p role="alert" className="text-xs text-rose-700">
+                                {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.points`)}
+                              </p>
+                            )}
+                            <div>
+                              <p className="text-[11px] font-semibold text-slate-700">Accepted answers</p>
+                              {(blank.accepted_answers ?? []).map((ans, ansIdx) => (
+                                <div key={ansIdx} className="mt-1 flex gap-2">
+                                  <input
+                                    value={ans}
+                                    maxLength={500}
+                                    aria-label={`Blank ${blankIndex + 1} accepted answer ${ansIdx + 1}`}
+                                    onChange={(event) => updateBlankAnswer(questionIndex, blankIndex, ansIdx, event.target.value)}
+                                    className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white p-2 text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => removeBlankAnswer(questionIndex, blankIndex, ansIdx)}
+                                    className="rounded border px-2 text-xs"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateBlank(questionIndex, blankIndex, {
+                                    accepted_answers: [...(blank.accepted_answers ?? []), ""],
+                                  })
+                                }
+                                className="mt-1 text-xs font-bold text-teal-800"
+                              >
+                                + Add answer
+                              </button>
+                            </div>
+                            {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.accepted_answers`) && (
+                              <p role="alert" className="text-xs text-rose-700">
+                                {readError(`questions.${questionIndex}.answer_config.blanks.${blankIndex}.accepted_answers`)}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => addBlank(questionIndex)}
+                          className="text-xs font-bold text-teal-800"
+                        >
+                          + Add blank
+                        </button>
+                        {readError(`questions.${questionIndex}.answer_config.blanks`) && (
+                          <p role="alert" className="text-xs text-rose-700">
+                            {readError(`questions.${questionIndex}.answer_config.blanks`)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : question.question_type === "short_answer" ? (() => {
+                    const shortConfig = question.answer_config as ShortAnswerConfigPayload | null | undefined;
+                    return (
                     <div className="mt-3 space-y-3 rounded-lg bg-slate-50 p-3">
                       <div>
                         <h5 className="text-xs font-bold text-slate-700">Accepted answers</h5>
                         <p className="mt-1 text-[11px] text-slate-500">Exact matching after the settings below. No fuzzy or AI grading is used.</p>
-                        {(question.answer_config?.accepted_answers ?? []).map((answer, answerIndex) => (
+                        {(shortConfig?.accepted_answers ?? []).map((answer, answerIndex) => (
                           <div key={answerIndex} className="mt-2 flex gap-2">
                             <input value={answer} maxLength={500} aria-label={`Accepted answer ${answerIndex + 1}`} onChange={(event) => updateAcceptedAnswer(questionIndex, answerIndex, event.target.value)} className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white p-2 text-xs" />
-                            <button type="button" aria-label={`Remove accepted answer ${answerIndex + 1}`} onClick={() => updateQuestion(questionIndex, { answer_config: { ...question.answer_config!, accepted_answers: question.answer_config!.accepted_answers.filter((_, index) => index !== answerIndex) } })} className="rounded-lg border px-2 text-xs">Remove</button>
+                            <button type="button" aria-label={`Remove accepted answer ${answerIndex + 1}`} onClick={() => updateQuestion(questionIndex, { answer_config: { ...shortConfig!, accepted_answers: shortConfig!.accepted_answers.filter((_, index) => index !== answerIndex) } })} className="rounded-lg border px-2 text-xs">Remove</button>
                           </div>
                         ))}
-                        <button type="button" onClick={() => updateQuestion(questionIndex, { answer_config: { ...question.answer_config!, accepted_answers: [...question.answer_config!.accepted_answers, ""] } })} className="mt-2 text-xs font-bold text-teal-800">+ Add accepted answer</button>
+                        <button type="button" onClick={() => updateQuestion(questionIndex, { answer_config: { ...shortConfig!, accepted_answers: [...shortConfig!.accepted_answers, ""] } })} className="mt-2 text-xs font-bold text-teal-800">+ Add accepted answer</button>
                         {readError(`questions.${questionIndex}.answer_config.accepted_answers`) && <p role="alert" className="mt-1 text-xs text-rose-700">{readError(`questions.${questionIndex}.answer_config.accepted_answers`)}</p>}
                       </div>
 
@@ -533,16 +771,17 @@ export default function ExerciseDraftBuilder({
                           ["diacritic_sensitive", "Accents matter"],
                         ] as const).map(([key, label]) => (
                           <label key={key} className="flex items-center gap-2 text-[11px] text-slate-700">
-                            <input type="checkbox" checked={question.answer_config?.normalization[key] ?? true} onChange={(event) => updateNormalization(questionIndex, key, event.target.checked)} />
+                            <input type="checkbox" checked={shortConfig?.normalization[key] ?? true} onChange={(event) => updateNormalization(questionIndex, key, event.target.checked)} />
                             {label}
                           </label>
                         ))}
                       </fieldset>
                       <div className="rounded-md bg-white p-2 text-[11px] text-slate-600" aria-live="polite">
-                        Example: {JSON.stringify(question.answer_config?.accepted_answers?.[0] ?? "")} matches {JSON.stringify(normalizeShortAnswer(question.answer_config?.accepted_answers?.[0] ?? "", question.answer_config?.normalization ?? {}))} under these rules.
+                        Example: {JSON.stringify(shortConfig?.accepted_answers?.[0] ?? "")} matches {JSON.stringify(normalizeShortAnswer(shortConfig?.accepted_answers?.[0] ?? "", shortConfig?.normalization ?? {}))} under these rules.
                       </div>
                     </div>
-                  ) : (
+                    );
+                  })() : (
                     <div className="mt-3 rounded-lg bg-slate-50 p-3">
                       {question.question_type === "multiple_select" && <p className="mb-2 text-[11px] text-slate-600">Students must select every correct answer and no incorrect answers to receive full credit.</p>}
                       <div className="space-y-2">
@@ -617,8 +856,40 @@ export default function ExerciseDraftBuilder({
               {draft.questions.map((question, questionIndex) => (
                 <fieldset key={question.id ?? `preview-${questionIndex}`} className="rounded-xl border border-slate-200 p-4">
                   <legend className="px-1 text-xs font-bold text-slate-700">Question {questionIndex + 1} · {question.points} points</legend>
-                  <p className="mb-3 text-sm font-semibold text-[#102b4c]">{question.prompt || "Question prompt"}</p>
-                  {question.question_type === "short_answer" ? (
+                  {question.question_type === "fill_in_the_blanks" ? (
+                    <div className="mb-3 text-sm font-semibold leading-relaxed text-[#102b4c]">
+                      {(question.prompt || "Question prompt").split(/(\[[a-zA-Z0-9_\-]+\])/).map((part, partIdx) => {
+                        const match = /^\[([a-zA-Z0-9_\-]+)\]$/.exec(part);
+                        if (!match) return <span key={partIdx}>{part}</span>;
+                        const blankId = match[1];
+                        const currentMap = (typeof previewAnswers[questionIndex] === "object" && previewAnswers[questionIndex] !== null && !Array.isArray(previewAnswers[questionIndex]))
+                          ? (previewAnswers[questionIndex] as Record<string, string>)
+                          : {};
+                        return (
+                          <input
+                            key={partIdx}
+                            type="text"
+                            aria-label={`Blank ${blankId}`}
+                            placeholder={blankId}
+                            value={currentMap[blankId] ?? ""}
+                            onChange={(event) =>
+                              setPreviewAnswers((current) => ({
+                                ...current,
+                                [questionIndex]: {
+                                  ...currentMap,
+                                  [blankId]: event.target.value,
+                                },
+                              }))
+                            }
+                            className="mx-1 inline-block w-32 rounded border border-slate-300 bg-white px-2 py-0.5 text-xs font-normal text-slate-900"
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="mb-3 text-sm font-semibold text-[#102b4c]">{question.prompt || "Question prompt"}</p>
+                  )}
+                  {question.question_type === "fill_in_the_blanks" ? null : question.question_type === "short_answer" ? (
                     <label className="block text-xs text-slate-600">Your answer<input type="text" value={typeof previewAnswers[questionIndex] === "string" ? previewAnswers[questionIndex] as string : ""} onChange={(event) => setPreviewAnswers((current) => ({ ...current, [questionIndex]: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 p-2" /></label>
                   ) : (
                     <div role={question.question_type === "multiple_select" ? "group" : "radiogroup"} aria-label={`Question ${questionIndex + 1} answers`} className="space-y-2">

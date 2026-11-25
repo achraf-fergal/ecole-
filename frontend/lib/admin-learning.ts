@@ -567,11 +567,24 @@ export interface ShortAnswerConfigPayload {
   normalization: ShortAnswerNormalizationPayload;
 }
 
+export interface BlankDefinitionPayload {
+  id: string;
+  points?: number;
+  accepted_answers: string[];
+  normalization?: Partial<ShortAnswerNormalizationPayload>;
+}
+
+export interface BlankAnswerConfigPayload {
+  blanks: BlankDefinitionPayload[];
+}
+
+export type ExerciseAnswerConfigPayload = ShortAnswerConfigPayload | BlankAnswerConfigPayload;
+
 export interface CreateQuestionPayload {
   id?: number;
   prompt: string;
-  question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer";
-  answer_config?: ShortAnswerConfigPayload | null;
+  question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer" | "fill_in_the_blanks";
+  answer_config?: ExerciseAnswerConfigPayload | null;
   explanation?: string | null;
   points?: number;
   sort_order?: number;
@@ -600,8 +613,8 @@ export interface AdminFullExercise {
   published_at: string | null;
   questions: {
     id: number;
-    question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer";
-    answer_config: ShortAnswerConfigPayload | null;
+    question_type: "single_choice" | "true_false" | "multiple_select" | "short_answer" | "fill_in_the_blanks";
+    answer_config: ExerciseAnswerConfigPayload | null;
     prompt: string;
     explanation: string | null;
     points: number;

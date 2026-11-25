@@ -20,6 +20,8 @@ class ExerciseAnswerGrader
 
     public const MAX_STUDENT_ANSWER_LENGTH = 5000;
 
+    public const MAX_BLANKS = 20;
+
     public function defaultNormalization(): array
     {
         return [
@@ -159,6 +161,163 @@ class ExerciseAnswerGrader
         return $errors;
     }
 
+    /** Persist explicit defaults for fill-in-the-blanks configuration. */
+    public function normalizeBlankConfiguration(array $configuration): array
+    {
+        $blanks = $configuration['blanks'] ?? [];
+        $normalizedBlanks = [];
+
+        if (is_array($blanks)) {
+            foreach ($blanks as $index => $blank) {
+                if (! is_array($blank)) {
+                    continue;
+                }
+                $accepted = $blank['accepted_answers'] ?? [];
+                $accepted = is_array($accepted)
+                    ? array_map(static fn ($a): string => is_string($a) ? $a : '', array_values($accepted))
+                    : [];
+                $normalization = $blank['normalization'] ?? [];
+
+                $normalizedBlanks[] = [
+                    'id' => isset($blank['id']) && is_string($blank['id']) ? trim($blank['id']) : 'blank_'.($index + 1),
+                    'points' => isset($blank['points']) && is_numeric($blank['points']) ? round((float) $blank['points'], 2) : 1.0,
+                    'accepted_answers' => $accepted,
+                    'normalization' => array_merge(
+                        $this->defaultNormalization(),
+                        is_array($normalization) ? $normalization : []
+                    ),
+                ];
+            }
+        }
+
+        return ['blanks' => $normalizedBlanks];
+    }
+
+    /**
+     * Return configuration errors for fill-in-the-blanks questions.
+     *
+     * @return array<string, list<string>>
+     */
+    public function blankConfigurationErrors(
+        mixed $configuration,
+        bool $requireComplete = true
+    ): array {
+        $errors = [];
+
+        if (! is_array($configuration)) {
+            return ['answer_config' => ['Answer configuration must be an object.']];
+        }
+
+        $unknownKeys = array_diff(
+            array_keys($configuration),
+            ['blanks']
+        );
+        if ($unknownKeys !== []) {
+            $errors['answer_config'][] = 'Answer configuration contains unsupported fields.';
+        }
+
+        $blanks = $configuration['blanks'] ?? [];
+        if (! is_array($blanks) || ! array_is_list($blanks)) {
+            $errors['answer_config.blanks'][] = 'Blanks must be a list.';
+
+            return $errors;
+        }
+
+        if (count($blanks) > self::MAX_BLANKS) {
+            $errors['answer_config.blanks'][] = 'A maximum of 20 blanks is allowed.';
+        }
+
+        if ($requireComplete && $blanks === []) {
+            $errors['answer_config.blanks'][] = 'At least one blank is required.';
+        }
+
+        $seenIds = [];
+        $defaults = $this->defaultNormalization();
+
+        foreach ($blanks as $bIndex => $blank) {
+            if (! is_array($blank)) {
+                $errors["answer_config.blanks.{$bIndex}"][] = 'Blank configuration must be an object.';
+
+                continue;
+            }
+
+            $id = $blank['id'] ?? null;
+            if ($id === null || ! is_string($id) || trim($id) === '') {
+                $errors["answer_config.blanks.{$bIndex}.id"][] = 'Blank ID is required.';
+            } elseif (! preg_match('/^[a-zA-Z0-9_\-]+$/', $id)) {
+                $errors["answer_config.blanks.{$bIndex}.id"][] = 'Blank ID must contain only alphanumeric characters, underscores, and hyphens.';
+            } elseif (in_array($id, $seenIds, true)) {
+                $errors["answer_config.blanks.{$bIndex}.id"][] = "Blank ID '{$id}' is duplicated.";
+            } else {
+                $seenIds[] = $id;
+            }
+
+            $points = $blank['points'] ?? null;
+            if ($points === null || ! is_numeric($points) || (float) $points <= 0) {
+                $errors["answer_config.blanks.{$bIndex}.points"][] = 'Blank points must be greater than zero.';
+            }
+
+            $accepted = $blank['accepted_answers'] ?? [];
+            if (! is_array($accepted) || ! array_is_list($accepted)) {
+                $errors["answer_config.blanks.{$bIndex}.accepted_answers"][] = 'Accepted answers must be a list.';
+                $accepted = [];
+            }
+
+            if ($requireComplete && $accepted === []) {
+                $errors["answer_config.blanks.{$bIndex}.accepted_answers"][] = 'At least one accepted answer is required.';
+            } elseif (count($accepted) > self::MAX_ACCEPTED_ANSWERS) {
+                $errors["answer_config.blanks.{$bIndex}.accepted_answers"][] = 'A maximum of 20 accepted answers is allowed per blank.';
+            }
+
+            $normalization = $blank['normalization'] ?? [];
+            if (! is_array($normalization)) {
+                $errors["answer_config.blanks.{$bIndex}.normalization"][] = 'Normalization settings must be an object.';
+                $normalization = [];
+            }
+
+            $effectiveNormalization = array_merge($defaults, $normalization);
+            $normalizedAccepted = [];
+
+            foreach ($accepted as $aIndex => $acceptedAnswer) {
+                if ($acceptedAnswer === null && ! $requireComplete) {
+                    continue;
+                }
+                if (! is_string($acceptedAnswer)) {
+                    $errors["answer_config.blanks.{$bIndex}.accepted_answers.{$aIndex}"][] = 'Accepted answers must be text.';
+
+                    continue;
+                }
+                if (mb_strlen($acceptedAnswer, 'UTF-8') > self::MAX_ACCEPTED_ANSWER_LENGTH) {
+                    $errors["answer_config.blanks.{$bIndex}.accepted_answers.{$aIndex}"][] = 'Accepted answers may not exceed 500 characters.';
+
+                    continue;
+                }
+                if ($this->trimWhitespace($acceptedAnswer) === '') {
+                    $errors["answer_config.blanks.{$bIndex}.accepted_answers.{$aIndex}"][] = 'Accepted answers cannot be empty.';
+
+                    continue;
+                }
+
+                try {
+                    $normalized = $this->normalizeText($acceptedAnswer, $effectiveNormalization);
+                } catch (\InvalidArgumentException $exception) {
+                    $errors["answer_config.blanks.{$bIndex}.accepted_answers.{$aIndex}"][] = $exception->getMessage();
+
+                    continue;
+                }
+
+                if (in_array($normalized, $normalizedAccepted, true)) {
+                    $errors["answer_config.blanks.{$bIndex}.accepted_answers.{$aIndex}"][] =
+                        'Accepted answers must be unique after applying the configured matching rules.';
+                }
+
+                $normalizedAccepted[] = $normalized;
+            }
+        }
+
+        return $errors;
+    }
+
     /**
      * Normalize student and accepted text according to the persisted rules.
      *
@@ -221,8 +380,97 @@ class ExerciseAnswerGrader
                 $answer->correct_option_ids_snapshot ?? []
             ),
             Question::TYPE_SHORT_ANSWER => $this->shortAnswerMatches($answer),
+            Question::TYPE_FILL_IN_THE_BLANKS => $this->gradeFillInTheBlanks($answer)['is_correct'],
             default => false,
         };
+    }
+
+    /**
+     * Grade fill-in-the-blanks answer with individual blank evaluation and partial credit.
+     *
+     * @return array{is_correct: bool, points_awarded_minor_units: int, points_possible_minor_units: int, blanks_feedback: list<array>}
+     */
+    public function gradeFillInTheBlanks(ExerciseAttemptAnswer $answer): array
+    {
+        $config = $answer->answer_config_snapshot ?? [];
+        $blanks = $config['blanks'] ?? [];
+        if (! is_array($blanks) || $blanks === []) {
+            return [
+                'is_correct' => false,
+                'points_awarded_minor_units' => 0,
+                'points_possible_minor_units' => 0,
+                'blanks_feedback' => [],
+            ];
+        }
+
+        $studentBlankAnswers = [];
+        if ($answer->text_answer !== null && $answer->text_answer !== '') {
+            $decoded = json_decode($answer->text_answer, true);
+            if (is_array($decoded)) {
+                $studentBlankAnswers = $decoded;
+            }
+        }
+
+        $totalPossibleMinorUnits = 0;
+        $totalAwardedMinorUnits = 0;
+        $blanksFeedback = [];
+        $allCorrect = true;
+
+        foreach ($blanks as $blank) {
+            $blankId = (string) ($blank['id'] ?? '');
+            $pointsPossible = isset($blank['points']) && is_numeric($blank['points'])
+                ? (float) $blank['points']
+                : 1.0;
+            $blankPossibleMinorUnits = (int) round($pointsPossible * 100);
+            $totalPossibleMinorUnits += $blankPossibleMinorUnits;
+
+            $normalization = array_merge(
+                $this->defaultNormalization(),
+                is_array($blank['normalization'] ?? null) ? $blank['normalization'] : []
+            );
+
+            $rawStudentAnswer = isset($studentBlankAnswers[$blankId]) && is_string($studentBlankAnswers[$blankId])
+                ? $studentBlankAnswers[$blankId]
+                : '';
+
+            $normalizedStudent = $this->normalizeText($rawStudentAnswer, $normalization);
+
+            $isMatch = false;
+            foreach ($blank['accepted_answers'] ?? [] as $accepted) {
+                if (is_string($accepted) && $normalizedStudent === $this->normalizeText($accepted, $normalization)) {
+                    $isMatch = true;
+                    break;
+                }
+            }
+
+            if ($rawStudentAnswer === '' && empty($blank['accepted_answers'])) {
+                $isMatch = false;
+            }
+
+            if ($isMatch) {
+                $blankAwardedMinorUnits = $blankPossibleMinorUnits;
+                $totalAwardedMinorUnits += $blankAwardedMinorUnits;
+            } else {
+                $blankAwardedMinorUnits = 0;
+                $allCorrect = false;
+            }
+
+            $blanksFeedback[] = [
+                'id' => $blankId,
+                'is_correct' => $isMatch,
+                'student_answer' => $rawStudentAnswer,
+                'accepted_answers' => $blank['accepted_answers'] ?? [],
+                'points_awarded' => round($blankAwardedMinorUnits / 100, 2),
+                'points_possible' => round($blankPossibleMinorUnits / 100, 2),
+            ];
+        }
+
+        return [
+            'is_correct' => $allCorrect && $totalPossibleMinorUnits > 0,
+            'points_awarded_minor_units' => $totalAwardedMinorUnits,
+            'points_possible_minor_units' => $totalPossibleMinorUnits,
+            'blanks_feedback' => $blanksFeedback,
+        ];
     }
 
     private function shortAnswerMatches(ExerciseAttemptAnswer $answer): bool

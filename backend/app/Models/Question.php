@@ -20,11 +20,14 @@ class Question extends Model
 
     public const TYPE_SHORT_ANSWER = 'short_answer';
 
+    public const TYPE_FILL_IN_THE_BLANKS = 'fill_in_the_blanks';
+
     public const TYPES = [
         self::TYPE_SINGLE_CHOICE,
         self::TYPE_TRUE_FALSE,
         self::TYPE_MULTIPLE_SELECT,
         self::TYPE_SHORT_ANSWER,
+        self::TYPE_FILL_IN_THE_BLANKS,
     ];
 
     protected $fillable = [
@@ -119,7 +122,7 @@ class Question extends Model
 
         $errors = [];
 
-        if ($hasEmptyOption && $this->question_type !== self::TYPE_SHORT_ANSWER) {
+        if ($hasEmptyOption && ! in_array($this->question_type, [self::TYPE_SHORT_ANSWER, self::TYPE_FILL_IN_THE_BLANKS], true)) {
             $errors[] = 'Question options cannot be empty.';
         }
 
@@ -163,7 +166,7 @@ class Question extends Model
             return $errors;
         }
 
-        if ($this->question_type === self::TYPE_SHORT_ANSWER) {
+        if ($this->question_type === self::TYPE_SHORT_ANSWER || $this->question_type === self::TYPE_FILL_IN_THE_BLANKS) {
             return [];
         }
 

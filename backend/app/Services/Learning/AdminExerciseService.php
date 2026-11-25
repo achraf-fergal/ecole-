@@ -212,11 +212,11 @@ class AdminExerciseService
                 }
 
                 if (
-                    $questionType !== Question::TYPE_SHORT_ANSWER
+                    ! in_array($questionType, [Question::TYPE_SHORT_ANSWER, Question::TYPE_FILL_IN_THE_BLANKS], true)
                     && isset($qData['answer_config'])
                 ) {
                     throw ValidationException::withMessages([
-                        "questions.{$qIndex}.answer_config" => ['Answer configuration is only valid for short-answer questions.'],
+                        "questions.{$qIndex}.answer_config" => ['Answer configuration is only valid for short-answer and fill-in-the-blanks questions.'],
                     ]);
                 }
 
@@ -238,11 +238,28 @@ class AdminExerciseService
                 }
 
                 if (
-                    $questionType === Question::TYPE_SHORT_ANSWER
+                    $questionType === Question::TYPE_FILL_IN_THE_BLANKS
+                    && array_key_exists('answer_config', $qData)
+                    && $qData['answer_config'] !== null
+                ) {
+                    $configErrors = $this->answerGrader->blankConfigurationErrors(
+                        $qData['answer_config'],
+                        false
+                    );
+
+                    if ($configErrors !== []) {
+                        throw ValidationException::withMessages(
+                            $this->prefixQuestionErrors($configErrors, $qIndex)
+                        );
+                    }
+                }
+
+                if (
+                    in_array($questionType, [Question::TYPE_SHORT_ANSWER, Question::TYPE_FILL_IN_THE_BLANKS], true)
                     && ! empty($qData['options'])
                 ) {
                     throw ValidationException::withMessages([
-                        "questions.{$qIndex}.options" => ['Short-answer questions do not accept choice options.'],
+                        "questions.{$qIndex}.options" => ['This question type does not accept choice options.'],
                     ]);
                 }
 
@@ -337,11 +354,15 @@ class AdminExerciseService
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
-                        'answer_config' => $questionType === Question::TYPE_SHORT_ANSWER
-                            ? (isset($qData['answer_config'])
+                        'answer_config' => match ($questionType) {
+                            Question::TYPE_SHORT_ANSWER => isset($qData['answer_config'])
                                 ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
-                                : null)
-                            : null,
+                                : null,
+                            Question::TYPE_FILL_IN_THE_BLANKS => isset($qData['answer_config'])
+                                ? $this->answerGrader->normalizeBlankConfiguration($qData['answer_config'])
+                                : null,
+                            default => null,
+                        },
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
@@ -352,17 +373,21 @@ class AdminExerciseService
                         'question_type' => $questionType,
                         'prompt' => $qData['prompt'] ?? '',
                         'explanation' => $qData['explanation'] ?? null,
-                        'answer_config' => $questionType === Question::TYPE_SHORT_ANSWER
-                            ? (isset($qData['answer_config'])
+                        'answer_config' => match ($questionType) {
+                            Question::TYPE_SHORT_ANSWER => isset($qData['answer_config'])
                                 ? $this->answerGrader->normalizeConfiguration($qData['answer_config'])
-                                : null)
-                            : null,
+                                : null,
+                            Question::TYPE_FILL_IN_THE_BLANKS => isset($qData['answer_config'])
+                                ? $this->answerGrader->normalizeBlankConfiguration($qData['answer_config'])
+                                : null,
+                            default => null,
+                        },
                         'points' => $points,
                         'sort_order' => $sortOrder,
                     ]);
                 }
 
-                if ($questionType === Question::TYPE_SHORT_ANSWER) {
+                if (in_array($questionType, [Question::TYPE_SHORT_ANSWER, Question::TYPE_FILL_IN_THE_BLANKS], true)) {
                     QuestionOption::query()
                         ->where('center_id', $lockedExercise->center_id)
                         ->where('question_id', $q->id)
@@ -480,6 +505,24 @@ class AdminExerciseService
 
                 if ($question->question_type === Question::TYPE_SHORT_ANSWER) {
                     $configErrors = $this->answerGrader->configurationErrors(
+                        $question->answer_config,
+                        true
+                    );
+
+                    if ($configErrors !== []) {
+                        $messages = [];
+                        foreach ($configErrors as $fieldMessages) {
+                            foreach ($fieldMessages as $message) {
+                                $messages[] = "Question #{$question->id}: {$message}";
+                            }
+                        }
+
+                        throw ValidationException::withMessages([
+                            'questions' => $messages,
+                        ]);
+                    }
+                } elseif ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $configErrors = $this->answerGrader->blankConfigurationErrors(
                         $question->answer_config,
                         true
                     );

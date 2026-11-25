@@ -410,7 +410,7 @@ class ExerciseAttemptService
                     'text_answer' => null,
                     'correct_option_id_snapshot' => $correctOptionId,
                     'correct_option_ids_snapshot' => $correctOptionIds,
-                    'answer_config_snapshot' => $question->question_type === Question::TYPE_SHORT_ANSWER
+                    'answer_config_snapshot' => in_array($question->question_type, [Question::TYPE_SHORT_ANSWER, Question::TYPE_FILL_IN_THE_BLANKS], true)
                         ? $question->answer_config
                         : null,
                     'question_type_snapshot' => $question->question_type,
@@ -529,9 +529,15 @@ class ExerciseAttemptService
                 $pointsPossibleMinorUnits = $this->decimalToMinorUnits($answer->points_possible);
                 $totalPointsPossibleMinorUnits += $pointsPossibleMinorUnits;
 
-                $isCorrect = $this->answerGrader->isCorrect($answer);
+                if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $gradeResult = $this->answerGrader->gradeFillInTheBlanks($answer);
+                    $isCorrect = $gradeResult['is_correct'];
+                    $pointsAwardedMinorUnits = $gradeResult['points_awarded_minor_units'];
+                } else {
+                    $isCorrect = $this->answerGrader->isCorrect($answer);
+                    $pointsAwardedMinorUnits = $isCorrect ? $pointsPossibleMinorUnits : 0;
+                }
 
-                $pointsAwardedMinorUnits = $isCorrect ? $pointsPossibleMinorUnits : 0;
                 $totalPointsAwardedMinorUnits += $pointsAwardedMinorUnits;
 
                 $answer->update([
@@ -607,6 +613,11 @@ class ExerciseAttemptService
                     'options' => $answer->options_snapshot,
                 ];
 
+                if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $decoded = $answer->text_answer !== null ? json_decode($answer->text_answer, true) : null;
+                    $data['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass();
+                }
+
                 if ($canRevealAnswers) {
                     $data['is_correct'] = $answer->is_correct;
                     $data['points_awarded'] = (float) $answer->points_awarded;
@@ -614,6 +625,9 @@ class ExerciseAttemptService
                     $data['correct_option_ids'] = $answer->correct_option_ids_snapshot ?? [];
                     if ($answer->question_type_snapshot === Question::TYPE_SHORT_ANSWER) {
                         $data['accepted_answers'] = $answer->answer_config_snapshot['accepted_answers'] ?? [];
+                    } elseif ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                        $gradeResult = $this->answerGrader->gradeFillInTheBlanks($answer);
+                        $data['blanks'] = $gradeResult['blanks_feedback'];
                     }
                     $data['explanation'] = $answer->explanation_snapshot;
                 }
@@ -633,6 +647,7 @@ class ExerciseAttemptService
             Question::TYPE_TRUE_FALSE => ['question_id', 'selected_option_id'],
             Question::TYPE_MULTIPLE_SELECT => ['question_id', 'selected_option_ids'],
             Question::TYPE_SHORT_ANSWER => ['question_id', 'text_answer'],
+            Question::TYPE_FILL_IN_THE_BLANKS => ['question_id', 'blank_answers', 'text_answer'],
             default => ['question_id'],
         };
 
@@ -698,6 +713,47 @@ class ExerciseAttemptService
             ];
         }
 
+        if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+            $rawBlankAnswers = $entry['blank_answers'] ?? null;
+            if ($rawBlankAnswers === null && array_key_exists('text_answer', $entry)) {
+                $rawBlankAnswers = is_string($entry['text_answer'])
+                    ? json_decode($entry['text_answer'], true)
+                    : null;
+            }
+
+            if ($rawBlankAnswers !== null && ! is_array($rawBlankAnswers)) {
+                throw ValidationException::withMessages([
+                    'answers' => ["Blank answers for Question ID {$answer->question_id} must be an object of key-value pairs."],
+                ]);
+            }
+
+            $sanitized = [];
+            if (is_array($rawBlankAnswers)) {
+                foreach ($rawBlankAnswers as $bId => $val) {
+                    if (! is_string($bId)) {
+                        continue;
+                    }
+                    if ($val !== null && ! is_string($val)) {
+                        throw ValidationException::withMessages([
+                            'answers' => ["Blank answer for blank '{$bId}' must be text."],
+                        ]);
+                    }
+                    if (is_string($val) && mb_strlen($val, 'UTF-8') > ExerciseAnswerGrader::MAX_STUDENT_ANSWER_LENGTH) {
+                        throw ValidationException::withMessages([
+                            'answers' => ["Blank answer for blank '{$bId}' may not exceed 5000 characters."],
+                        ]);
+                    }
+                    $sanitized[$bId] = is_string($val) ? $val : '';
+                }
+            }
+
+            return [
+                'selected_option_id' => null,
+                'selected_option_ids' => null,
+                'text_answer' => $sanitized !== [] ? json_encode($sanitized, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) : null,
+            ];
+        }
+
         $textAnswer = $entry['text_answer'] ?? null;
         if ($textAnswer !== null && (! is_string($textAnswer) || mb_strlen($textAnswer, 'UTF-8') > ExerciseAnswerGrader::MAX_STUDENT_ANSWER_LENGTH)) {
             throw ValidationException::withMessages([
@@ -734,6 +790,12 @@ class ExerciseAttemptService
 
             if (array_key_exists('text_answer', $entry)) {
                 $normalized['text_answer'] = $entry['text_answer'];
+            }
+
+            if (array_key_exists('blank_answers', $entry)) {
+                $blanks = is_array($entry['blank_answers']) ? $entry['blank_answers'] : [];
+                ksort($blanks);
+                $normalized['blank_answers'] = $blanks;
             }
 
             $normalizedAnswers[] = $normalized;

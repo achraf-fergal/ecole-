@@ -39,7 +39,8 @@ export type QuestionType =
   | "single_choice"
   | "true_false"
   | "multiple_select"
-  | "short_answer";
+  | "short_answer"
+  | "fill_in_the_blanks";
 
 export interface ShortAnswerNormalization {
   case_sensitive: boolean;
@@ -863,6 +864,15 @@ export interface AttemptQuestionOption {
   is_correct?: boolean;
 }
 
+export interface AttemptBlankFeedback {
+  id: string;
+  is_correct: boolean;
+  student_answer: string;
+  accepted_answers: string[];
+  points_awarded: number;
+  points_possible: number;
+}
+
 export interface AttemptQuestion {
   id: number;
   question_type: QuestionType;
@@ -871,6 +881,8 @@ export interface AttemptQuestion {
   selected_option_id: number | null;
   selected_option_ids?: number[] | null;
   text_answer?: string | null;
+  blank_answers?: Record<string, string> | null;
+  blanks?: AttemptBlankFeedback[];
   options: AttemptQuestionOption[];
   is_correct?: boolean;
   points_awarded?: number;
@@ -930,6 +942,7 @@ export interface SaveAttemptAnswerPayload {
   selected_option_id?: number | null;
   selected_option_ids?: number[];
   text_answer?: string | null;
+  blank_answers?: Record<string, string>;
 }
 
 /**

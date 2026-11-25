@@ -26,6 +26,24 @@ export function createQuestionDraft(type = "single_choice") {
     };
   }
 
+  if (type === "fill_in_the_blanks") {
+    return {
+      ...question,
+      prompt: "The capital of France is [blank_1].",
+      points: 1,
+      answer_config: {
+        blanks: [
+          {
+            id: "blank_1",
+            points: 1,
+            accepted_answers: [""],
+            normalization: { ...DEFAULT_SHORT_ANSWER_NORMALIZATION },
+          },
+        ],
+      },
+    };
+  }
+
   if (type === "true_false") {
     return {
       ...question,
@@ -110,20 +128,27 @@ export function findDuplicateAcceptedAnswerIndexes(values, settings = {}) {
   return duplicateIndexes(values, (value) => normalizeShortAnswer(value, settings));
 }
 
-/** @param {"single_choice"|"true_false"|"multiple_select"|"short_answer"} type @param {number|string|number[]|null|undefined} value */
+/** @param {"single_choice"|"true_false"|"multiple_select"|"short_answer"|"fill_in_the_blanks"} type @param {number|string|number[]|Record<string, string>|null|undefined} value */
 export function isQuestionAnswered(type, value) {
   if (type === "multiple_select") return Array.isArray(value) && value.length > 0;
   if (type === "short_answer") return typeof value === "string" && value.trim().length > 0;
+  if (type === "fill_in_the_blanks") {
+    if (typeof value !== "object" || value === null) return false;
+    return Object.values(value).some((v) => typeof v === "string" && v.trim().length > 0);
+  }
   return typeof value === "number" && Number.isFinite(value);
 }
 
-/** @param {number} questionId @param {string} type @param {number|string|number[]|null|undefined} value */
+/** @param {number} questionId @param {string} type @param {number|string|number[]|Record<string, string>|null|undefined} value */
 export function toAttemptAnswerPayload(questionId, type, value) {
   if (type === "multiple_select") {
     return { question_id: questionId, selected_option_ids: Array.isArray(value) ? value : [] };
   }
   if (type === "short_answer") {
     return { question_id: questionId, text_answer: typeof value === "string" ? value : null };
+  }
+  if (type === "fill_in_the_blanks") {
+    return { question_id: questionId, blank_answers: typeof value === "object" && value !== null && !Array.isArray(value) ? value : {} };
   }
   return {
     question_id: questionId,

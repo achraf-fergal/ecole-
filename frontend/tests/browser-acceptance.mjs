@@ -59,7 +59,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   const prompts = [
     "Choose the greeting.",
     "The sky is blue.",
-    "Select the primary colors.",
+    "Select the colors of the Irish flag.",
     "Translate hello into French.",
   ];
   for (let index = 0; index < prompts.length; index += 1) {
@@ -77,14 +77,15 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
 
   await questionCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
   await questionCards.nth(1).getByLabel("Question type").selectOption("true_false");
-  await questionCards.nth(1).getByLabel("Mark option 2 correct").check();
+  await questionCards.nth(1).getByLabel("Mark option 1 correct").check();
 
   await questionCards.nth(2).getByLabel("Question type").selectOption("multiple_select");
-  await questionCards.nth(2).getByLabel("Question 3 option 1").fill("Red");
-  await questionCards.nth(2).getByLabel("Question 3 option 2").fill("Blue");
-  await questionCards.nth(2).getByLabel("Question 3 option 3").fill("Green");
-  await questionCards.nth(2).getByLabel("Mark option 2 correct").uncheck();
-  await questionCards.nth(2).getByLabel("Mark option 3 correct").check();
+  await questionCards.nth(2).getByLabel("Question 3 option 1").fill("Green");
+  await questionCards.nth(2).getByLabel("Question 3 option 2").fill("Orange");
+  await questionCards.nth(2).getByLabel("Question 3 option 3").fill("White");
+  await questionCards.nth(2).getByLabel("Mark option 1 correct").check();
+  await questionCards.nth(2).getByLabel("Mark option 2 correct").check();
+  await questionCards.nth(2).getByLabel("Mark option 3 correct").uncheck();
 
   await questionCards.nth(3).getByLabel("Question type").selectOption("short_answer");
   await questionCards.nth(3).getByLabel("Explanation (shown only when answer review is allowed)").fill("Bonjour means hello.");
@@ -171,6 +172,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await reopenedCards.nth(0).getByLabel("Mark option 1 correct").check();
   await reopenedCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
   await reopenedCards.nth(1).getByLabel("Question type").selectOption("true_false");
+  await reopenedCards.nth(1).getByLabel("Mark option 1 correct").check();
   await reopenedCards.nth(2).getByRole("button", { name: "+ Add option", exact: true }).click();
   await reopenedCards.nth(2).getByLabel("Question 3 option 4").fill("Temporary option");
   await reopenedCards.nth(2).getByRole("button", { name: "Remove option 4", exact: true }).click();
@@ -1263,213 +1265,306 @@ async function main() {
     console.log("✓ Unenrolled/unauthenticated PDF access securely rejected.");
 
     // 16d. Mandatory Assessment Lifecycle Flow (No optional visibility branches)
-    console.log("Executing mandatory assessment attempt lifecycle...");
-    const startAssessmentBtn = studentPage.locator('button:has-text("Start Assessment")');
+    assert.ok(authoredExercise?.id > 0, "Authored exercise must be present from Assertion 9a.");
+    console.log(`Executing mandatory assessment lifecycle for authored exercise ${authoredExercise.id} ("${authoredExercise.title}")...`);
+
+    const authoredBlock = studentPage.locator("article").filter({ hasText: authoredExercise.title });
+    await authoredBlock.waitFor({ state: "visible", timeout: 15000 });
+
+    const startAssessmentBtn = authoredBlock.locator('button:has-text("Start Assessment")');
     await startAssessmentBtn.waitFor({ state: "visible", timeout: 10000 });
 
     const startAttemptPromise = studentPage.waitForResponse(
-      (resp) => resp.url().includes("/attempts") && (resp.status() === 201 || resp.status() === 200)
+      (resp) => {
+        const url = new URL(resp.url());
+        return (
+          resp.request().method() === "POST" &&
+          url.pathname.endsWith(`/exercises/${authoredExercise.id}/attempts`) &&
+          (resp.status() === 201 || resp.status() === 200)
+        );
+      },
+      { timeout: 15000 }
     );
     await startAssessmentBtn.click();
     const startAttemptRes = await startAttemptPromise;
-    assert.ok(startAttemptRes.status() === 200 || startAttemptRes.status() === 201, "Start attempt API returned success");
-    console.log("✓ Assessment attempt started.");
-
-    // -----------------------------------------------------------------------
-    // Assessment lifecycle: Start -> Select -> Save -> Reload -> Resume
-    // -> Submit -> Result -> History
-    // -----------------------------------------------------------------------
-
-    const expectedOptionId = String(
-      fixture.correctOptionId
-    );
-
     assert.ok(
-      expectedOptionId !== "undefined" &&
-      expectedOptionId !== "null",
-      "Fixture must provide correctOptionId."
+      startAttemptRes.status() === 200 || startAttemptRes.status() === 201,
+      "Start attempt API returned success"
     );
+    const startJson = await startAttemptRes.json();
+    const startPayload = startJson.data ?? startJson;
+    const attemptId = Number(startPayload.id);
+    assert.ok(attemptId > 0, "Created attempt has valid ID.");
+    console.log(`✓ Assessment attempt #${startPayload.attempt_number} (ID: ${attemptId}) started.`);
 
-    // 1. Select correct answer.
-    const correctOptionInput = studentPage.locator(
-      `input[data-option-id="${expectedOptionId}"]`
-    );
+    // Phase E2.2-C: Student response payload privacy verification
+    assert.equal(startPayload.show_correct_answers, false, "Pre-submission payload must not show correct answers.");
+    for (const q of startPayload.questions) {
+      assert.equal(q.is_correct, undefined, `Pre-submission question ${q.id} must not leak is_correct.`);
+      assert.equal(q.points_awarded, undefined, `Pre-submission question ${q.id} must not leak points_awarded.`);
+      assert.equal(q.correct_option_id, undefined, `Pre-submission question ${q.id} must not leak correct_option_id.`);
+      assert.equal(q.correct_option_ids, undefined, `Pre-submission question ${q.id} must not leak correct_option_ids.`);
+      assert.equal(q.accepted_answers, undefined, `Pre-submission question ${q.id} must not leak accepted_answers.`);
+      assert.equal(q.answer_config_snapshot, undefined, `Pre-submission question ${q.id} must not leak answer_config_snapshot.`);
+      assert.equal(q.explanation, undefined, `Pre-submission question ${q.id} must not leak explanation.`);
+      if (Array.isArray(q.options)) {
+        for (const opt of q.options) {
+          assert.equal(opt.is_correct, undefined, `Pre-submission option ${opt.id} must not leak is_correct.`);
+        }
+      }
+    }
+    console.log("✓ Pre-submission answer privacy verified across all questions and options.");
 
-    await correctOptionInput.waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
+    // Extract questions and correct options from authoredExercise
+    const q1 = authoredExercise.questions.find((q) => q.question_type === "single_choice");
+    const salutOption = q1.options.find((opt) => opt.option_text === "Salut");
+    const goodbyeOption = q1.options.find((opt) => opt.option_text === "Goodbye");
+    assert.ok(salutOption?.id, "Salut option found.");
+    assert.ok(goodbyeOption?.id, "Goodbye option found.");
 
-    await correctOptionInput.check();
+    const q2 = authoredExercise.questions.find((q) => q.question_type === "true_false");
+    const trueOption = q2.options.find((opt) => opt.option_text === "True");
+    assert.ok(trueOption?.id, "True option found.");
 
-    assert.equal(
-      await correctOptionInput.isChecked(),
-      true,
-      "Selected answer must be marked as selected."
-    );
+    const q3 = authoredExercise.questions.find((q) => q.question_type === "multiple_select");
+    const greenOption = q3.options.find((opt) => opt.option_text === "Green");
+    const orangeOption = q3.options.find((opt) => opt.option_text === "Orange");
+    const whiteOption = q3.options.find((opt) => opt.option_text === "White");
+    assert.ok(greenOption?.id, "Green option found.");
+    assert.ok(orangeOption?.id, "Orange option found.");
+    assert.ok(whiteOption?.id, "White option found.");
 
-    // 2. Save progress.
-    const saveProgressButton = studentPage.locator(
-      'button:has-text("Save Progress")'
-    );
+    const q4 = authoredExercise.questions.find((q) => q.question_type === "short_answer");
+    assert.ok(q4?.id, "Short answer question found.");
 
-    await saveProgressButton.waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
+    // Select answers across all four question types while testing navigation:
+    // Question 1: Single Choice ("Salut")
+    const salutInput = authoredBlock.locator(`input[data-option-id="${salutOption.id}"]`);
+    await salutInput.waitFor({ state: "visible", timeout: 10000 });
+    await salutInput.check();
+    assert.equal(await salutInput.isChecked(), true, "Question 1 Salut selected.");
+
+    // Navigate to Question 2
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    const trueInput = authoredBlock.locator(`input[data-option-id="${trueOption.id}"]`);
+    await trueInput.waitFor({ state: "visible", timeout: 10000 });
+    await trueInput.check();
+    assert.equal(await trueInput.isChecked(), true, "Question 2 True selected.");
+
+    // Navigate to Question 3
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    const greenInput = authoredBlock.locator(`input[data-option-id="${greenOption.id}"]`);
+    const orangeInput = authoredBlock.locator(`input[data-option-id="${orangeOption.id}"]`);
+    const whiteInput = authoredBlock.locator(`input[data-option-id="${whiteOption.id}"]`);
+    await greenInput.waitFor({ state: "visible", timeout: 10000 });
+    await greenInput.check();
+    await orangeInput.check();
+    assert.equal(await greenInput.isChecked(), true, "Question 3 Green selected.");
+    assert.equal(await orangeInput.isChecked(), true, "Question 3 Orange selected.");
+    assert.equal(await whiteInput.isChecked(), false, "Question 3 White remains unselected.");
+
+    // Navigate to Question 4
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    const shortAnswerInput = authoredBlock.locator(`#attempt-question-${q4.id}`).locator('input[type="text"]');
+    await shortAnswerInput.waitFor({ state: "visible", timeout: 10000 });
+    await shortAnswerInput.fill("BONJOUR");
+    assert.equal(await shortAnswerInput.inputValue(), "BONJOUR", "Question 4 filled with uppercase BONJOUR.");
+
+    // Backward navigation state preservation test
+    await authoredBlock.getByRole("button", { name: "Previous question" }).click();
+    assert.equal(await greenInput.isChecked(), true, "Navigation backward preserves Q3 Green.");
+    assert.equal(await orangeInput.isChecked(), true, "Navigation backward preserves Q3 Orange.");
+    await authoredBlock.getByRole("button", { name: "Previous question" }).click();
+    assert.equal(await trueInput.isChecked(), true, "Navigation backward preserves Q2 True.");
+    await authoredBlock.getByRole("button", { name: "Previous question" }).click();
+    assert.equal(await salutInput.isChecked(), true, "Navigation backward preserves Q1 Salut.");
+
+    // Navigate back to Q4
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    await authoredBlock.getByRole("button", { name: "Next question" }).click();
+    assert.equal(await shortAnswerInput.inputValue(), "BONJOUR", "Navigation forward preserves Q4 text.");
+    console.log("✓ Question navigation state preservation verified.");
+
+    // Save progress
+    const saveProgressButton = authoredBlock.locator('button:has-text("Save Progress")');
+    await saveProgressButton.waitFor({ state: "visible", timeout: 10000 });
 
     const saveProgressPromise = studentPage.waitForResponse(
       (response) => {
         const pathname = new URL(response.url()).pathname;
-
         return (
           response.request().method() === "PATCH" &&
-          pathname.endsWith(
-            `/exercises/${fixture.exerciseId}/attempts/current`
-          ) &&
+          pathname.endsWith(`/exercises/${authoredExercise.id}/attempts/current`) &&
+          response.status() === 200
+        );
+      },
+      { timeout: 15000 }
+    );
+    await saveProgressButton.click();
+    const saveResponse = await saveProgressPromise;
+    assert.equal(saveResponse.status(), 200, "Save progress returns HTTP 200.");
+    const saveJson = await saveResponse.json();
+    const savePayload = saveJson.data ?? saveJson;
+
+    // Privacy check on saved response
+    for (const question of savePayload.questions) {
+      assert.equal(question.is_correct, undefined, "Save progress response must not leak is_correct.");
+      assert.equal(question.correct_option_ids, undefined, "Save progress response must not leak correct_option_ids.");
+      assert.equal(question.accepted_answers, undefined, "Save progress response must not leak accepted_answers.");
+    }
+
+    const savedQ1 = savePayload.questions.find((q) => Number(q.id) === Number(q1.id));
+    assert.equal(Number(savedQ1.selected_option_id), Number(salutOption.id), "Saved Q1 option matches.");
+    const savedQ2 = savePayload.questions.find((q) => Number(q.id) === Number(q2.id));
+    assert.equal(Number(savedQ2.selected_option_id), Number(trueOption.id), "Saved Q2 option matches.");
+    const savedQ3 = savePayload.questions.find((q) => Number(q.id) === Number(q3.id));
+    assert.deepEqual(
+      (savedQ3.selected_option_ids || []).map(Number).sort(),
+      [Number(greenOption.id), Number(orangeOption.id)].sort(),
+      "Saved Q3 multi-select options match."
+    );
+    const savedQ4 = savePayload.questions.find((q) => Number(q.id) === Number(q4.id));
+    assert.equal(savedQ4.text_answer, "BONJOUR", "Saved Q4 text answer matches.");
+    console.log("✓ Progress saved to backend and response privacy validated.");
+
+    // Reload page to prove persistence from database across browser refresh
+    await studentPage.reload({ waitUntil: "networkidle" });
+    const reloadedBlock = studentPage.locator("article").filter({ hasText: authoredExercise.title });
+    await reloadedBlock.waitFor({ state: "visible", timeout: 15000 });
+
+    await studentPage.waitForFunction(
+      ({ opt1, opt2, opt3a, opt3b }) => {
+        const el1 = document.querySelector(`input[data-option-id="${opt1}"]`);
+        const el2 = document.querySelector(`input[data-option-id="${opt2}"]`);
+        const el3a = document.querySelector(`input[data-option-id="${opt3a}"]`);
+        const el3b = document.querySelector(`input[data-option-id="${opt3b}"]`);
+        return el1?.checked === true && el2?.checked === true && el3a?.checked === true && el3b?.checked === true;
+      },
+      {
+        opt1: salutOption.id,
+        opt2: trueOption.id,
+        opt3a: greenOption.id,
+        opt3b: orangeOption.id,
+      },
+      { timeout: 15000 }
+    );
+
+    const reloadedTextInput = reloadedBlock.locator(`#attempt-question-${q4.id}`).locator('input[type="text"]');
+    assert.equal(await reloadedTextInput.inputValue(), "BONJOUR", "Text answer BONJOUR restored from server after reload.");
+    console.log("✓ All 4 answers restored accurately from database after page reload.");
+
+    // Submit attempt
+    const submitButton = reloadedBlock.locator('button:has-text("Submit Assessment")');
+    await submitButton.waitFor({ state: "visible", timeout: 10000 });
+
+    const submitPromise = studentPage.waitForResponse(
+      (response) => {
+        const pathname = new URL(response.url()).pathname;
+        return (
+          response.request().method() === "POST" &&
+          pathname.endsWith(`/exercises/${authoredExercise.id}/attempts/${attemptId}/submit`) &&
           response.status() === 200
         );
       },
       { timeout: 15000 }
     );
 
-    await saveProgressButton.click();
-
-    const saveResponse = await saveProgressPromise;
-
-    assert.equal(
-      saveResponse.status(),
-      200
-    );
-
-    const saveJson = await saveResponse.json();
-
-    const savePayload = saveJson.data ?? saveJson;
-
-    assert.ok(
-      Array.isArray(savePayload.questions) &&
-      savePayload.questions.some((question) =>
-        Number(question.id) === Number(fixture.questionId) &&
-        Number(question.selected_option_id) === Number(expectedOptionId)
-      ),
-      "Backend must return the saved selected option in the question payload."
-    );
-
-    // 3. Reload the actual browser page.
-    // This is required to prove persistence, not local React state.
-    await studentPage.reload({
-      waitUntil: "networkidle",
-    });
-
-    // 4. Wait until the same answer is restored.
-    const restoredOptionInput = studentPage.locator(
-      `input[data-option-id="${expectedOptionId}"]`
-    );
-
-    await restoredOptionInput.waitFor({
-      state: "visible",
-      timeout: 15000,
-    });
-
-    await studentPage.waitForFunction(
-      (optionId) => {
-        const input = document.querySelector(
-          `input[data-option-id="${optionId}"]`
-        );
-
-        return input?.checked === true;
-      },
-      expectedOptionId,
-      {
-        timeout: 15000,
-      }
-    );
-
-    assert.equal(
-      await restoredOptionInput.isChecked(),
-      true,
-      "The same answer must be restored from the persisted attempt after reload."
-    );
-
-    // 5. Submit attempt.
-    const submitButton = studentPage.locator(
-      'button:has-text("Submit Assessment")'
-    );
-
-    await submitButton.waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
-
-    const submitPromise = studentPage.waitForResponse(
-      (response) => {
-        const pathname = new URL(response.url()).pathname;
-
-        return response.request().method() === "POST"
-          && /\/attempts\/\d+\/submit$/.test(pathname)
-          && response.status() === 200;
-      },
-      { timeout: 15000 }
-    );
-
     await submitButton.click();
-
     const submitResponse = await submitPromise;
-
-    assert.equal(
-      submitResponse.status(),
-      200,
-      "Assessment submission must return HTTP 200."
-    );
-
+    assert.equal(submitResponse.status(), 200, "Assessment submission must return HTTP 200.");
     const submittedJson = await submitResponse.json();
     const submittedAttempt = submittedJson.data ?? submittedJson;
-    assert.equal(submittedAttempt.passed, true, "Correct answer must pass the assessment.");
-    assert.equal(Number(submittedAttempt.percentage), 100, "Correct answer must score 100%.");
+    assert.equal(submittedAttempt.passed, true, "All four correct answers must pass the assessment.");
+    assert.equal(Number(submittedAttempt.percentage), 100, "All four correct answers must score 100%.");
+    console.log("✓ Attempt submitted and graded at 100% (Passed).");
 
-    // 6. Verify result.
+    // Idempotent duplicate submission verification
+    const duplicateSubmitProbe = await studentPage.evaluate(
+      async ({ apiUrl, centerSlug, courseSlug, lessonId, exerciseId, attemptId }) => {
+        const res = await fetch(
+          `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ answers: [] }),
+          }
+        );
+        const data = await res.json();
+        return { status: res.status, data };
+      },
+      {
+        apiUrl: API_URL,
+        centerSlug: fixture.centerSlug,
+        courseSlug: fixture.courseSlug,
+        lessonId: fixture.lessonId,
+        exerciseId: authoredExercise.id,
+        attemptId,
+      }
+    );
+    assert.equal(duplicateSubmitProbe.status, 200, "Duplicate submission of graded attempt returns HTTP 200 (idempotent).");
+    assert.equal((duplicateSubmitProbe.data.data ?? duplicateSubmitProbe.data).passed, true);
+    console.log("✓ Duplicate submission is idempotent (HTTP 200).");
+
+    // Altered submission payload verification (HTTP 409 Conflict)
+    const conflictingSubmitProbe = await studentPage.evaluate(
+      async ({ apiUrl, centerSlug, courseSlug, lessonId, exerciseId, attemptId, wrongOptionId, q1Id }) => {
+        const res = await fetch(
+          `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              answers: [
+                { question_id: q1Id, selected_option_id: wrongOptionId },
+              ],
+            }),
+          }
+        );
+        return { status: res.status };
+      },
+      {
+        apiUrl: API_URL,
+        centerSlug: fixture.centerSlug,
+        courseSlug: fixture.courseSlug,
+        lessonId: fixture.lessonId,
+        exerciseId: authoredExercise.id,
+        attemptId,
+        wrongOptionId: goodbyeOption.id,
+        q1Id: q1.id,
+      }
+    );
+    assert.equal(conflictingSubmitProbe.status, 409, "Submitting altered answers to already completed attempt returns HTTP 409 Conflict.");
+    console.log("✓ Altered submission to graded attempt safely rejected with HTTP 409 Conflict.");
+
+    // Verify result display after reload
     await studentPage.reload({ waitUntil: "networkidle" });
-    await studentPage.getByText("Passed", { exact: true }).waitFor({
+    const completedBlock = studentPage.locator("article").filter({ hasText: authoredExercise.title });
+    await completedBlock.waitFor({ state: "visible", timeout: 15000 });
+    await completedBlock.getByText("Passed", { exact: true }).first().waitFor({
       state: "visible",
       timeout: 15000,
     });
 
-    const resultText = await studentPage.locator("main").innerText();
-
+    const resultText = await completedBlock.innerText();
     assert.ok(
-      resultText.includes("100%") ||
-      resultText.includes("10 / 10"),
-      "Correct answer must produce the expected 100% result."
+      resultText.includes("100%"),
+      "Completed assessment display must include 100% score."
     );
 
-    // 7. Attempt History must be accessible and functional.
-    const historyButton = studentPage.locator(
-      'button:has-text("View Attempt History")'
-    );
-
-    await historyButton.waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
-
+    // History verification
+    const historyButton = completedBlock.locator('button:has-text("View Attempt History")');
+    await historyButton.waitFor({ state: "visible", timeout: 10000 });
     await historyButton.click();
 
-    const historyEntry = studentPage.getByText(
-      /Attempt\s*#?\s*1/
-    );
-
-    await historyEntry.waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
-
-    assert.ok(
-      await historyEntry.isVisible(),
-      "Completed Attempt #1 must appear in history."
-    );
+    const historyEntry = completedBlock.getByText(/Attempt\s*#?\s*1/);
+    await historyEntry.first().waitFor({ state: "visible", timeout: 10000 });
+    assert.ok(await historyEntry.first().isVisible(), "Completed Attempt #1 must appear in history.");
 
     console.log(
-      "✓ Assessment lifecycle fully verified: Save, Reload, Resume, Submit, Result and History."
+      "✓ Assessment lifecycle fully verified across all 4 question types: Start, Privacy, Navigate, Save, Reload, Submit, Idempotency, Conflict-rejection, Result, and History."
     );
     // -----------------------------------------------------------------------
     // ASSERTION 17: Administrative Controls are Inaccessible to Students

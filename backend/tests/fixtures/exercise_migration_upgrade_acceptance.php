@@ -1,5 +1,35 @@
 <?php
 
+/**
+ * Standalone Migration Acceptance Script
+ *
+ * Purpose:
+ *   Validates safe schema migration and data integrity preservation during the
+ *   exercise upgrade migration (2026_11_24_100000_extend_exercise_answers_for_new_question_types).
+ *   Specifically verifies that historical single-choice and true/false attempts retain
+ *   all legacy column values across migration, new question types and snapshots round-trip properly,
+ *   composite foreign keys remain intact, submission fingerprints persist as 64-character SHA-256 hex,
+ *   and default passing score defaults to 70.00 while preserving historical scores.
+ *
+ * Prerequisites:
+ *   - Dedicated acceptance MySQL 8 database (e.g. school_saas_g5_acceptance_*)
+ *   - ACCEPTANCE_DB_HOST, ACCEPTANCE_DB_PORT, ACCEPTANCE_DB_DATABASE,
+ *     ACCEPTANCE_DB_USERNAME, ACCEPTANCE_DB_PASSWORD configured in .env
+ *   - Never run against production or school_saas development database.
+ *
+ * Usage:
+ *   cd backend
+ *   php tests/fixtures/exercise_migration_upgrade_acceptance.php
+ *
+ * Output:
+ *   JSON-encoded test results describing preserved legacy data, schema verification,
+ *   composite foreign key checks, and new field round-trips.
+ *
+ * Warnings:
+ *   Strictly rejects execution in production environments (APP_ENV=production).
+ *   Strictly rejects execution against non-acceptance databases.
+ */
+
 use App\Models\Center;
 use App\Models\CenterUser;
 use App\Models\Course;
@@ -25,9 +55,16 @@ require_once __DIR__.'/../../vendor/autoload.php';
 $app = require __DIR__.'/../../bootstrap/app.php';
 $app->make(Kernel::class)->bootstrap();
 
+// 1. Production rejection
+if (app()->environment('production')) {
+    fwrite(STDERR, "Refusing to run migration acceptance script in production environment.\n");
+    exit(1);
+}
+
+// 2. Dedicated acceptance DB validation
 $database = trim((string) env('ACCEPTANCE_DB_DATABASE', ''));
-if (! preg_match('/\Aschool_saas_g5_acceptance_[A-Za-z0-9_]+\z/', $database) || $database === 'school_saas') {
-    fwrite(STDERR, "Refusing non-acceptance database.\n");
+if ($database === '' || $database === 'school_saas' || ! preg_match('/\Aschool_saas_g5_acceptance_[A-Za-z0-9_]+\z/', $database)) {
+    fwrite(STDERR, "Refusing non-acceptance database: '{$database}'. Must match /^school_saas_g5_acceptance_[a-zA-Z0-9_]+$/ and not be 'school_saas'.\n");
     exit(2);
 }
 
@@ -51,9 +88,19 @@ DB::purge('mysql_acceptance');
 DB::setDefaultConnection('mysql_acceptance');
 
 $connection = DB::connection('mysql_acceptance');
+
+// 3. MySQL 8 and InnoDB checks
 $version = (string) $connection->selectOne('SELECT VERSION() AS version')->version;
 if (! preg_match('/\A8\./', $version)) {
     throw new RuntimeException("MySQL 8 required; detected {$version}.");
+}
+
+$engineRow = $connection->selectOne(
+    'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+    [$database, 'exercise_attempts']
+);
+if ($engineRow && strtoupper((string) $engineRow->ENGINE) !== 'INNODB') {
+    throw new RuntimeException("InnoDB engine required; detected {$engineRow->ENGINE}.");
 }
 
 $targetMigration = '2026_11_24_100000_extend_exercise_answers_for_new_question_types';
@@ -62,6 +109,21 @@ $localMigrations = array_map(
     static fn (string $path): string => pathinfo($path, PATHINFO_FILENAME),
     glob(database_path('migrations/*.php')) ?: []
 );
+
+// If target migration was already recorded on the acceptance DB, roll it back to establish baseline pre-upgrade state
+if (in_array($targetMigration, $recordedMigrations, true)) {
+    $rollbackExit = Artisan::call('migrate:rollback', [
+        '--database' => 'mysql_acceptance',
+        '--path' => 'database/migrations/'.$targetMigration.'.php',
+        '--force' => true,
+        '--no-interaction' => true,
+    ]);
+    if ($rollbackExit !== 0) {
+        throw new RuntimeException('Failed to rollback prior assessment migration for fresh test run: '.Artisan::output());
+    }
+    $recordedMigrations = $connection->table('migrations')->pluck('migration')->all();
+}
+
 $pendingMigrations = array_values(array_diff($localMigrations, $recordedMigrations));
 if ($pendingMigrations !== [$targetMigration]) {
     throw new RuntimeException(
@@ -192,7 +254,7 @@ try {
         'points' => '0.20',
         'sort_order' => 2,
     ]);
-    $trueOption = QuestionOption::create([
+    QuestionOption::create([
         'center_id' => $centerId,
         'question_id' => $trueFalse->id,
         'option_text' => 'True',
@@ -241,18 +303,12 @@ try {
         'is_correct' => true,
         'points_awarded' => '0.10',
     ]);
-    $legacyBefore = [
-        'attempt_id' => (int) $attempt->id,
-        'answer_id' => (int) $legacyAnswer->id,
-        'correct_option_id' => (int) $correctOption->id,
-        'score' => (string) $attempt->score,
-        'max_score' => (string) $attempt->max_score,
-        'percentage' => (string) $attempt->percentage,
-        'passed' => (bool) $attempt->passed,
-        'submitted_at' => $attempt->submitted_at->toIso8601String(),
-        'graded_at' => $attempt->graded_at->toIso8601String(),
-    ];
 
+    // 4. Capture exact pre-migration raw state for all columns
+    $legacyAttemptBeforeRaw = (array) $connection->table('exercise_attempts')->where('id', $attempt->id)->first();
+    $legacyAnswerBeforeRaw = (array) $connection->table('exercise_attempt_answers')->where('id', $legacyAnswer->id)->first();
+
+    // Run the migration upgrade
     $exitCode = Artisan::call('migrate', [
         '--database' => 'mysql_acceptance',
         '--path' => 'database/migrations/2026_11_24_100000_extend_exercise_answers_for_new_question_types.php',
@@ -263,20 +319,30 @@ try {
         throw new RuntimeException('Assessment migration command failed: '.Artisan::output());
     }
 
-    $storedAttempt = ExerciseAttempt::query()->findOrFail($legacyBefore['attempt_id']);
-    $storedAnswer = ExerciseAttemptAnswer::query()->findOrFail($legacyBefore['answer_id']);
-    $assert((int) $storedAnswer->correct_option_id_snapshot === $legacyBefore['correct_option_id'], 'Legacy correct option snapshot changed.');
-    $assert((string) $storedAttempt->score === $legacyBefore['score'], 'Legacy score changed.');
-    $assert((string) $storedAttempt->max_score === $legacyBefore['max_score'], 'Legacy maximum score changed.');
-    $assert((string) $storedAttempt->percentage === $legacyBefore['percentage'], 'Legacy percentage changed.');
-    $assert((bool) $storedAttempt->passed === $legacyBefore['passed'], 'Legacy pass state changed.');
-    $assert($storedAttempt->submitted_at->toIso8601String() === $legacyBefore['submitted_at'], 'Legacy submitted timestamp changed.');
-    $assert($storedAttempt->graded_at->toIso8601String() === $legacyBefore['graded_at'], 'Legacy graded timestamp changed.');
-    $assert($storedAnswer->correct_option_ids_snapshot === null, 'New multi-answer snapshot should be nullable for legacy rows.');
-    $assert($storedAnswer->answer_config_snapshot === null, 'New config snapshot should be nullable for legacy rows.');
-    $assert($storedAnswer->text_answer === null, 'New text answer should be nullable for legacy rows.');
-    $assert($storedAnswer->selected_option_ids === null, 'New selected options should be nullable for legacy rows.');
+    // Verify all legacy attempt fields remain completely identical
+    $legacyAttemptAfterRaw = (array) $connection->table('exercise_attempts')->where('id', $attempt->id)->first();
+    foreach ($legacyAttemptBeforeRaw as $column => $value) {
+        $assert(
+            (string) $legacyAttemptAfterRaw[$column] === (string) $value,
+            "Legacy attempt column '{$column}' changed across migration: before='{$value}', after='{$legacyAttemptAfterRaw[$column]}'."
+        );
+    }
+    $assert($legacyAttemptAfterRaw['submission_fingerprint'] === null, 'Historical attempt submission_fingerprint must default to null.');
 
+    // Verify all legacy attempt answer fields remain completely identical
+    $legacyAnswerAfterRaw = (array) $connection->table('exercise_attempt_answers')->where('id', $legacyAnswer->id)->first();
+    foreach ($legacyAnswerBeforeRaw as $column => $value) {
+        $assert(
+            (string) $legacyAnswerAfterRaw[$column] === (string) $value,
+            "Legacy attempt answer column '{$column}' changed across migration: before='{$value}', after='{$legacyAnswerAfterRaw[$column]}'."
+        );
+    }
+    $assert($legacyAnswerAfterRaw['text_answer'] === null, 'New text_answer must be null for legacy rows.');
+    $assert($legacyAnswerAfterRaw['selected_option_ids'] === null, 'New selected_option_ids must be null for legacy rows.');
+    $assert($legacyAnswerAfterRaw['correct_option_ids_snapshot'] === null, 'New correct_option_ids_snapshot must be null for legacy rows.');
+    $assert($legacyAnswerAfterRaw['answer_config_snapshot'] === null, 'New answer_config_snapshot must be null for legacy rows.');
+
+    // 5. Verify new question field: answer_config round-trip
     $trueFalse->answer_config = ['normalization' => ['case_sensitive' => false]];
     $trueFalse->save();
     $assert(
@@ -284,6 +350,7 @@ try {
         'New question answer_config JSON did not round-trip.'
     );
 
+    // 5. Verify new question and attempt records with new fields
     $shortAnswer = Question::create([
         'center_id' => $centerId,
         'exercise_id' => $exercise->id,
@@ -293,6 +360,8 @@ try {
         'sort_order' => 3,
         'answer_config' => ['accepted_answers' => ['bonjour']],
     ]);
+
+    $sampleFingerprint = hash('sha256', 'student_attempt_payload_v2_acceptance_'.$suffix);
     $newAttempt = ExerciseAttempt::create([
         'center_id' => $centerId,
         'exercise_id' => $exercise->id,
@@ -305,8 +374,14 @@ try {
         'max_score' => '0.10',
         'percentage' => null,
         'passed' => null,
+        'submission_fingerprint' => $sampleFingerprint,
         'started_at' => $now,
     ]);
+
+    $storedFingerprint = (string) $connection->table('exercise_attempts')->where('id', $newAttempt->id)->value('submission_fingerprint');
+    $assert($storedFingerprint === $sampleFingerprint, 'submission_fingerprint 64-char sha256 did not round-trip.');
+    $assert(strlen($storedFingerprint) === 64, 'submission_fingerprint must be exactly 64 characters long.');
+
     $newAnswer = ExerciseAttemptAnswer::create([
         'center_id' => $centerId,
         'exercise_id' => $exercise->id,
@@ -325,12 +400,15 @@ try {
         'is_correct' => null,
         'points_awarded' => null,
     ]);
+
     $storedNewAnswer = ExerciseAttemptAnswer::query()->findOrFail($newAnswer->id);
     $assert($storedNewAnswer->correct_option_id_snapshot === null, 'Nullable correct option snapshot rejected null.');
+    $assert($storedNewAnswer->text_answer === 'bonjour', 'Text answer string did not round-trip.');
     $assert($storedNewAnswer->selected_option_ids === [], 'Selected-option JSON did not round-trip.');
     $assert($storedNewAnswer->correct_option_ids_snapshot === [], 'Correct-option JSON did not round-trip.');
     $assert($storedNewAnswer->answer_config_snapshot === ['accepted_answers' => ['bonjour']], 'Answer-config snapshot JSON did not round-trip.');
 
+    // 6. Verify default passing score behavior: 70.00 for new vs historical preservation
     $defaultExercise = Exercise::create([
         'center_id' => $centerId,
         'lesson_id' => $lesson->id,
@@ -341,6 +419,7 @@ try {
     $assert($defaultPassingScore === '70.00', 'New exercise database default is not 70.00.');
     $assert((string) $exercise->fresh()->passing_score === '60.00', 'Migration changed a historical passing score.');
 
+    // 7. Verify composite foreign key integrity
     $foreignKey = $connection->select(
         'SELECT COLUMN_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = ? ORDER BY ORDINAL_POSITION',
         [$database, 'exercise_attempt_answers', 'exercise_attempt_answers_correct_option_fk']
@@ -356,12 +435,15 @@ try {
         'mysql_version' => $version,
         'migration' => $targetMigration,
         'legacy_single_choice_and_true_false' => 'preserved',
-        'legacy_completed_attempt' => $legacyBefore,
+        'legacy_completed_attempt_fields_verified' => count($legacyAttemptBeforeRaw),
+        'legacy_completed_answer_fields_verified' => count($legacyAnswerBeforeRaw),
+        'submission_fingerprint_sha256' => 'round-trip passed',
         'new_json_columns' => 'round-trip passed',
         'nullable_correct_option_snapshot' => 'passed',
         'composite_foreign_key' => 'passed',
         'historical_passing_score' => '60.00 preserved',
         'new_passing_score_default' => $defaultPassingScore,
+        'status' => 'SUCCESS',
     ];
 } finally {
     if ($centerId !== null) {
