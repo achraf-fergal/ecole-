@@ -594,6 +594,195 @@ class LessonMySqlAcceptanceTest extends TestCase
         return compact('center', 'admin', 'course', 'module', 'lesson');
     }
 
+    /** Create a published, enrolled one-question assessment and its active attempt. */
+    private function createConcurrentSubmissionFixture(): array
+    {
+        $fixture = $this->createLessonFixture();
+        $center = $fixture['center'];
+        $studentUser = User::create([
+            'name' => 'Submission Student '.Str::random(6),
+            'email' => 'submission_'.Str::lower(Str::random(10)).'@acceptance.test',
+            'password' => 'Password123!',
+            'status' => User::STATUS_ACTIVE,
+            'token_version' => 1,
+            'email_verified_at' => now(),
+        ]);
+        $this->trackedUserIds[] = $studentUser->id;
+
+        $membership = CenterUser::create([
+            'center_id' => $center->id,
+            'user_id' => $studentUser->id,
+            'status' => 'active',
+        ]);
+        $studentRole = Role::query()->firstOrCreate(
+            ['key' => 'student'],
+            ['name' => 'Student']
+        );
+        $membership->roles()->syncWithoutDetaching([$studentRole->id]);
+
+        $profile = StudentProfile::factory()
+            ->forMembership($membership)
+            ->create(['status' => StudentProfile::STATUS_ACTIVE]);
+
+        $cohort = Cohort::factory()
+            ->forCourse($fixture['course'])
+            ->inProgress()
+            ->create([
+                'center_id' => $center->id,
+                'starts_at' => now()->subDays(2),
+                'ends_at' => now()->addMonths(2),
+                'status' => Cohort::STATUS_OPEN,
+            ]);
+        Enrollment::factory()
+            ->forStudentProfile($profile)
+            ->forCohort($cohort)
+            ->create([
+                'center_id' => $center->id,
+                'start_at' => now()->subDay(),
+                'end_at' => now()->addMonth(),
+                'status' => Enrollment::STATUS_ACTIVE,
+            ]);
+
+        $exercise = Exercise::create([
+            'center_id' => $center->id,
+            'lesson_id' => $fixture['lesson']->id,
+            'title' => 'Concurrent submission assessment '.Str::random(6),
+            'max_attempts' => 2,
+            'passing_score' => '70.00',
+            'status' => Exercise::STATUS_PUBLISHED,
+            'published_at' => now(),
+        ]);
+        $question = Question::create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_SINGLE_CHOICE,
+            'prompt' => 'Select the correct option.',
+            'points' => '0.10',
+            'sort_order' => 1,
+        ]);
+        $correctOption = QuestionOption::create([
+            'center_id' => $center->id,
+            'question_id' => $question->id,
+            'option_text' => 'Correct',
+            'is_correct' => true,
+            'sort_order' => 1,
+        ]);
+        $incorrectOption = QuestionOption::create([
+            'center_id' => $center->id,
+            'question_id' => $question->id,
+            'option_text' => 'Incorrect',
+            'is_correct' => false,
+            'sort_order' => 2,
+        ]);
+
+        $revisionService = app(LessonRevisionService::class);
+        $revision = $revisionService->createDraft($fixture['lesson'], $fixture['admin']);
+        $revisionService->addExerciseBlock($revision, $exercise->id);
+        $revisionService->publish($fixture['lesson'], $fixture['admin']);
+
+        $attempt = app(ExerciseAttemptService::class)->startOrResumeAttempt(
+            $studentUser,
+            $fixture['course'],
+            $fixture['lesson'],
+            $exercise,
+            $profile,
+            $center
+        );
+
+        return [
+            ...$fixture,
+            'student' => $studentUser,
+            'profile' => $profile,
+            'exercise' => $exercise,
+            'attempt' => $attempt,
+            'correct_option' => $correctOption,
+            'incorrect_option' => $incorrectOption,
+        ];
+    }
+
+    /** Start two real PHP workers behind a shared file barrier and return their exact exit codes and JSON results. */
+    private function runConcurrentSubmissionWorkers(ExerciseAttempt $attempt, array $selectedOptionIds): array
+    {
+        if (count($selectedOptionIds) !== 2) {
+            throw new \InvalidArgumentException('Exactly two option IDs are required for concurrent workers.');
+        }
+
+        $workerScript = base_path('tests/fixtures/concurrent_submission_worker.php');
+        $readyFiles = [
+            sys_get_temp_dir().DIRECTORY_SEPARATOR.'submission_w1_'.uniqid().'.tmp',
+            sys_get_temp_dir().DIRECTORY_SEPARATOR.'submission_w2_'.uniqid().'.tmp',
+        ];
+        $releaseSignalFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'submission_release_'.uniqid().'.tmp';
+        $php = PHP_BINARY ?: 'php';
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ];
+        $processes = [];
+        $pipes = [];
+        $workerResults = [];
+
+        foreach ($selectedOptionIds as $index => $selectedOptionId) {
+            $command = escapeshellarg($php)
+                .' '.escapeshellarg($workerScript)
+                .' '.escapeshellarg((string) $attempt->id)
+                .' '.escapeshellarg((string) $selectedOptionId)
+                .' '.escapeshellarg($readyFiles[$index])
+                .' '.escapeshellarg($releaseSignalFile);
+            $processes[$index] = proc_open(
+                $command,
+                $descriptors,
+                $pipes[$index],
+                base_path(),
+                $this->getWorkerEnv()
+            );
+            $this->assertIsResource($processes[$index]);
+            fclose($pipes[$index][0]);
+        }
+
+        $exitCodes = [null, null];
+        try {
+            $this->waitForWorkersReady($readyFiles[0], $readyFiles[1], $processes[0], $processes[1], 10);
+            touch($releaseSignalFile);
+
+            $workerResults = $this->collectWorkerProcesses([
+                ['process' => $processes[0], 'stdout' => $pipes[0][1], 'stderr' => $pipes[0][2]],
+                ['process' => $processes[1], 'stdout' => $pipes[1][1], 'stderr' => $pipes[1][2]],
+            ], 20);
+            $exitCodes = [$workerResults[0]['exitCode'], $workerResults[1]['exitCode']];
+        } finally {
+            foreach ($pipes as $workerPipes) {
+                fclose($workerPipes[1]);
+                fclose($workerPipes[2]);
+            }
+            foreach ($processes as $process) {
+                $this->terminateWorker($process);
+            }
+            foreach ($processes as $index => $process) {
+                $closedExitCode = proc_close($process);
+                if ($exitCodes[$index] === null || $exitCodes[$index] < 0) {
+                    $exitCodes[$index] = $closedExitCode;
+                }
+            }
+            foreach ([...$readyFiles, $releaseSignalFile] as $path) {
+                if (is_file($path)) {
+                    unlink($path);
+                }
+            }
+        }
+
+        $results = [];
+        foreach ($workerResults as $index => $result) {
+            $this->assertSame(0, $exitCodes[$index], "Concurrent submission worker {$index} failed: {$result['stderr']}");
+            $decoded = json_decode(trim($result['stdout']), true, flags: JSON_THROW_ON_ERROR);
+            $this->assertIsArray($decoded, "Concurrent submission worker {$index} did not return JSON.");
+            $results[] = $decoded;
+        }
+
+        return ['exit_codes' => $exitCodes, 'results' => $results];
+    }
+
     /** Create an independent secondary PDO connection to MySQL for concurrency testing. */
     private function createSecondaryConnection(): \PDO
     {
@@ -1229,6 +1418,68 @@ class LessonMySqlAcceptanceTest extends TestCase
             ->count();
 
         $this->assertSame(1, $totalAttempts, 'Database consistency: exactly one active attempt exists');
+    }
+
+    public function test_mysql_concurrent_identical_submissions_grade_once_and_return_one_result(): void
+    {
+        $fixture = $this->createConcurrentSubmissionFixture();
+        $run = $this->runConcurrentSubmissionWorkers(
+            $fixture['attempt'],
+            [$fixture['correct_option']->id, $fixture['correct_option']->id]
+        );
+
+        $this->assertSame([0, 0], $run['exit_codes']);
+        $this->assertSame(['success', 'success'], array_column($run['results'], 'status'));
+        $this->assertSame($run['results'][0], $run['results'][1]);
+        $this->assertSame($fixture['attempt']->id, $run['results'][0]['attempt_id']);
+        $this->assertSame(1, $run['results'][0]['attempt_number']);
+        $this->assertSame(0.1, $run['results'][0]['score']);
+        $this->assertSame(100.0, $run['results'][0]['percentage']);
+        $this->assertTrue($run['results'][0]['passed']);
+
+        $attempt = ExerciseAttempt::query()->with('answers')->findOrFail($fixture['attempt']->id);
+        $this->assertSame(ExerciseAttempt::STATUS_GRADED, $attempt->status);
+        $this->assertSame('0.10', $attempt->score);
+        $this->assertSame('0.10', $attempt->max_score);
+        $this->assertSame($run['results'][0]['submitted_at'], $attempt->submitted_at?->toIso8601String());
+        $this->assertSame($run['results'][0]['graded_at'], $attempt->graded_at?->toIso8601String());
+        $this->assertCount(1, $attempt->answers);
+        $this->assertSame(1, DB::table('exercise_attempt_answers')->where('exercise_attempt_id', $attempt->id)->count());
+        $this->assertSame(1, ExerciseAttempt::query()->whereKey($attempt->id)->count());
+    }
+
+    public function test_mysql_concurrent_changed_submissions_accept_one_immutable_result_and_conflict_other(): void
+    {
+        $fixture = $this->createConcurrentSubmissionFixture();
+        $run = $this->runConcurrentSubmissionWorkers(
+            $fixture['attempt'],
+            [$fixture['correct_option']->id, $fixture['incorrect_option']->id]
+        );
+
+        $this->assertSame([0, 0], $run['exit_codes']);
+        $statuses = $run['results'];
+        usort($statuses, static fn (array $left, array $right): int => $left['status'] <=> $right['status']);
+        $this->assertSame(['conflict', 'success'], array_column($statuses, 'status'));
+
+        $accepted = $statuses[1];
+        $attempt = ExerciseAttempt::query()->with('answers')->findOrFail($fixture['attempt']->id);
+        $answer = $attempt->answers->sole();
+
+        $this->assertSame(ExerciseAttempt::STATUS_GRADED, $attempt->status);
+        $this->assertSame($accepted['attempt_id'], $attempt->id);
+        $this->assertSame(1, $attempt->attempt_number);
+        $this->assertSame($accepted['submitted_at'], $attempt->submitted_at?->toIso8601String());
+        $this->assertSame($accepted['graded_at'], $attempt->graded_at?->toIso8601String());
+        $this->assertSame($accepted['selected_option_id'], $answer->selected_option_id);
+        $this->assertSame($accepted['is_correct'], (bool) $answer->is_correct);
+        $this->assertSame($accepted['score'], (float) $attempt->score);
+        $this->assertSame($accepted['points_awarded'], (float) $answer->points_awarded);
+        $this->assertContains($answer->selected_option_id, [
+            $fixture['correct_option']->id,
+            $fixture['incorrect_option']->id,
+        ]);
+        $this->assertSame(1, DB::table('exercise_attempt_answers')->where('exercise_attempt_id', $attempt->id)->count());
+        $this->assertSame(1, ExerciseAttempt::query()->whereKey($attempt->id)->count());
     }
 
     /**

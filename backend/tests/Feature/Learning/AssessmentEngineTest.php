@@ -429,14 +429,18 @@ class AssessmentEngineTest extends TestCase
     {
         $ctx = $this->createAdminContext();
         $adminToken = $this->tokenFor($ctx['user']);
+        $routeParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+        ];
+        $privateExplanation = 'CANARY_EXPLANATION_NOT_FOR_STUDENTS_3C';
+        $privateAcceptedAnswer = 'CANARY_ACCEPTED_SECRET_3C';
+        $privateCorrectOption = 'CANARY_CORRECT_OPTION_3C';
 
         // Create exercise with show_correct_answers_after_submission = false
         $createRes = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
-            route('api.centers.admin.learning.exercises.store', [
-                'center' => $ctx['center']->slug,
-                'course' => $ctx['course']->slug,
-                'lesson' => $ctx['lesson']->id,
-            ]),
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
             [
                 'title' => 'Secret Answers Quiz',
                 'passing_score' => 60.00,
@@ -446,28 +450,42 @@ class AssessmentEngineTest extends TestCase
                     [
                         'prompt' => 'Confidential prompt',
                         'question_type' => 'true_false',
-                        'explanation' => 'Super Secret Explanation',
+                        'explanation' => $privateExplanation,
                         'points' => 10.00,
                         'options' => [
-                            ['option_text' => 'True', 'is_correct' => true],
-                            ['option_text' => 'False', 'is_correct' => false],
+                            ['option_text' => $privateCorrectOption, 'is_correct' => true],
+                            ['option_text' => 'CANARY_INCORRECT_OPTION_3C', 'is_correct' => false],
                         ],
+                    ],
+                    [
+                        'prompt' => 'Complete the private answer.',
+                        'question_type' => Question::TYPE_SHORT_ANSWER,
+                        'explanation' => $privateExplanation,
+                        'points' => 1,
+                        'answer_config' => [
+                            'accepted_answers' => [$privateAcceptedAnswer],
+                        ],
+                        'options' => [],
                     ],
                 ],
             ]
         );
         $exerciseId = $createRes->json('data.id');
-        $qId = $createRes->json('data.questions.0.id');
-        $correctOptId = collect($createRes->json('data.questions.0.options'))->firstWhere('is_correct', true)['id'];
+        $createdQuestions = $createRes->json('data.questions');
+        $trueFalseQuestionId = (int) $createdQuestions[0]['id'];
+        $shortAnswerQuestionId = (int) $createdQuestions[1]['id'];
+        $correctOptId = (int) $createdQuestions[0]['options'][0]['id'];
 
         $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
-            route('api.centers.admin.learning.exercises.publish', [
-                'center' => $ctx['center']->slug,
-                'course' => $ctx['course']->slug,
-                'lesson' => $ctx['lesson']->id,
-                'exercise' => $exerciseId,
-            ])
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
         )->assertOk();
+
+        $adminPreview = $this->withHeader('Authorization', "Bearer {$adminToken}")->getJson(
+            route('api.centers.admin.learning.exercises.show', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk();
+        $adminPreview->assertJsonPath('data.questions.1.answer_config.accepted_answers.0', $privateAcceptedAnswer);
+        $adminPreview->assertJsonPath('data.questions.0.options.0.is_correct', true);
+        $adminPreview->assertJsonPath('data.questions.0.options.0.option_text', $privateCorrectOption);
 
         /** @var LessonRevisionService $revisionService */
         $revisionService = app(LessonRevisionService::class);
@@ -477,41 +495,122 @@ class AssessmentEngineTest extends TestCase
 
         $studentCtx = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
         $studentToken = $this->tokenFor($studentCtx['studentUser']);
+        $studentRouteParameters = [...$routeParameters, 'exercise' => $exerciseId];
+        $studentHeaders = ['Authorization' => "Bearer {$studentToken}"];
 
-        // Start
-        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
-            route('api.centers.courses.learn.lessons.exercises.attempts.start', [
-                'center' => $ctx['center']->slug,
-                'course' => $ctx['course']->slug,
-                'lesson' => $ctx['lesson']->id,
-                'exercise' => $exerciseId,
-            ])
+        $this->withHeaders($studentHeaders)->getJson(
+            route('api.centers.admin.learning.exercises.show', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertForbidden();
+
+        $startRes = $this->withHeaders($studentHeaders)->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $studentRouteParameters)
         )->assertCreated();
+        $this->assertStudentResponseHidesPrivateAnswers($startRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+        $attemptId = (int) $startRes->json('data.id');
+        $answerPayload = [
+            ['question_id' => $trueFalseQuestionId, 'selected_option_id' => $correctOptId],
+            ['question_id' => $shortAnswerQuestionId, 'text_answer' => 'a student guess'],
+        ];
 
-        // Submit
-        $submitRes = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
-            route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
-                'center' => $ctx['center']->slug,
-                'course' => $ctx['course']->slug,
-                'lesson' => $ctx['lesson']->id,
-                'exercise' => $exerciseId,
-            ]),
-            [
-                'answers' => [
-                    ['question_id' => $qId, 'selected_option_id' => $correctOptId],
-                ],
-            ]
+        $currentRes = $this->withHeaders($studentHeaders)->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', $studentRouteParameters)
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($currentRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+
+        $saveRes = $this->withHeaders($studentHeaders)->patchJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.save', $studentRouteParameters),
+            ['answers' => $answerPayload]
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($saveRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+
+        $currentAfterSave = $this->withHeaders($studentHeaders)->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', $studentRouteParameters)
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($currentAfterSave, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+
+        $submitRes = $this->withHeaders($studentHeaders)->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $studentRouteParameters),
+            ['answers' => $answerPayload]
         );
 
         $submitRes->assertOk();
         $submitRes->assertJsonPath('data.show_correct_answers', false);
         $submitRes->assertJsonPath('data.score', 10);
         $submitRes->assertJsonPath('data.passed', true);
+        $this->assertStudentResponseHidesPrivateAnswers($submitRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
 
-        // Explanation and correct option must NOT be in the response
-        $raw = $submitRes->getContent();
-        $this->assertStringNotContainsString('Super Secret Explanation', $raw);
-        $this->assertStringNotContainsString('correct_option_id', $raw);
+        $explicitSubmitRes = $this->withHeaders($studentHeaders)->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [
+                ...$studentRouteParameters,
+                'attempt' => $attemptId,
+            ]),
+            ['answers' => $answerPayload]
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($explicitSubmitRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+
+        $legacyNoActive = $this->withHeaders($studentHeaders)->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $studentRouteParameters),
+            ['answers' => $answerPayload]
+        )->assertConflict();
+        $this->assertStringNotContainsString($privateAcceptedAnswer, $legacyNoActive->getContent());
+
+        $historyRes = $this->withHeaders($studentHeaders)->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.history', $studentRouteParameters)
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($historyRes, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+
+        $currentAfterSubmit = $this->withHeaders($studentHeaders)->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.current', $studentRouteParameters)
+        )->assertOk();
+        $this->assertStudentResponseHidesPrivateAnswers($currentAfterSubmit, [
+            $privateExplanation,
+            $privateAcceptedAnswer,
+        ]);
+    }
+
+    private function assertStudentResponseHidesPrivateAnswers($response, array $privateValues): void
+    {
+        $content = $response->getContent();
+
+        foreach ([
+            'is_correct',
+            'correct_option_id',
+            'correct_option_ids',
+            'accepted_answers',
+            'answer_config',
+            'answer_config_snapshot',
+            'correct_option_id_snapshot',
+            'correct_option_ids_snapshot',
+            'options_snapshot',
+            'explanation',
+        ] as $privateField) {
+            $this->assertStringNotContainsString('"'.$privateField.'"', $content);
+        }
+
+        foreach ($privateValues as $privateValue) {
+            $this->assertStringNotContainsString($privateValue, $content);
+        }
     }
 
     public function test_cross_tenant_attempt_is_rejected(): void
@@ -1072,7 +1171,7 @@ class AssessmentEngineTest extends TestCase
         $originalSubmittedAt = $attempt->submitted_at?->toIso8601String();
         $originalGradedAt = $attempt->graded_at?->toIso8601String();
 
-        // Explicitly send a second POST submit request after first successful submission
+        // The legacy route is not retry-safe after completion; explicit IDs are required.
         $retryResponse = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.submit', [
                 'center' => $ctx['center']->slug,
@@ -1082,9 +1181,8 @@ class AssessmentEngineTest extends TestCase
             ]),
             ['answers' => []]
         );
-        $retryResponse->assertOk()
-            ->assertJsonPath('data.id', $attempt->id);
-        $this->assertEquals((float) $originalScore, (float) $retryResponse->json('data.score'));
+        $retryResponse->assertConflict();
+        $this->assertStringContainsString('explicit attempt ID', $retryResponse->json('message'));
 
         // Same endpoint with a changed request body conflicts and does not re-grade.
         $questionId = (int) $attempt->answers()->value('question_id');
@@ -1134,6 +1232,256 @@ class AssessmentEngineTest extends TestCase
             ])
         )->assertUnprocessable()
             ->assertJsonValidationErrors(['attempt']);
+    }
+
+    public function test_delayed_legacy_submission_cannot_submit_a_newer_active_attempt(): void
+    {
+        $context = $this->createAdminContext();
+        $exercise = $this->createPublishedExercise($context, true);
+        $exercise->update(['max_attempts' => 2]);
+
+        $student = $this->createStudentContext(
+            $context['center'],
+            $context['course'],
+            $context['lesson']
+        );
+        $token = $this->tokenFor($student['studentUser']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+            'exercise' => $exercise->id,
+        ];
+        $headers = ['Authorization' => "Bearer {$token}"];
+        $startRoute = route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters);
+        $legacySubmitRoute = route('api.centers.courses.learn.lessons.exercises.attempts.submit', $routeParameters);
+
+        $firstStart = $this->withHeaders($headers)->postJson($startRoute)->assertCreated();
+        $firstAttemptId = (int) $firstStart->json('data.id');
+        $firstQuestion = $firstStart->json('data.questions.0');
+        $correctOptionId = (int) collect($firstQuestion['options'])->firstWhere('option_text', 'Correct')['id'];
+        $originalAnswers = [[
+            'question_id' => (int) $firstQuestion['id'],
+            'selected_option_id' => $correctOptionId,
+        ]];
+
+        $firstLegacySubmission = $this->withHeaders($headers)->postJson(
+            $legacySubmitRoute,
+            ['answers' => $originalAnswers]
+        )->assertOk()
+            ->assertJsonPath('data.attempt_number', 1)
+            ->assertJsonPath('data.score', 1)
+            ->assertJsonPath('data.percentage', 100)
+            ->assertJsonPath('data.passed', true);
+
+        $firstAttempt = ExerciseAttempt::query()
+            ->with('answers')
+            ->findOrFail($firstAttemptId);
+        $firstResult = $firstLegacySubmission->json('data');
+
+        $this->withHeaders($headers)->postJson(
+            $legacySubmitRoute,
+            ['answers' => $originalAnswers]
+        )->assertConflict()
+            ->assertJsonPath('message', 'The legacy submission route cannot identify an attempt after a prior completion. Use the explicit attempt ID route.');
+
+        $secondStart = $this->withHeaders($headers)->postJson($startRoute)->assertCreated();
+        $secondAttemptId = (int) $secondStart->json('data.id');
+        $this->assertSame(2, (int) $secondStart->json('data.attempt_number'));
+
+        // A delayed retry for attempt #1 must leave attempt #2 untouched.
+        $this->withHeaders($headers)->postJson(
+            $legacySubmitRoute,
+            ['answers' => $originalAnswers]
+        )->assertConflict()
+            ->assertJsonPath('message', 'The legacy submission route cannot identify an attempt after a prior completion. Use the explicit attempt ID route.');
+
+        $secondAttempt = ExerciseAttempt::query()
+            ->with('answers')
+            ->findOrFail($secondAttemptId);
+        $this->assertSame(ExerciseAttempt::STATUS_IN_PROGRESS, $secondAttempt->status);
+        $this->assertNull($secondAttempt->score);
+        $this->assertNull($secondAttempt->percentage);
+        $this->assertNull($secondAttempt->passed);
+        $this->assertNull($secondAttempt->submitted_at);
+        $this->assertNull($secondAttempt->graded_at);
+        $this->assertNull($secondAttempt->answers->sole()->is_correct);
+        $this->assertNull($secondAttempt->answers->sole()->points_awarded);
+        $this->assertSame(1, ExerciseAttempt::query()->where('status', ExerciseAttempt::STATUS_GRADED)->count());
+        $this->assertSame(2, ExerciseAttempt::query()->where('exercise_id', $exercise->id)->count());
+
+        $explicitSubmitRoute = route(
+            'api.centers.courses.learn.lessons.exercises.attempts.submit-specific',
+            [...$routeParameters, 'attempt' => $secondAttemptId]
+        );
+        $secondSubmission = $this->withHeaders($headers)->postJson(
+            $explicitSubmitRoute,
+            ['answers' => $originalAnswers]
+        )->assertOk()
+            ->assertJsonPath('data.id', $secondAttemptId)
+            ->assertJsonPath('data.attempt_number', 2)
+            ->assertJsonPath('data.status', ExerciseAttempt::STATUS_GRADED)
+            ->assertJsonPath('data.score', 1)
+            ->assertJsonPath('data.max_score', 1)
+            ->assertJsonPath('data.percentage', 100)
+            ->assertJsonPath('data.passed', true)
+            ->assertJsonPath('data.questions.0.selected_option_id', $correctOptionId)
+            ->assertJsonPath('data.questions.0.is_correct', true);
+
+        $secondResult = $secondSubmission->json('data');
+        $secondAttempt = ExerciseAttempt::query()->with('answers')->findOrFail($secondAttemptId);
+        $submittedAt = $secondAttempt->submitted_at?->toIso8601String();
+        $gradedAt = $secondAttempt->graded_at?->toIso8601String();
+        $answerUpdatedAt = $secondAttempt->answers->sole()->updated_at?->toIso8601String();
+        $this->travel(1)->second();
+
+        $retry = $this->withHeaders($headers)->postJson(
+            $explicitSubmitRoute,
+            ['answers' => $originalAnswers]
+        )->assertOk();
+
+        $this->assertSame($secondResult, $retry->json('data'));
+        $secondAttempt->refresh()->load('answers');
+        $this->assertSame(ExerciseAttempt::STATUS_GRADED, $secondAttempt->status);
+        $this->assertSame($submittedAt, $secondAttempt->submitted_at?->toIso8601String());
+        $this->assertSame($gradedAt, $secondAttempt->graded_at?->toIso8601String());
+        $this->assertSame($answerUpdatedAt, $secondAttempt->answers->sole()->updated_at?->toIso8601String());
+        $this->assertSame(2, ExerciseAttempt::query()->where('exercise_id', $exercise->id)->count());
+        $this->assertSame(2, ExerciseAttempt::query()->where('status', ExerciseAttempt::STATUS_GRADED)->count());
+        $this->assertSame(1.0, (float) $firstAttempt->score);
+        $this->assertSame(1, (int) $firstResult['attempt_number']);
+        $this->assertSame(true, $firstResult['passed']);
+    }
+
+    public function test_fractional_decimal_scores_and_passing_boundaries_are_exact(): void
+    {
+        $context = $this->createAdminContext();
+        $adminToken = $this->tokenFor($context['user']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+        ];
+
+        $created = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'Fractional score assessment',
+                'max_attempts' => 4,
+                'passing_score' => 70,
+                'questions' => [
+                    [
+                        'prompt' => 'Question worth ten hundredths.',
+                        'points' => '0.10',
+                        'options' => [
+                            ['option_text' => 'Correct', 'is_correct' => true],
+                            ['option_text' => 'Incorrect', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'prompt' => 'Question worth twenty hundredths.',
+                        'points' => '0.20',
+                        'options' => [
+                            ['option_text' => 'Correct', 'is_correct' => true],
+                            ['option_text' => 'Incorrect', 'is_correct' => false],
+                        ],
+                    ],
+                ],
+            ]
+        )->assertCreated();
+
+        $exerciseId = (int) $created->json('data.id');
+        $questions = $created->json('data.questions');
+        $questionIds = array_map(static fn (array $question): int => (int) $question['id'], $questions);
+        $optionIds = array_map(static function (array $question): array {
+            return [
+                'correct' => (int) collect($question['options'])->firstWhere('is_correct', true)['id'],
+                'incorrect' => (int) collect($question['options'])->firstWhere('is_correct', false)['id'],
+            ];
+        }, $questions);
+
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertOk();
+
+        $revisionService = app(LessonRevisionService::class);
+        $revision = $revisionService->createDraft($context['lesson'], $context['user']);
+        $revisionService->addExerciseBlock($revision, $exerciseId);
+        $revisionService->publish($context['lesson'], $context['user']);
+
+        $student = $this->createStudentContext(
+            $context['center'],
+            $context['course'],
+            $context['lesson']
+        );
+        $studentToken = $this->tokenFor($student['studentUser']);
+        $studentRouteParameters = [...$routeParameters, 'exercise' => $exerciseId];
+        $headers = ['Authorization' => "Bearer {$studentToken}"];
+        $startRoute = route('api.centers.courses.learn.lessons.exercises.attempts.start', $studentRouteParameters);
+
+        $answerPayload = static function (bool $firstCorrect, bool $secondCorrect) use ($questionIds, $optionIds): array {
+            return [
+                [
+                    'question_id' => $questionIds[0],
+                    'selected_option_id' => $optionIds[0][$firstCorrect ? 'correct' : 'incorrect'],
+                ],
+                [
+                    'question_id' => $questionIds[1],
+                    'selected_option_id' => $optionIds[1][$secondCorrect ? 'correct' : 'incorrect'],
+                ],
+            ];
+        };
+
+        $submitAttempt = function (bool $firstCorrect, bool $secondCorrect) use ($headers, $startRoute, $studentRouteParameters, $answerPayload): array {
+            $started = $this->withHeaders($headers)->postJson($startRoute)->assertCreated();
+            $attemptId = (int) $started->json('data.id');
+            $submitRoute = route(
+                'api.centers.courses.learn.lessons.exercises.attempts.submit-specific',
+                [...$studentRouteParameters, 'attempt' => $attemptId]
+            );
+            $submitted = $this->withHeaders($headers)->postJson(
+                $submitRoute,
+                ['answers' => $answerPayload($firstCorrect, $secondCorrect)]
+            )->assertOk();
+
+            return [
+                'attempt' => ExerciseAttempt::query()->with('answers')->findOrFail($attemptId),
+                'response' => $submitted,
+            ];
+        };
+
+        [$fullAttempt, $fullResponse] = array_values($submitAttempt(true, true));
+        $fullResponse->assertJsonPath('data.score', 0.3)
+            ->assertJsonPath('data.max_score', 0.3)
+            ->assertJsonPath('data.percentage', 100)
+            ->assertJsonPath('data.passed', true);
+        $this->assertSame('0.30', $fullAttempt->score);
+        $this->assertSame('0.30', $fullAttempt->max_score);
+        $this->assertSame('0.10', $fullAttempt->answers->firstWhere('question_id', $questionIds[0])->points_awarded);
+        $this->assertSame('0.20', $fullAttempt->answers->firstWhere('question_id', $questionIds[1])->points_awarded);
+
+        Exercise::query()->whereKey($exerciseId)->update(['passing_score' => '66.67']);
+        [$atThresholdAttempt, $atThresholdResponse] = array_values($submitAttempt(false, true));
+        $atThresholdResponse->assertJsonPath('data.score', 0.2)
+            ->assertJsonPath('data.max_score', 0.3)
+            ->assertJsonPath('data.percentage', 66.67)
+            ->assertJsonPath('data.passed', true);
+        $this->assertSame('0.20', $atThresholdAttempt->score);
+        $this->assertSame('66.67', $atThresholdAttempt->percentage);
+
+        Exercise::query()->whereKey($exerciseId)->update(['passing_score' => '66.68']);
+        [$belowThresholdAttempt, $belowThresholdResponse] = array_values($submitAttempt(false, true));
+        $belowThresholdResponse->assertJsonPath('data.score', 0.2)
+            ->assertJsonPath('data.percentage', 66.67)
+            ->assertJsonPath('data.passed', false);
+        $this->assertSame('66.68', $belowThresholdAttempt->passing_score_snapshot);
+
+        [$zeroAttempt, $zeroResponse] = array_values($submitAttempt(false, false));
+        $zeroResponse->assertJsonPath('data.score', 0)
+            ->assertJsonPath('data.max_score', 0.3)
+            ->assertJsonPath('data.percentage', 0)
+            ->assertJsonPath('data.passed', false);
+        $this->assertSame('0.00', $zeroAttempt->score);
     }
 
     public function test_question_and_option_id_integrity_validation(): void
@@ -1494,12 +1842,13 @@ class AssessmentEngineTest extends TestCase
             'exercise' => $exercise->id,
         ];
 
-        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+        $firstStart = $this->withHeader('Authorization', "Bearer {$token}")->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
         )->assertCreated();
+        $firstAttemptRouteParameters = [...$routeParameters, 'attempt' => (int) $firstStart->json('data.id')];
 
         $this->withHeader('Authorization', "Bearer {$token}")->postJson(
-            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $routeParameters),
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', $firstAttemptRouteParameters),
             ['answers' => []]
         )->assertOk()
             ->assertJsonPath('data.show_correct_answers', false)
@@ -1511,12 +1860,13 @@ class AssessmentEngineTest extends TestCase
             'show_correct_answers_after_submission' => true,
         ]);
 
-        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+        $secondStart = $this->withHeader('Authorization', "Bearer {$token}")->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.start', $routeParameters)
         )->assertCreated();
+        $secondAttemptRouteParameters = [...$routeParameters, 'attempt' => (int) $secondStart->json('data.id')];
 
         $this->withHeader('Authorization', "Bearer {$token}")->postJson(
-            route('api.centers.courses.learn.lessons.exercises.attempts.submit', $routeParameters),
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', $secondAttemptRouteParameters),
             ['answers' => []]
         )->assertOk()
             ->assertJsonPath('data.show_correct_answers', true)
@@ -1907,14 +2257,20 @@ class AssessmentEngineTest extends TestCase
             ->assertJsonPath('data.questions.2.correct_option_ids', [$multiOptionIds[0], $multiOptionIds[1]])
             ->assertJsonPath('data.questions.3.accepted_answers', ['am', "'m"]);
 
-        $originalSubmittedAt = ExerciseAttempt::query()->findOrFail($attemptId)->submitted_at?->toIso8601String();
+        $completedAttempt = ExerciseAttempt::query()->with('answers')->findOrFail($attemptId);
+        $originalSubmittedAt = $completedAttempt->submitted_at?->toIso8601String();
+        $originalGradedAt = $completedAttempt->graded_at?->toIso8601String();
+        $originalAnswerUpdatedAt = $completedAttempt->answers->firstWhere('question_id', $multiQuestionId)->updated_at?->toIso8601String();
+        $storedResult = $submitted->json('data');
+        $this->travel(1)->second();
 
-        $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+        $reorderedAnswerPayload = $answerPayload;
+        $reorderedAnswerPayload[2]['selected_option_ids'] = array_reverse($reorderedAnswerPayload[2]['selected_option_ids']);
+        $retry = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
             $submitRoute,
-            ['answers' => $answerPayload]
-        )->assertOk()
-            ->assertJsonPath('data.id', $attemptId)
-            ->assertJsonPath('data.score', 4);
+            ['answers' => $reorderedAnswerPayload]
+        )->assertOk();
+        $this->assertSame($storedResult, $retry->json('data'));
 
         $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
             $submitRoute,
@@ -1926,7 +2282,15 @@ class AssessmentEngineTest extends TestCase
 
         $attempt = ExerciseAttempt::query()->with('answers')->findOrFail($attemptId);
         $this->assertSame($originalSubmittedAt, $attempt->submitted_at?->toIso8601String());
+        $this->assertSame($originalGradedAt, $attempt->graded_at?->toIso8601String());
         $this->assertSame(4.0, (float) $attempt->score);
+        $this->assertSame(4.0, (float) $attempt->max_score);
+        $this->assertTrue((bool) $attempt->passed);
+        $this->assertCount(4, $attempt->answers);
+        $this->assertSame(
+            $originalAnswerUpdatedAt,
+            $attempt->answers->firstWhere('question_id', $multiQuestionId)->updated_at?->toIso8601String()
+        );
         $this->assertSame(1.0, (float) $attempt->answers->firstWhere('question_id', $shortQuestion->id)->points_possible);
         $this->assertSame('Complete: I ___ ready.', $attempt->answers->firstWhere('question_id', $shortQuestion->id)->prompt_snapshot);
     }

@@ -339,7 +339,10 @@ class ExerciseAttemptService
                 ]);
             }
 
-            $maxScore = $questions->sum(fn ($q) => (float) $q->points);
+            $maxScoreMinorUnits = 0;
+            foreach ($questions as $question) {
+                $maxScoreMinorUnits += $this->decimalToMinorUnits($question->points);
+            }
 
             foreach ($questions as $question) {
                 $configurationErrors = $question->optionConfigurationErrors();
@@ -371,7 +374,7 @@ class ExerciseAttemptService
                 'passing_score_snapshot' => $lockedExercise->passing_score,
                 'show_correct_answers_after_submission_snapshot' => (bool) $lockedExercise->show_correct_answers_after_submission,
                 'score' => null,
-                'max_score' => $maxScore,
+                'max_score' => $this->minorUnitsToDecimalString($maxScoreMinorUnits),
                 'percentage' => null,
                 'passed' => null,
                 'started_at' => now(),
@@ -519,37 +522,43 @@ class ExerciseAttemptService
 
             $answersList = $lockedAttempt->answers()->get();
 
-            $totalPointsPossible = 0.0;
-            $totalPointsAwarded = 0.0;
+            $totalPointsPossibleMinorUnits = 0;
+            $totalPointsAwardedMinorUnits = 0;
 
             foreach ($answersList as $answer) {
-                $pointsPossible = (float) $answer->points_possible;
-                $totalPointsPossible += $pointsPossible;
+                $pointsPossibleMinorUnits = $this->decimalToMinorUnits($answer->points_possible);
+                $totalPointsPossibleMinorUnits += $pointsPossibleMinorUnits;
 
                 $isCorrect = $this->answerGrader->isCorrect($answer);
 
-                $pointsAwarded = $isCorrect ? $pointsPossible : 0.0;
-                $totalPointsAwarded += $pointsAwarded;
+                $pointsAwardedMinorUnits = $isCorrect ? $pointsPossibleMinorUnits : 0;
+                $totalPointsAwardedMinorUnits += $pointsAwardedMinorUnits;
 
                 $answer->update([
                     'is_correct' => $isCorrect,
-                    'points_awarded' => $pointsAwarded,
+                    'points_awarded' => $this->minorUnitsToDecimalString($pointsAwardedMinorUnits),
                 ]);
             }
 
-            $percentage = $totalPointsPossible > 0
-                ? round(($totalPointsAwarded / $totalPointsPossible) * 100, 2)
-                : 0.0;
+            $percentageMinorUnits = $totalPointsPossibleMinorUnits > 0
+                ? intdiv(
+                    ($totalPointsAwardedMinorUnits * 10000)
+                        + intdiv($totalPointsPossibleMinorUnits, 2),
+                    $totalPointsPossibleMinorUnits
+                )
+                : 0;
 
-            $passed = $percentage >= (float) $lockedAttempt->passing_score_snapshot;
+            $passed = $percentageMinorUnits >= $this->decimalToMinorUnits(
+                $lockedAttempt->passing_score_snapshot
+            );
 
             $now = now();
 
             $lockedAttempt->update([
                 'status' => ExerciseAttempt::STATUS_GRADED,
-                'score' => $totalPointsAwarded,
-                'max_score' => $totalPointsPossible,
-                'percentage' => $percentage,
+                'score' => $this->minorUnitsToDecimalString($totalPointsAwardedMinorUnits),
+                'max_score' => $this->minorUnitsToDecimalString($totalPointsPossibleMinorUnits),
+                'percentage' => $this->minorUnitsToDecimalString($percentageMinorUnits),
                 'passed' => $passed,
                 'submitted_at' => $now,
                 'graded_at' => $now,
@@ -739,5 +748,35 @@ class ExerciseAttemptService
             'answers_provided' => $answersWereProvided,
             'answers' => $normalizedAnswers,
         ], JSON_THROW_ON_ERROR));
+    }
+
+    /** Convert a DECIMAL(..., 2) value to integer hundredths without float arithmetic. */
+    private function decimalToMinorUnits(string|int|float $value): int
+    {
+        if (is_float($value)) {
+            $value = number_format($value, 2, '.', '');
+        }
+
+        $decimal = trim((string) $value);
+        if (! preg_match('/\A([+-]?)(\d+)(?:\.(\d{1,2}))?\z/', $decimal, $matches)) {
+            throw new \UnexpectedValueException('Assessment scores must use a decimal value with at most two fraction digits.');
+        }
+
+        $whole = (int) $matches[2];
+        $fraction = (int) str_pad($matches[3] ?? '', 2, '0');
+        $minorUnits = ($whole * 100) + $fraction;
+
+        return ($matches[1] ?? '') === '-' ? -$minorUnits : $minorUnits;
+    }
+
+    private function minorUnitsToDecimalString(int $minorUnits): string
+    {
+        $sign = $minorUnits < 0 ? '-' : '';
+        $absolute = abs($minorUnits);
+
+        return $sign
+            .intdiv($absolute, 100)
+            .'.'
+            .str_pad((string) ($absolute % 100), 2, '0', STR_PAD_LEFT);
     }
 }

@@ -9,10 +9,8 @@ use Normalizer;
 /**
  * Central exact-match grading and text normalization for exercise answers.
  *
- * NFC normalization is used when PHP's optional intl extension is available.
- * Without intl, Unicode code-point sequences are preserved; whitespace and
- * case normalization still use PCRE UTF-8 and mbstring. Diacritic-insensitive
- * matching requires intl and is rejected when it is unavailable.
+ * NFC normalization uses the mandatory PHP intl extension so results match
+ * JavaScript's Unicode normalization in authoring previews.
  */
 class ExerciseAnswerGrader
 {
@@ -269,7 +267,9 @@ class ExerciseAnswerGrader
     private function normalizeNfc(string $value): string
     {
         if (! class_exists(Normalizer::class)) {
-            return $value;
+            throw new \RuntimeException(
+                'PHP intl is required for assessment Unicode normalization. Install or enable ext-intl.'
+            );
         }
 
         $normalized = Normalizer::normalize($value, Normalizer::FORM_C);

@@ -144,6 +144,23 @@ class ExerciseAttemptController extends Controller
 
         $validated = $this->validateAnswerRequest($request, false);
 
+        $completedAttemptExists = ExerciseAttempt::query()
+            ->where('center_id', $center->id)
+            ->where('student_profile_id', $studentProfile->id)
+            ->where('exercise_id', $exercise->id)
+            ->whereIn('status', [
+                ExerciseAttempt::STATUS_SUBMITTED,
+                ExerciseAttempt::STATUS_GRADED,
+            ])
+            ->exists();
+
+        if ($completedAttemptExists) {
+            abort(
+                409,
+                'The legacy submission route cannot identify an attempt after a prior completion. Use the explicit attempt ID route.'
+            );
+        }
+
         $activeAttempt = ExerciseAttempt::query()
             ->where('center_id', $center->id)
             ->where('student_profile_id', $studentProfile->id)
@@ -153,17 +170,10 @@ class ExerciseAttemptController extends Controller
             ->first();
 
         if ($activeAttempt === null) {
-            $activeAttempt = ExerciseAttempt::query()
-                ->where('center_id', $center->id)
-                ->where('student_profile_id', $studentProfile->id)
-                ->where('exercise_id', $exercise->id)
-                ->whereIn('status', [
-                    ExerciseAttempt::STATUS_SUBMITTED,
-                    ExerciseAttempt::STATUS_GRADED,
-                ])
-                ->with('answers')
-                ->orderByDesc('attempt_number')
-                ->firstOrFail();
+            abort(
+                409,
+                'No active attempt exists. Use the explicit attempt ID route to retry a completed attempt.'
+            );
         }
 
         $graded = $this->attemptService->submitAttempt(

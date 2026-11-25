@@ -17,7 +17,7 @@ The API accepts these question values:
 
 The default settings are case-insensitive, trim outer whitespace, collapse repeated internal whitespace, preserve punctuation, and preserve diacritics. Matching is exact after those configured transformations; there is no fuzzy or AI grading. Accepted answers that become duplicates after normalization are rejected.
 
-NFC normalization and diacritic-insensitive matching use PHP's optional `intl` extension. When `intl` is absent, NFC is not applied and the original Unicode code-point sequence is preserved. A request for diacritic-insensitive matching is rejected without `intl`, rather than silently applying a different rule. Case folding uses `mbstring`.
+NFC normalization requires PHP's `intl` extension, declared as a Composer platform requirement. Composer installation fails clearly when it is missing; the grader also raises an explicit runtime error if deployment bypasses Composer checks. The frontend and backend run the same committed Unicode normalization fixtures. Case folding uses JavaScript Unicode lowercase and PHP `mbstring` lowercase.
 
 ## Student answer payloads
 
@@ -31,7 +31,7 @@ Each item in `answers` contains a `question_id` and exactly the response field f
 
 The server checks ownership against the attempt snapshots and performs all scoring. Client-supplied correctness, score, snapshot, ownership, and other unknown fields are rejected. Attempt responses never contain accepted answers or grading configuration before the configured review release.
 
-New clients submit to `POST /api/centers/{center}/courses/{course}/learn/lessons/{lesson}/exercises/{exercise}/attempts/{attempt}/submit`. The legacy `/attempts/current/submit` route remains available. A retry with the same canonical request returns the persisted result; a different request for a completed attempt returns HTTP 409. A completed attempt's score, answer rows, and timestamps remain unchanged.
+New clients must submit to `POST /api/centers/{center}/courses/{course}/learn/lessons/{lesson}/exercises/{exercise}/attempts/{attempt}/submit`; this is the only retry-safe contract. The deprecated `/attempts/current/submit` route can submit the first active attempt, but returns HTTP 409 when no attempt is active or once any earlier attempt is complete. This prevents a delayed request from being applied to a newer attempt. A retry against the explicit route with the same canonical request returns the persisted result; a different request returns HTTP 409. A completed attempt's score, answer rows, and timestamps remain unchanged.
 
 ## Persistence and compatibility
 

@@ -74,4 +74,25 @@ class ExerciseAnswerGraderTest extends TestCase
 
         $this->assertArrayHasKey('answer_config.accepted_answers.1', $errors);
     }
+
+    public function test_php_normalization_matches_shared_cross_runtime_fixtures(): void
+    {
+        $this->assertTrue(class_exists(\Normalizer::class), 'PHP intl is mandatory for assessment normalization.');
+
+        $fixturePath = dirname(__DIR__).'/fixtures/exercise-normalization.json';
+        $fixtures = json_decode(
+            file_get_contents($fixturePath),
+            true,
+            flags: JSON_THROW_ON_ERROR
+        );
+        $grader = new ExerciseAnswerGrader;
+
+        foreach ($fixtures as $fixture) {
+            $actual = ($fixture['type'] ?? 'answer') === 'option'
+                ? $grader->normalizeOptionLabel($fixture['input'])
+                : $grader->normalizeText($fixture['input'], $fixture['settings'] ?? []);
+
+            $this->assertSame($fixture['expected'], $actual, $fixture['name']);
+        }
+    }
 }

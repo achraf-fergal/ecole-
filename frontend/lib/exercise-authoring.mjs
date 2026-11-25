@@ -64,7 +64,7 @@ export function createQuestionDraft(type = "single_choice") {
  */
 export function normalizeShortAnswer(value, settings = {}) {
   const rules = { ...DEFAULT_SHORT_ANSWER_NORMALIZATION, ...settings };
-  let normalized = typeof value.normalize === "function" ? value.normalize("NFC") : value;
+  let normalized = value.normalize("NFC");
 
   if (rules.trim_whitespace) normalized = normalized.trim();
   if (rules.collapse_internal_whitespace) normalized = normalized.replace(/[\p{Z}\s]+/gu, " ");

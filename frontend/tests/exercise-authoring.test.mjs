@@ -1,13 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   createQuestionDraft,
   findDuplicateAcceptedAnswerIndexes,
   findDuplicateOptionIndexes,
   isQuestionAnswered,
+  normalizeOptionLabel,
   normalizeShortAnswer,
   toAttemptAnswerPayload,
 } from "../lib/exercise-authoring.mjs";
+
+const normalizationFixtures = JSON.parse(
+  fs.readFileSync(new URL("../../backend/tests/fixtures/exercise-normalization.json", import.meta.url), "utf8")
+);
 
 test("creates an editor shape for each supported question type", () => {
   assert.equal(createQuestionDraft("single_choice").options.length, 2);
@@ -34,6 +40,15 @@ test("short-answer matching applies configured case, whitespace, punctuation, an
   assert.notEqual(normalizeShortAnswer("cafe", defaults), normalizeShortAnswer("café", defaults));
   assert.equal(normalizeShortAnswer("cafe", { ...defaults, diacritic_sensitive: false }), normalizeShortAnswer("café", { ...defaults, diacritic_sensitive: false }));
   assert.deepEqual(findDuplicateAcceptedAnswerIndexes(["I am", "i   am"], defaults), [1]);
+});
+
+test("JavaScript normalization matches shared cross-runtime Unicode fixtures", () => {
+  for (const fixture of normalizationFixtures) {
+    const actual = fixture.type === "option"
+      ? normalizeOptionLabel(fixture.input)
+      : normalizeShortAnswer(fixture.input, fixture.settings);
+    assert.equal(actual, fixture.expected, fixture.name);
+  }
 });
 
 test("attempt answer helpers use the type-specific API field and answered state", () => {

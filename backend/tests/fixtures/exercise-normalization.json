@@ -1,0 +1,89 @@
+[
+  {
+    "name": "composed French NFC",
+    "type": "answer",
+    "input": "caf\u00e9",
+    "expected": "caf\u00e9"
+  },
+  {
+    "name": "decomposed French NFD becomes NFC",
+    "type": "answer",
+    "input": "cafe\u0301",
+    "expected": "caf\u00e9"
+  },
+  {
+    "name": "case folds while French accents remain",
+    "type": "answer",
+    "input": "CAF\u00c9",
+    "expected": "caf\u00e9"
+  },
+  {
+    "name": "leading trailing and repeated whitespace normalize",
+    "type": "answer",
+    "input": "\u00a0Tr\u00e8s\t\tbien \u2003",
+    "expected": "tr\u00e8s bien"
+  },
+  {
+    "name": "punctuation remains significant by default",
+    "type": "answer",
+    "input": "L\u2019accord !",
+    "expected": "l\u2019accord !"
+  },
+  {
+    "name": "punctuation can be ignored when configured",
+    "type": "answer",
+    "input": "L\u2019accord!",
+    "settings": { "punctuation_sensitive": false },
+    "expected": "laccord"
+  },
+  {
+    "name": "Arabic diacritics remain by default",
+    "type": "answer",
+    "input": "\u0645\u064f\u062f\u064e\u0631\u0650\u0651\u0633",
+    "expected": "\u0645\u064f\u062f\u064e\u0631\u0650\u0651\u0633"
+  },
+  {
+    "name": "Arabic diacritics are removed only when configured",
+    "type": "answer",
+    "input": "\u0645\u064f\u062f\u064e\u0631\u0650\u0651\u0633",
+    "settings": { "diacritic_sensitive": false },
+    "expected": "\u0645\u062f\u0631\u0633"
+  },
+  {
+    "name": "case can remain sensitive when configured",
+    "type": "answer",
+    "input": "CAF\u00c9",
+    "settings": { "case_sensitive": true },
+    "expected": "CAF\u00c9"
+  },
+  {
+    "name": "Greek final sigma follows Unicode lowercase rules",
+    "type": "answer",
+    "input": "\u039f\u03a3",
+    "expected": "\u03bf\u03c2"
+  },
+  {
+    "name": "dotted capital I follows Unicode lowercase rules",
+    "type": "answer",
+    "input": "\u0130",
+    "expected": "i\u0307"
+  },
+  {
+    "name": "empty answer remains empty",
+    "type": "answer",
+    "input": "\u00a0 \t",
+    "expected": ""
+  },
+  {
+    "name": "zero width joiner is preserved",
+    "type": "answer",
+    "input": "\u0643\u200d\u062a\u0628",
+    "expected": "\u0643\u200d\u062a\u0628"
+  },
+  {
+    "name": "option labels normalize NFC and whitespace without changing case",
+    "type": "option",
+    "input": "\u00a0Cafe\u0301\tNew York\u00a0",
+    "expected": "Caf\u00e9 New York"
+  }
+]
