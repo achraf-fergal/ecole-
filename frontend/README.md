@@ -16,6 +16,18 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Laravel API proxy
+
+Browser requests use the same-origin `/api/...` path. Next.js rewrites those requests to `LARAVEL_API_URL` on the server, keeping the Laravel origin out of browser bundles.
+
+For local development, set this in `frontend/.env.local`:
+
+```env
+LARAVEL_API_URL=http://127.0.0.1:8000
+```
+
+For production, configure `LARAVEL_API_URL` as an HTTPS origin, for example `https://your-private-laravel-api-host`, in the environment used both to build and run Next.js. The destination must be reachable from the Next.js server. Do not set a `NEXT_PUBLIC_` API origin for browser requests. Production builds fail when the target is missing or invalid; HTTP is allowed only for localhost during development.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

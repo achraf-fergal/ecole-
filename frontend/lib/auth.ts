@@ -65,7 +65,10 @@ function getApiBaseUrl(): string {
     return "";
   }
 
-  return process.env.LARAVEL_API_URL || "http://localhost:8000";
+  const configuredUrl = process.env.LARAVEL_API_URL?.trim();
+  if (configuredUrl) return configuredUrl.replace(/\/+$/, "");
+  if (process.env.NODE_ENV === "development") return "http://127.0.0.1:8000";
+  throw new Error("LARAVEL_API_URL must be configured for server-side API requests.");
 }
 
 export function getGoogleAuthUrl(): string {

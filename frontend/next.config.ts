@@ -8,9 +8,43 @@ const remotePatterns: {
   pathname: string;
 }[] = [];
 
-const laravelApiUrl = (
-  process.env.LARAVEL_API_URL || "http://localhost:8000"
-).replace(/\/+$/, "");
+function getLaravelApiOrigin(): string {
+  const isDevelopment = process.env.NODE_ENV === "development";
+  const configuredUrl = process.env.LARAVEL_API_URL?.trim();
+  if (!configuredUrl && !isDevelopment) {
+    throw new Error("LARAVEL_API_URL must be configured when building or running Next.js outside development.");
+  }
+
+  const rawUrl = configuredUrl || "http://127.0.0.1:8000";
+  let apiUrl: URL;
+  try {
+    apiUrl = new URL(rawUrl);
+  } catch {
+    throw new Error("LARAVEL_API_URL must be a valid absolute HTTP(S) URL.");
+  }
+
+  if (
+    (apiUrl.protocol !== "https:" && apiUrl.protocol !== "http:") ||
+    apiUrl.username ||
+    apiUrl.password ||
+    apiUrl.pathname !== "/" ||
+    apiUrl.search ||
+    apiUrl.hash
+  ) {
+    throw new Error("LARAVEL_API_URL must contain only an HTTP(S) origin without credentials, path, query, or fragment.");
+  }
+
+  if (apiUrl.protocol === "http:") {
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+    if (!isDevelopment || !localHosts.has(apiUrl.hostname.toLowerCase())) {
+      throw new Error("LARAVEL_API_URL may use HTTP only for a local development host.");
+    }
+  }
+
+  return apiUrl.origin.replace(/\/+$/, "");
+}
+
+const laravelApiOrigin = getLaravelApiOrigin();
 
 // Optional: allow images from the configured Laravel media host.
 if (process.env.MEDIA_BASE_URL) {
@@ -41,7 +75,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: `${laravelApiUrl}/api/:path*`,
+        destination: `${laravelApiOrigin}/api/:path*`,
       },
     ];
   },

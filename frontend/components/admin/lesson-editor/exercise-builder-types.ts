@@ -4,6 +4,7 @@ import type {
   BlankDefinitionPayload,
   CreateExerciseOptionPayload,
   CreateQuestionPayload,
+  ExerciseAnswerConfigPayload,
   ShortAnswerConfigPayload,
   ShortAnswerNormalizationPayload,
 } from "@/lib/admin-learning";
@@ -14,6 +15,16 @@ export type DraftOption = CreateExerciseOptionPayload & {
   clientId: string;
 };
 
+export interface DraftQuestionTypeConfiguration {
+  prompt: string;
+  options: DraftOption[];
+  answer_config: ExerciseAnswerConfigPayload | null;
+  points: number;
+  acceptedAnswerClientIds?: string[];
+  blankClientIds?: string[];
+  blankAnswerClientIds?: Record<number, string[]>;
+}
+
 export type DraftQuestion = Omit<CreateQuestionPayload, "id" | "options"> & {
   id?: number;
   clientId: string;
@@ -21,6 +32,7 @@ export type DraftQuestion = Omit<CreateQuestionPayload, "id" | "options"> & {
   acceptedAnswerClientIds?: string[];
   blankClientIds?: string[];
   blankAnswerClientIds?: Record<number, string[]>;
+  typeConfigurations?: Partial<Record<QuestionType, DraftQuestionTypeConfiguration>>;
 };
 
 export type ExerciseDraft = Omit<AdminFullExercise, "questions"> & {
@@ -69,6 +81,86 @@ export const NORMALIZATION_RULE_DESCRIPTIONS: {
 
 export function defaultNormalization(): ShortAnswerNormalizationPayload {
   return { ...DEFAULT_SHORT_ANSWER_NORMALIZATION };
+}
+
+export function cloneAnswerConfig(
+  config: ExerciseAnswerConfigPayload | null | undefined
+): ExerciseAnswerConfigPayload | null {
+  if (!config) return null;
+
+  if ("blanks" in config) {
+    return {
+      blanks: config.blanks.map((blank) => ({
+        ...blank,
+        accepted_answers: [...blank.accepted_answers],
+        normalization: blank.normalization ? { ...blank.normalization } : undefined,
+      })),
+    };
+  }
+
+  return {
+    accepted_answers: [...config.accepted_answers],
+    normalization: { ...config.normalization },
+  };
+}
+
+export function cloneQuestionTypeConfiguration(
+  config: DraftQuestionTypeConfiguration,
+  preserveDatabaseIds = true
+): DraftQuestionTypeConfiguration {
+  return {
+    prompt: config.prompt,
+    options: config.options.map((option, index) => ({
+      ...(preserveDatabaseIds && option.id ? { id: option.id } : {}),
+      option_text: option.option_text,
+      is_correct: option.is_correct,
+      sort_order: option.sort_order ?? index,
+      clientId: preserveDatabaseIds ? option.clientId : createClientId("opt"),
+    })),
+    answer_config: cloneAnswerConfig(config.answer_config),
+    points: config.points,
+    acceptedAnswerClientIds: config.acceptedAnswerClientIds
+      ? preserveDatabaseIds
+        ? [...config.acceptedAnswerClientIds]
+        : config.acceptedAnswerClientIds.map(() => createClientId("ans"))
+      : undefined,
+    blankClientIds: config.blankClientIds
+      ? preserveDatabaseIds
+        ? [...config.blankClientIds]
+        : config.blankClientIds.map(() => createClientId("blk"))
+      : undefined,
+    blankAnswerClientIds: config.blankAnswerClientIds
+      ? Object.fromEntries(
+          Object.entries(config.blankAnswerClientIds).map(([index, ids]) => [
+            index,
+            preserveDatabaseIds ? [...ids] : ids.map(() => createClientId("ans")),
+          ])
+        )
+      : undefined,
+  };
+}
+
+export function captureQuestionTypeConfiguration(
+  question: DraftQuestion
+): DraftQuestionTypeConfiguration {
+  return {
+    prompt: question.prompt,
+    options: question.options.map((option, index) => ({
+      ...option,
+      sort_order: option.sort_order ?? index,
+    })),
+    answer_config: cloneAnswerConfig(question.answer_config),
+    points: question.points ?? 1,
+    acceptedAnswerClientIds: question.acceptedAnswerClientIds
+      ? [...question.acceptedAnswerClientIds]
+      : undefined,
+    blankClientIds: question.blankClientIds ? [...question.blankClientIds] : undefined,
+    blankAnswerClientIds: question.blankAnswerClientIds
+      ? Object.fromEntries(
+          Object.entries(question.blankAnswerClientIds).map(([index, ids]) => [index, [...ids]])
+        )
+      : undefined,
+  };
 }
 
 export function ensureBlankClientIds(question: DraftQuestion): {
@@ -131,30 +223,42 @@ export function toDraftQuestion(
     clientId: existing?.clientId ?? createClientId("q"),
     prompt: question.prompt,
     question_type: question.question_type,
-    answer_config: question.answer_config,
+    answer_config: cloneAnswerConfig(question.answer_config),
     explanation: question.explanation,
     points,
     sort_order: question.sort_order,
-    options: question.options.map((option, idx) => ({
+    options: question.options.map((option) => ({
       ...option,
       clientId:
         existing?.options.find((o) => o.id && o.id === option.id)?.clientId ??
-        existing?.options[idx]?.clientId ??
+        existing?.options.find(
+          (o) => !o.id && o.sort_order === option.sort_order
+        )?.clientId ??
         createClientId("opt"),
     })),
     acceptedAnswerClientIds,
     blankClientIds,
     blankAnswerClientIds,
+    typeConfigurations: existing?.typeConfigurations
+      ? Object.fromEntries(
+          Object.entries(existing.typeConfigurations).map(([type, config]) => [
+            type,
+            config ? cloneQuestionTypeConfiguration(config) : config,
+          ])
+        ) as DraftQuestion["typeConfigurations"]
+      : undefined,
   };
 }
 
 export function toDraftExercise(exercise: AdminFullExercise, existingDraft?: ExerciseDraft | null): ExerciseDraft {
   return {
     ...exercise,
-    questions: exercise.questions.map((question, idx) => {
+    questions: exercise.questions.map((question) => {
       const existingQuestion =
         existingDraft?.questions.find((q) => q.id && q.id === question.id) ??
-        existingDraft?.questions[idx];
+        existingDraft?.questions.find(
+          (q) => !q.id && q.sort_order === question.sort_order
+        );
       return toDraftQuestion(question, existingQuestion);
     }),
   };
@@ -171,9 +275,10 @@ export function createClientQuestionDraft(
   return {
     ...base,
     clientId: createClientId("q"),
-    options: (base.options ?? []).map((opt) => ({
+    options: (base.options ?? []).map((opt, sort_order) => ({
       ...opt,
       clientId: createClientId("opt"),
+      sort_order,
     })),
     acceptedAnswerClientIds: shortConfig
       ? (shortConfig.accepted_answers ?? []).map(() => createClientId("ans"))

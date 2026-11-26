@@ -10,6 +10,7 @@ import type {
 import {
   convertPromptSelectionToBlank,
   createClientId,
+  extractPromptPlaceholders,
   normalizeShortAnswer,
   removeBlankFromPrompt,
   sumBlankPoints,
@@ -28,6 +29,10 @@ interface BaseEditorProps {
   questionIndex: number;
   readError: (path: string) => string | undefined;
   onUpdateQuestion: (patch: Partial<DraftQuestion>) => void;
+}
+
+function getErrorId(path: string): string {
+  return `field-error-${path.replaceAll(".", "-")}`;
 }
 
 function moveOption(
@@ -62,6 +67,18 @@ function updateOption(
   });
 }
 
+function removeOption(
+  question: DraftQuestion,
+  optionIndex: number,
+  onUpdateQuestion: (patch: Partial<DraftQuestion>) => void
+) {
+  onUpdateQuestion({
+    options: question.options
+      .filter((_, index) => index !== optionIndex)
+      .map((option, sort_order) => ({ ...option, sort_order })),
+  });
+}
+
 export function SingleChoiceEditor({
   question,
   questionIndex,
@@ -74,7 +91,15 @@ export function SingleChoiceEditor({
       <div className="flex items-center justify-between">
         <p className="text-xs font-bold text-slate-700">Answer options (select exactly one correct answer)</p>
       </div>
-      <div className="space-y-2">
+      <div
+        className="space-y-2"
+        role="radiogroup"
+        aria-label={`Question ${questionIndex + 1} answer options`}
+        aria-invalid={Boolean(readError(`${prefix}.options`))}
+        aria-describedby={readError(`${prefix}.options`) ? getErrorId(`${prefix}.options`) : undefined}
+        data-field-path={`${prefix}.options`}
+        tabIndex={readError(`${prefix}.options`) ? -1 : undefined}
+      >
         {question.options.map((option, optionIndex) => {
           const textErr = readError(`${prefix}.options.${optionIndex}.option_text`);
           return (
@@ -95,6 +120,8 @@ export function SingleChoiceEditor({
                   placeholder={`Option ${optionIndex + 1}`}
                   aria-label={`Question ${questionIndex + 1} option ${optionIndex + 1}`}
                   aria-invalid={Boolean(textErr)}
+                  aria-describedby={textErr ? getErrorId(`${prefix}.options.${optionIndex}.option_text`) : undefined}
+                  data-field-path={`${prefix}.options.${optionIndex}.option_text`}
                   onChange={(event) =>
                     updateOption(question, optionIndex, { option_text: event.target.value }, onUpdateQuestion)
                   }
@@ -121,18 +148,14 @@ export function SingleChoiceEditor({
                 <button
                   type="button"
                   aria-label={`Remove option ${optionIndex + 1}`}
-                  onClick={() =>
-                    onUpdateQuestion({
-                      options: question.options.filter((_, idx) => idx !== optionIndex),
-                    })
-                  }
+                  onClick={() => removeOption(question, optionIndex, onUpdateQuestion)}
                   className="rounded border px-2 py-1 text-xs"
                 >
                   ×
                 </button>
               </div>
               {textErr && (
-                <p role="alert" className="text-xs text-rose-700 pl-6">
+                <p id={getErrorId(`${prefix}.options.${optionIndex}.option_text`)} role="alert" className="text-xs text-rose-700 pl-6">
                   Option {optionIndex + 1}: {textErr}
                 </p>
               )}
@@ -146,16 +169,17 @@ export function SingleChoiceEditor({
           onUpdateQuestion({
             options: [
               ...question.options,
-              { clientId: createClientId("opt"), option_text: "", is_correct: false },
+              { clientId: createClientId("opt"), option_text: "", is_correct: false, sort_order: question.options.length },
             ],
           })
         }
+        disabled={question.options.length >= 100}
         className="mt-1 text-xs font-bold text-teal-800"
       >
         + Add option
       </button>
       {readError(`${prefix}.options`) && (
-        <p role="alert" className="text-xs text-rose-700">
+        <p id={getErrorId(`${prefix}.options`)} role="alert" className="text-xs text-rose-700">
           {readError(`${prefix}.options`)}
         </p>
       )}
@@ -170,11 +194,65 @@ export function TrueFalseEditor({
   onUpdateQuestion,
 }: BaseEditorProps) {
   const prefix = `questions.${questionIndex}`;
+  const trueOption =
+    question.options.find((option) => option.option_text.trim().toLowerCase() === "true") ??
+    question.options[0];
+  const falseOption =
+    question.options.find(
+      (option) => option.clientId !== trueOption?.clientId && option.option_text.trim().toLowerCase() === "false"
+    ) ?? question.options.find((option) => option.clientId !== trueOption?.clientId);
+  const options = [trueOption, falseOption].filter((option): option is DraftOption => Boolean(option));
+  const isStandardConfiguration =
+    question.options.length === 2 &&
+    trueOption?.option_text.trim().toLowerCase() === "true" &&
+    falseOption?.option_text.trim().toLowerCase() === "false";
+
+  const repairOptions = () => {
+    const repairedTrue = trueOption ?? {
+      clientId: createClientId("opt"),
+      option_text: "True",
+      is_correct: false,
+      sort_order: 0,
+    };
+    const repairedFalse = falseOption ?? {
+      clientId: createClientId("opt"),
+      option_text: "False",
+      is_correct: false,
+      sort_order: 1,
+    };
+    const hasOneCorrect = repairedTrue.is_correct !== repairedFalse.is_correct;
+    onUpdateQuestion({
+      options: [
+        { ...repairedTrue, option_text: "True", is_correct: hasOneCorrect ? repairedTrue.is_correct : true, sort_order: 0 },
+        { ...repairedFalse, option_text: "False", is_correct: hasOneCorrect ? repairedFalse.is_correct : false, sort_order: 1 },
+      ],
+    });
+  };
+
   return (
     <div className="mt-3 rounded-lg bg-slate-50 p-3 space-y-2">
-      <p className="text-xs font-bold text-slate-700">Correct answer (True / False)</p>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {question.options.slice(0, 2).map((option, optionIndex) => (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-bold text-slate-700">Correct answer (True / False)</p>
+        {!isStandardConfiguration && (
+          <button
+            type="button"
+            onClick={repairOptions}
+            className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-900"
+          >
+            Repair True / False options
+          </button>
+        )}
+      </div>
+      <div
+        className="grid gap-2 sm:grid-cols-2"
+        role="radiogroup"
+        aria-label={`Question ${questionIndex + 1} true or false answer`}
+        aria-invalid={Boolean(readError(`${prefix}.options`))}
+        aria-describedby={readError(`${prefix}.options`) ? getErrorId(`${prefix}.options`) : undefined}
+        data-field-path={`${prefix}.options`}
+        tabIndex={readError(`${prefix}.options`) ? -1 : undefined}
+      >
+        {options.map((option) => (
           <label
             key={option.clientId}
             className={`flex cursor-pointer items-center gap-2.5 rounded-lg border p-2.5 text-xs font-semibold ${
@@ -186,18 +264,23 @@ export function TrueFalseEditor({
             <input
               type="radio"
               name={`correct-${question.clientId}`}
-              aria-label={`Mark option ${optionIndex + 1} correct`}
+              aria-label={`Mark ${option.option_text} correct`}
               checked={option.is_correct}
               onChange={(event) =>
-                updateOption(question, optionIndex, { is_correct: event.target.checked }, onUpdateQuestion)
+                updateOption(
+                  question,
+                  question.options.findIndex((candidate) => candidate.clientId === option.clientId),
+                  { is_correct: event.target.checked },
+                  onUpdateQuestion
+                )
               }
             />
-            <span>{option.option_text || (optionIndex === 0 ? "True" : "False")}</span>
+            <span>{option.option_text}</span>
           </label>
         ))}
       </div>
       {readError(`${prefix}.options`) && (
-        <p role="alert" className="text-xs text-rose-700">
+        <p id={getErrorId(`${prefix}.options`)} role="alert" className="text-xs text-rose-700">
           {readError(`${prefix}.options`)}
         </p>
       )}
@@ -226,7 +309,14 @@ export function MultipleSelectEditor({
       <p className="text-[11px] text-slate-600">
         Requires at least 3 options, at least 2 correct answers, and at least 1 incorrect answer.
       </p>
-      <div className="space-y-2">
+      <div
+        className="space-y-2"
+        role="group"
+        aria-label={`Question ${questionIndex + 1} correct options`}
+        aria-describedby={readError(`${prefix}.options`) ? getErrorId(`${prefix}.options`) : undefined}
+        data-field-path={`${prefix}.options`}
+        tabIndex={readError(`${prefix}.options`) ? -1 : undefined}
+      >
         {question.options.map((option, optionIndex) => {
           const textErr = readError(`${prefix}.options.${optionIndex}.option_text`);
           return (
@@ -235,6 +325,7 @@ export function MultipleSelectEditor({
                 <input
                   type="checkbox"
                   aria-label={`Mark option ${optionIndex + 1} correct`}
+                  aria-invalid={Boolean(readError(`${prefix}.options`))}
                   checked={option.is_correct}
                   onChange={(event) =>
                     updateOption(question, optionIndex, { is_correct: event.target.checked }, onUpdateQuestion)
@@ -246,6 +337,8 @@ export function MultipleSelectEditor({
                   placeholder={`Option ${optionIndex + 1}`}
                   aria-label={`Question ${questionIndex + 1} option ${optionIndex + 1}`}
                   aria-invalid={Boolean(textErr)}
+                  aria-describedby={textErr ? getErrorId(`${prefix}.options.${optionIndex}.option_text`) : undefined}
+                  data-field-path={`${prefix}.options.${optionIndex}.option_text`}
                   onChange={(event) =>
                     updateOption(question, optionIndex, { option_text: event.target.value }, onUpdateQuestion)
                   }
@@ -272,18 +365,14 @@ export function MultipleSelectEditor({
                 <button
                   type="button"
                   aria-label={`Remove option ${optionIndex + 1}`}
-                  onClick={() =>
-                    onUpdateQuestion({
-                      options: question.options.filter((_, idx) => idx !== optionIndex),
-                    })
-                  }
+                  onClick={() => removeOption(question, optionIndex, onUpdateQuestion)}
                   className="rounded border px-2 py-1 text-xs"
                 >
                   ×
                 </button>
               </div>
               {textErr && (
-                <p role="alert" className="text-xs text-rose-700 pl-6">
+                <p id={getErrorId(`${prefix}.options.${optionIndex}.option_text`)} role="alert" className="text-xs text-rose-700 pl-6">
                   Option {optionIndex + 1}: {textErr}
                 </p>
               )}
@@ -297,16 +386,17 @@ export function MultipleSelectEditor({
           onUpdateQuestion({
             options: [
               ...question.options,
-              { clientId: createClientId("opt"), option_text: "", is_correct: false },
+              { clientId: createClientId("opt"), option_text: "", is_correct: false, sort_order: question.options.length },
             ],
           })
         }
+        disabled={question.options.length >= 100}
         className="mt-1 text-xs font-bold text-teal-800"
       >
         + Add option
       </button>
       {readError(`${prefix}.options`) && (
-        <p role="alert" className="text-xs text-rose-700">
+        <p id={getErrorId(`${prefix}.options`)} role="alert" className="text-xs text-rose-700">
           {readError(`${prefix}.options`)}
         </p>
       )}
@@ -348,7 +438,13 @@ export function ShortAnswerEditor({
                     value={answer}
                     maxLength={500}
                     aria-label={`Accepted answer ${answerIndex + 1}`}
-                    aria-invalid={Boolean(ansErr)}
+                    aria-invalid={Boolean(ansErr || readError(`${prefix}.answer_config.accepted_answers`))}
+                    aria-describedby={ansErr
+                      ? getErrorId(`${prefix}.answer_config.accepted_answers.${answerIndex}`)
+                      : readError(`${prefix}.answer_config.accepted_answers`)
+                        ? getErrorId(`${prefix}.answer_config.accepted_answers`)
+                        : undefined}
+                    data-field-path={`${prefix}.answer_config.accepted_answers.${answerIndex}`}
                     onChange={(event) => {
                       const next = shortConfig.accepted_answers.map((a, idx) =>
                         idx === answerIndex ? event.target.value : a
@@ -379,7 +475,7 @@ export function ShortAnswerEditor({
                   </button>
                 </div>
                 {ansErr && (
-                  <p role="alert" className="text-xs text-rose-700">
+                  <p id={getErrorId(`${prefix}.answer_config.accepted_answers.${answerIndex}`)} role="alert" className="text-xs text-rose-700">
                     {ansErr}
                   </p>
                 )}
@@ -404,7 +500,7 @@ export function ShortAnswerEditor({
           + Add accepted answer
         </button>
         {readError(`${prefix}.answer_config.accepted_answers`) && (
-          <p role="alert" className="mt-1 text-xs text-rose-700">
+          <p id={getErrorId(`${prefix}.answer_config.accepted_answers`)} role="alert" className="mt-1 text-xs text-rose-700">
             {readError(`${prefix}.answer_config.accepted_answers`)}
           </p>
         )}
@@ -497,9 +593,31 @@ export function FillInTheBlanksEditor({
   };
 
   const handleInsertOrConvertSelection = () => {
+    if (blanks.length >= 20) return;
     const el = promptRef.current;
     const start = el ? el.selectionStart : question.prompt.length;
     const end = el ? el.selectionEnd : question.prompt.length;
+    const selectedText = question.prompt.slice(start, end).trim();
+    const missingBlankId = extractPromptPlaceholders(question.prompt).ids.find(
+      (id) => !blanks.some((blank) => blank.id === id)
+    );
+    if (missingBlankId && (!selectedText || selectedText === `[${missingBlankId}]`)) {
+      const nextBlanks = [
+        ...blanks,
+        {
+          id: missingBlankId,
+          points: 1,
+          accepted_answers: [""],
+          normalization: defaultNormalization(),
+        },
+      ];
+      commitBlanks(
+        nextBlanks,
+        [...blankClientIds, createClientId("blk")],
+        { ...blankAnswerClientIds, [nextBlanks.length - 1]: [createClientId("ans")] }
+      );
+      return;
+    }
     const { prompt: nextPrompt, blank, cursorPosition } = convertPromptSelectionToBlank(
       question.prompt,
       start,
@@ -564,6 +682,7 @@ export function FillInTheBlanksEditor({
           <button
             type="button"
             onClick={handleInsertOrConvertSelection}
+            disabled={blanks.length >= 20}
             className="rounded-lg border border-teal-300 bg-white px-2.5 py-1 text-xs font-bold text-teal-800 hover:bg-teal-50"
           >
             + Convert selection / Insert blank
@@ -580,10 +699,12 @@ export function FillInTheBlanksEditor({
           onChange={(event) => onUpdateQuestion({ prompt: event.target.value })}
           rows={3}
           aria-invalid={Boolean(promptErr)}
+          aria-describedby={promptErr ? getErrorId(`${prefix}.prompt`) : undefined}
+          data-field-path={`${prefix}.prompt`}
           className={`w-full rounded-lg border bg-white p-2.5 text-xs ${promptErr ? "border-rose-400" : "border-slate-300"}`}
         />
         {promptErr && (
-          <p role="alert" className="text-xs text-rose-700">
+          <p id={getErrorId(`${prefix}.prompt`)} role="alert" className="text-xs text-rose-700">
             {promptErr}
           </p>
         )}
@@ -623,11 +744,22 @@ export function FillInTheBlanksEditor({
           <button
             type="button"
             onClick={handleInsertOrConvertSelection}
+            disabled={blanks.length >= 20}
             className="text-xs font-bold text-teal-800"
           >
             + Add blank
           </button>
         </div>
+
+        <div
+          role="group"
+          aria-label={`Question ${questionIndex + 1} blanks configuration`}
+          aria-describedby={readError(`${prefix}.answer_config.blanks`)
+            ? getErrorId(`${prefix}.answer_config.blanks`)
+            : undefined}
+          data-field-path={`${prefix}.answer_config.blanks`}
+          tabIndex={readError(`${prefix}.answer_config.blanks`) ? -1 : undefined}
+        >
 
         {blanks.map((blank, blankIndex) => {
           const bKey = blankClientIds[blankIndex] ?? `blk-${blankIndex}`;
@@ -650,7 +782,13 @@ export function FillInTheBlanksEditor({
                   value={blank.id ?? ""}
                   maxLength={50}
                   aria-label={`Blank ${blankIndex + 1} ID`}
-                  aria-invalid={Boolean(idErr)}
+                  aria-invalid={Boolean(idErr || readError(`${prefix}.answer_config.blanks`))}
+                  aria-describedby={idErr
+                    ? getErrorId(`${bPrefix}.id`)
+                    : readError(`${prefix}.answer_config.blanks`)
+                      ? getErrorId(`${prefix}.answer_config.blanks`)
+                      : undefined}
+                  data-field-path={`${bPrefix}.id`}
                   onChange={(event) => handleRenameBlankId(blankIndex, event.target.value)}
                   className={`min-w-0 flex-1 rounded-lg border bg-white p-2 font-mono text-xs ${idErr ? "border-rose-400" : "border-slate-300"}`}
                 />
@@ -661,7 +799,13 @@ export function FillInTheBlanksEditor({
                   step={0.25}
                   value={blank.points ?? 1}
                   aria-label={`Blank ${blankIndex + 1} points`}
-                  aria-invalid={Boolean(ptsErr)}
+                  aria-invalid={Boolean(ptsErr || readError(`${prefix}.answer_config.blanks`))}
+                  aria-describedby={ptsErr
+                    ? getErrorId(`${bPrefix}.points`)
+                    : readError(`${prefix}.answer_config.blanks`)
+                      ? getErrorId(`${prefix}.answer_config.blanks`)
+                      : undefined}
+                  data-field-path={`${bPrefix}.points`}
                   onChange={(event) => updateBlank(blankIndex, { points: Number(event.target.value) })}
                   className={`w-20 rounded-lg border bg-white p-2 text-xs ${ptsErr ? "border-rose-400" : "border-slate-300"}`}
                 />
@@ -673,8 +817,8 @@ export function FillInTheBlanksEditor({
                   Remove
                 </button>
               </div>
-              {idErr && <p role="alert" className="text-xs text-rose-700">{idErr}</p>}
-              {ptsErr && <p role="alert" className="text-xs text-rose-700">{ptsErr}</p>}
+              {idErr && <p id={getErrorId(`${bPrefix}.id`)} role="alert" className="text-xs text-rose-700">{idErr}</p>}
+              {ptsErr && <p id={getErrorId(`${bPrefix}.points`)} role="alert" className="text-xs text-rose-700">{ptsErr}</p>}
 
               <div>
                 <p className="text-[11px] font-semibold text-slate-700">Accepted answers</p>
@@ -682,12 +826,19 @@ export function FillInTheBlanksEditor({
                   {(blank.accepted_answers ?? []).map((ans, ansIdx) => {
                     const ansErr = readError(`${bPrefix}.accepted_answers.${ansIdx}`);
                     return (
-                      <div key={ansClientIds[ansIdx] ?? `ba-${ansIdx}`} className="flex gap-2">
+                      <div key={ansClientIds[ansIdx] ?? `ba-${ansIdx}`} className="space-y-1">
+                        <div className="flex gap-2">
                         <input
                           value={ans}
                           maxLength={500}
                           aria-label={`Blank ${blankIndex + 1} accepted answer ${ansIdx + 1}`}
-                          aria-invalid={Boolean(ansErr)}
+                          aria-invalid={Boolean(ansErr || ansGroupErr)}
+                          aria-describedby={ansErr
+                            ? getErrorId(`${bPrefix}.accepted_answers.${ansIdx}`)
+                            : ansGroupErr
+                              ? getErrorId(`${bPrefix}.accepted_answers`)
+                              : undefined}
+                          data-field-path={`${bPrefix}.accepted_answers.${ansIdx}`}
                           onChange={(event) => {
                             const nextAccepted = [...(blank.accepted_answers ?? [])];
                             nextAccepted[ansIdx] = event.target.value;
@@ -713,6 +864,12 @@ export function FillInTheBlanksEditor({
                         >
                           Remove
                         </button>
+                        </div>
+                        {ansErr && (
+                          <p id={getErrorId(`${bPrefix}.accepted_answers.${ansIdx}`)} role="alert" className="text-xs text-rose-700">
+                            {ansErr}
+                          </p>
+                        )}
                       </div>
                     );
                   })}
@@ -736,7 +893,7 @@ export function FillInTheBlanksEditor({
                   + Add answer
                 </button>
                 {ansGroupErr && (
-                  <p role="alert" className="mt-1 text-xs text-rose-700">
+                  <p id={getErrorId(`${bPrefix}.accepted_answers`)} role="alert" className="mt-1 text-xs text-rose-700">
                     {ansGroupErr}
                   </p>
                 )}
@@ -774,10 +931,11 @@ export function FillInTheBlanksEditor({
         })}
 
         {readError(`${prefix}.answer_config.blanks`) && (
-          <p role="alert" className="text-xs text-rose-700">
+          <p id={getErrorId(`${prefix}.answer_config.blanks`)} role="alert" className="text-xs text-rose-700">
             {readError(`${prefix}.answer_config.blanks`)}
           </p>
         )}
+        </div>
       </div>
     </div>
   );

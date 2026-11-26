@@ -17,6 +17,7 @@ import {
 import {
   createClientId,
   createQuestionDraft,
+  extractPromptPlaceholders,
   extractFirstErrorQuestionIndex,
   sumBlankPoints,
   validateExerciseDraft,
@@ -24,6 +25,9 @@ import {
 import type { QuestionType } from "@/lib/learning";
 import {
   createClientQuestionDraft,
+  captureQuestionTypeConfiguration,
+  cloneQuestionTypeConfiguration,
+  defaultNormalization,
   QUESTION_TYPE_OPTIONS,
   toDraftExercise,
   type DraftQuestion,
@@ -46,7 +50,29 @@ interface ExerciseDraftBuilderProps {
   onDirtyChange: (dirty: boolean) => void;
 }
 
-type SaveStatus = "idle" | "saving" | "saved" | "error";
+type SaveStatus = "idle" | "saving" | "publishing" | "saved" | "error";
+
+function mergePersistedIds(
+  current: ExerciseDraft,
+  saved: ExerciseDraft
+): ExerciseDraft {
+  return {
+    ...current,
+    questions: current.questions.map((question) => {
+      const savedQuestion = saved.questions.find((candidate) => candidate.clientId === question.clientId);
+      if (!savedQuestion) return question;
+
+      return {
+        ...question,
+        id: question.id ?? savedQuestion.id,
+        options: question.options.map((option) => {
+          const savedOption = savedQuestion.options.find((candidate) => candidate.clientId === option.clientId);
+          return { ...option, id: option.id ?? savedOption?.id };
+        }),
+      };
+    }),
+  };
+}
 
 export default function ExerciseDraftBuilder({
   centerSlug,
@@ -58,22 +84,35 @@ export default function ExerciseDraftBuilder({
   const [exercises, setExercises] = useState<AdminFullExercise[]>([]);
   const [draft, setDraft] = useState<ExerciseDraft | null>(null);
   const [selectedQuestionClientId, setSelectedQuestionClientId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [loadedScopeKey, setLoadedScopeKey] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewSession, setPreviewSession] = useState(0);
+  const previewButtonRef = useRef<HTMLButtonElement | null>(null);
+  const scopeKey = `${centerSlug}:${courseSlug}:${lessonId}`;
+  const isLoading = loadedScopeKey !== scopeKey;
 
   const editRevisionRef = useRef(0);
   const inFlightActionRef = useRef<string | null>(null);
   const draftRef = useRef<ExerciseDraft | null>(null);
+  const listRequestSequenceRef = useRef(0);
+  const mountedRef = useRef(false);
 
-  useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+  const setActiveDraft = (nextDraft: ExerciseDraft | null) => {
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+  };
+
+  const finishAction = (action: string) => {
+    if (inFlightActionRef.current !== action) return;
+    inFlightActionRef.current = null;
+    setIsBusy(false);
+  };
 
   const liveValidation = useMemo(
     () => (draft ? validateExerciseDraft(draft) : null),
@@ -90,39 +129,97 @@ export default function ExerciseDraftBuilder({
     setSelectedQuestionClientId(questions[safeIdx].clientId);
   };
 
-  const loadExercises = async (preferredId?: number, preserveLocalDraft = false) => {
-    const rows = await getAdminExercises(centerSlug, courseSlug, lessonId);
-    setExercises(rows);
-    if (preferredId && !preserveLocalDraft) {
-      const preferred = rows.find((row) => row.id === preferredId);
-      if (preferred) {
-        const nextDraft = toDraftExercise(preferred, draftRef.current);
-        setDraft(nextDraft);
-        const stillExists = nextDraft.questions.some((q) => q.clientId === selectedQuestionClientId);
-        if (!stillExists) {
-          selectQuestionByIndex(nextDraft.questions, 0);
-        }
-      }
+  const focusFieldPath = (path: string) => {
+    const questionIndex = extractFirstErrorQuestionIndex({ [path]: "invalid" });
+    if (questionIndex !== null && draftRef.current) {
+      selectQuestionByIndex(draftRef.current.questions, questionIndex);
     }
-    return rows;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const fields = Array.from(document.querySelectorAll<HTMLElement>("[data-field-path]"));
+        const field = fields.find((element) => element.dataset.fieldPath === path)
+          ?? fields.find((element) => element.dataset.fieldPath?.startsWith(`${path}.`));
+        field?.focus();
+        field?.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    });
+  };
+
+  const refreshExerciseList = async (): Promise<boolean> => {
+    const requestSequence = ++listRequestSequenceRef.current;
+    let rows: AdminFullExercise[];
+    try {
+      rows = await getAdminExercises(centerSlug, courseSlug, lessonId);
+    } catch (cause) {
+      if (!mountedRef.current || requestSequence !== listRequestSequenceRef.current) return false;
+      throw cause;
+    }
+
+    if (!mountedRef.current || requestSequence !== listRequestSequenceRef.current) return false;
+    setExercises(rows);
+    return true;
+  };
+
+  const refreshAfterWrite = async (successMessage: string) => {
+    try {
+      await refreshExerciseList();
+    } catch {
+      setWarning((current) => current ? `${current} ${successMessage}` : successMessage);
+    }
+  };
+
+  const beginAction = (action: string): boolean => {
+    if (isLoading || inFlightActionRef.current) return false;
+    inFlightActionRef.current = action;
+    setIsBusy(true);
+    setError(null);
+    setWarning(null);
+    return true;
+  };
+
+  const applyServerErrors = (cause: unknown) => {
+    if (!(cause instanceof AdminLearningApiError) || !cause.errors) return;
+    const mapped = Object.fromEntries(
+      Object.entries(cause.errors).map(([field, messages]) => [field, messages[0] ?? "Invalid value."])
+    );
+    setFieldErrors(mapped);
+    const firstErrorPath = Object.keys(mapped)[0];
+    if (firstErrorPath) {
+      focusFieldPath(firstErrorPath);
+    }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      listRequestSequenceRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
+    const requestSequence = ++listRequestSequenceRef.current;
     void getAdminExercises(centerSlug, courseSlug, lessonId)
       .then((rows) => {
-        if (mounted) setExercises(rows);
+        if (mounted && requestSequence === listRequestSequenceRef.current) {
+          setExercises(rows);
+          setError(null);
+        }
       })
       .catch((cause: unknown) => {
-        if (mounted) setError(cause instanceof Error ? cause.message : "Could not load exercises.");
+        if (mounted && requestSequence === listRequestSequenceRef.current) {
+          setError(cause instanceof Error ? cause.message : "Could not load exercises.");
+        }
       })
       .finally(() => {
-        if (mounted) setIsLoading(false);
+        if (mounted && requestSequence === listRequestSequenceRef.current) setLoadedScopeKey(scopeKey);
       });
     return () => {
       mounted = false;
+      if (requestSequence === listRequestSequenceRef.current) listRequestSequenceRef.current += 1;
     };
-  }, [centerSlug, courseSlug, lessonId]);
+  }, [centerSlug, courseSlug, lessonId, scopeKey]);
 
   const markDirty = (changedPaths?: string[]) => {
     editRevisionRef.current += 1;
@@ -144,50 +241,65 @@ export default function ExerciseDraftBuilder({
 
   const updateDraft = (update: (current: ExerciseDraft) => ExerciseDraft, clearPaths?: string[]) => {
     markDirty(clearPaths);
-    setDraft((current) => (current ? update(current) : current));
+    const current = draftRef.current;
+    if (!current) return;
+    const updated = update(current);
+    const nextDraft = {
+      ...updated,
+      questions: updated.questions.map((question, sort_order) => ({
+        ...question,
+        sort_order,
+        options: question.options.map((option, optionOrder) => ({
+          ...option,
+          sort_order: optionOrder,
+        })),
+      })),
+    };
+    setActiveDraft(nextDraft);
   };
 
   const handleSelectExercise = (exercise: AdminFullExercise) => {
-    if (isBusy) return;
+    if (isBusy || isLoading || inFlightActionRef.current) return;
     if (hasUnsavedEdits && draft && draft.id !== exercise.id) {
       if (!window.confirm("Discard unsaved draft edits and open another exercise?")) return;
     }
     const nextDraft = toDraftExercise(exercise);
-    setDraft(nextDraft);
+    setActiveDraft(nextDraft);
     selectQuestionByIndex(nextDraft.questions, 0);
     setHasUnsavedEdits(false);
     setSaveStatus("idle");
     setFieldErrors({});
     setError(null);
+    setWarning(null);
     setIsPreviewOpen(false);
     onDirtyChange(false);
   };
 
   const handleNewDraft = async () => {
-    if (inFlightActionRef.current) return;
+    if (isLoading || inFlightActionRef.current) return;
     if (hasUnsavedEdits && !window.confirm("Discard unsaved edits and create another draft?")) return;
-    inFlightActionRef.current = "create";
-    setIsBusy(true);
-    setError(null);
+    if (!beginAction("create")) return;
+    setSaveStatus("saving");
     try {
       const created = await createAdminExercise(centerSlug, courseSlug, lessonId, {
         title: "Untitled Exercise",
         passing_score: 70,
       });
       const nextDraft = toDraftExercise(created);
-      setDraft(nextDraft);
+      setActiveDraft(nextDraft);
       selectQuestionByIndex(nextDraft.questions, 0);
       setHasUnsavedEdits(false);
       setSaveStatus("saved");
       setFieldErrors({});
       setIsPreviewOpen(false);
       onDirtyChange(false);
-      await loadExercises(created.id);
+      finishAction("create");
+      await refreshAfterWrite("Draft created successfully, but the exercise list could not refresh.");
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : "Could not create an exercise draft.");
+      setSaveStatus("error");
     } finally {
-      inFlightActionRef.current = null;
-      setIsBusy(false);
+      finishAction("create");
     }
   };
 
@@ -226,127 +338,141 @@ export default function ExerciseDraftBuilder({
     }),
   });
 
+  const persistDraft = async (
+    snapshot: ExerciseDraft,
+    requestRevision: number
+  ): Promise<{
+    saved: AdminFullExercise;
+    savedDraft: ExerciseDraft;
+    isActive: boolean;
+    isLatest: boolean;
+  }> => {
+    const saved = await updateAdminExercise(
+      centerSlug,
+      courseSlug,
+      lessonId,
+      snapshot.id,
+      buildPayload(snapshot)
+    );
+    if (saved.id !== snapshot.id) {
+      throw new Error("The server returned a different exercise after saving.");
+    }
+
+    const savedDraft = toDraftExercise(saved, snapshot);
+    const current = draftRef.current;
+    if (!current || current.id !== snapshot.id) {
+      return { saved, savedDraft, isActive: false, isLatest: false };
+    }
+
+    if (editRevisionRef.current !== requestRevision) {
+      setActiveDraft(mergePersistedIds(current, savedDraft));
+      setHasUnsavedEdits(true);
+      setSaveStatus("idle");
+      setWarning("The submitted changes were saved. Newer edits remain unsaved; save again before publishing.");
+      onDirtyChange(true);
+      return { saved, savedDraft, isActive: true, isLatest: false };
+    }
+
+    setActiveDraft(savedDraft);
+    setHasUnsavedEdits(false);
+    setSaveStatus("saved");
+    onDirtyChange(false);
+    return { saved, savedDraft, isActive: true, isLatest: true };
+  };
+
   const saveDraft = async (): Promise<AdminFullExercise | null> => {
     const snapshot = draftRef.current;
-    if (!snapshot || inFlightActionRef.current) return null;
+    if (!snapshot || !beginAction("save")) return null;
 
-    inFlightActionRef.current = "save";
     const requestRevision = editRevisionRef.current;
-    setIsBusy(true);
     setSaveStatus("saving");
-    setError(null);
     setFieldErrors({});
+    let result: Awaited<ReturnType<typeof persistDraft>> | null = null;
 
     try {
-      const saved = await updateAdminExercise(
-        centerSlug,
-        courseSlug,
-        lessonId,
-        snapshot.id,
-        buildPayload(snapshot)
-      );
-
-      const userEditedWhileSaving = editRevisionRef.current !== requestRevision;
-      if (userEditedWhileSaving) {
-        // Reconcile server IDs without overwriting newer local edits
-        setDraft((current) => {
-          if (!current || current.id !== saved.id) return current;
-          return {
-            ...current,
-            questions: current.questions.map((q, qIdx) => {
-              const serverQ = saved.questions[qIdx];
-              if (!serverQ) return q;
-              return {
-                ...q,
-                id: q.id ?? serverQ.id,
-                options: q.options.map((opt, oIdx) => ({
-                  ...opt,
-                  id: opt.id ?? serverQ.options[oIdx]?.id,
-                })),
-              };
-            }),
-          };
-        });
-        setSaveStatus("idle");
-        await loadExercises(saved.id, true);
-      } else {
-        const reconciled = toDraftExercise(saved, snapshot);
-        setDraft(reconciled);
-        setHasUnsavedEdits(false);
-        setSaveStatus("saved");
-        onDirtyChange(false);
-        await loadExercises(saved.id, true);
-      }
-      return saved;
+      result = await persistDraft(snapshot, requestRevision);
     } catch (cause: unknown) {
       setSaveStatus("error");
-      if (cause instanceof AdminLearningApiError && cause.errors) {
-        const mapped = Object.fromEntries(
-          Object.entries(cause.errors).map(([field, messages]) => [field, messages[0] ?? "Invalid value."])
-        );
-        setFieldErrors(mapped);
-        const errIdx = extractFirstErrorQuestionIndex(mapped);
-        if (errIdx !== null && draftRef.current) {
-          selectQuestionByIndex(draftRef.current.questions, errIdx);
-        }
-      }
+      applyServerErrors(cause);
       setError(cause instanceof Error ? cause.message : "Could not save the exercise draft.");
-      return null;
     } finally {
-      inFlightActionRef.current = null;
-      setIsBusy(false);
+      finishAction("save");
     }
+
+    if (!result) return null;
+    await refreshAfterWrite("Exercise saved successfully, but the exercise list could not refresh.");
+    return result.saved;
   };
 
   const publish = async () => {
-    const current = draftRef.current;
-    if (!current || inFlightActionRef.current) return;
+    const snapshot = draftRef.current;
+    if (!snapshot || isLoading || inFlightActionRef.current) return;
 
-    const validation = validateExerciseDraft(current);
+    const validation = validateExerciseDraft(snapshot);
     if (!validation.valid) {
       setFieldErrors(validation.errors);
+      setWarning(null);
       setError("Review the marked fields before publishing.");
-      if (validation.firstInvalidQuestionIndex !== null) {
-        selectQuestionByIndex(current.questions, validation.firstInvalidQuestionIndex);
+      const firstErrorPath = Object.keys(validation.errors)[0];
+      if (firstErrorPath) {
+        focusFieldPath(firstErrorPath);
+      } else if (validation.firstInvalidQuestionIndex !== null) {
+        selectQuestionByIndex(snapshot.questions, validation.firstInvalidQuestionIndex);
       }
       return;
     }
+    if (!beginAction("publish")) return;
 
-    const saved = await saveDraft();
-    if (!saved) return;
-
-    if (editRevisionRef.current !== 0 && hasUnsavedEdits) {
-      // Wait for user to finish concurrent edits before publishing stale state
-    }
-
-    inFlightActionRef.current = "publish";
-    setIsBusy(true);
-    setError(null);
+    const requestRevision = editRevisionRef.current;
+    setSaveStatus("saving");
+    setFieldErrors({});
+    let persisted: Awaited<ReturnType<typeof persistDraft>>;
     try {
-      const published = await publishAdminExercise(centerSlug, courseSlug, lessonId, saved.id);
-      const nextDraft = toDraftExercise(published, draftRef.current);
-      setDraft(nextDraft);
-      setHasUnsavedEdits(false);
-      setSaveStatus("saved");
-      onDirtyChange(false);
-      await loadExercises(published.id, true);
+      persisted = await persistDraft(snapshot, requestRevision);
     } catch (cause: unknown) {
       setSaveStatus("error");
-      if (cause instanceof AdminLearningApiError && cause.errors) {
-        const mapped = Object.fromEntries(
-          Object.entries(cause.errors).map(([field, messages]) => [field, messages[0] ?? "Invalid value."])
-        );
-        setFieldErrors(mapped);
-        const errIdx = extractFirstErrorQuestionIndex(mapped);
-        if (errIdx !== null && draftRef.current) {
-          selectQuestionByIndex(draftRef.current.questions, errIdx);
-        }
-      }
-      setError(cause instanceof Error ? cause.message : "Could not publish the exercise.");
-    } finally {
-      inFlightActionRef.current = null;
-      setIsBusy(false);
+      applyServerErrors(cause);
+      setError(cause instanceof Error ? `Could not save before publishing: ${cause.message}` : "Could not save before publishing.");
+      finishAction("publish");
+      return;
     }
+
+    if (
+      !persisted.isActive ||
+      !persisted.isLatest ||
+      draftRef.current?.id !== persisted.saved.id ||
+      editRevisionRef.current !== requestRevision
+    ) {
+      setError("The exercise changed while it was being saved. Save the latest changes before publishing.");
+      finishAction("publish");
+      await refreshAfterWrite("The exercise was saved, but the exercise list could not refresh.");
+      return;
+    }
+
+    setSaveStatus("publishing");
+    let published: AdminFullExercise;
+    try {
+      published = await publishAdminExercise(centerSlug, courseSlug, lessonId, persisted.saved.id);
+      if (published.id !== persisted.saved.id) {
+        throw new Error("The server returned a different exercise after publishing.");
+      }
+    } catch (cause: unknown) {
+      setSaveStatus("saved");
+      applyServerErrors(cause);
+      setError(cause instanceof Error ? `The draft was saved, but publishing failed: ${cause.message}` : "The draft was saved, but publishing failed.");
+      finishAction("publish");
+      await refreshAfterWrite("The draft was saved, but the exercise list could not refresh.");
+      return;
+    }
+
+    const publishedDraft = toDraftExercise(published, persisted.savedDraft);
+    setActiveDraft(publishedDraft);
+    setHasUnsavedEdits(false);
+    setSaveStatus("saved");
+    setFieldErrors({});
+    onDirtyChange(false);
+    finishAction("publish");
+    await refreshAfterWrite("Exercise published successfully, but the exercise list could not refresh.");
   };
 
   const addQuestion = () => {
@@ -365,20 +491,74 @@ export default function ExerciseDraftBuilder({
     updateDraft((current) => ({
       ...current,
       questions: current.questions.map((question, questionIndex) => {
-        if (questionIndex !== index) return question;
-        const replacement = createClientQuestionDraft(type, createQuestionDraft);
-        const nextPrompt =
-          type === "fill_in_the_blanks" && !question.prompt.trim()
-            ? replacement.prompt
-            : question.prompt;
+        if (questionIndex !== index || question.question_type === type) return question;
+
+        const configurations = Object.fromEntries(
+          Object.entries(question.typeConfigurations ?? {}).map(([cachedType, configuration]) => [
+            cachedType,
+            configuration ? cloneQuestionTypeConfiguration(configuration) : configuration,
+          ])
+        ) as NonNullable<DraftQuestion["typeConfigurations"]>;
+        configurations[question.question_type] = captureQuestionTypeConfiguration(question);
+
+        let targetConfiguration = configurations[type];
+        if (!targetConfiguration) {
+          const replacement = createClientQuestionDraft(type, createQuestionDraft);
+          if (type === "fill_in_the_blanks") {
+            const existingBlankIds = [...new Set(extractPromptPlaceholders(question.prompt).ids)];
+            const prompt = question.prompt.trim()
+              ? existingBlankIds.length > 0
+                ? question.prompt
+                : `${question.prompt.trim()} [blank_1]`
+              : replacement.prompt;
+            const blankIds = [...new Set(extractPromptPlaceholders(prompt).ids)];
+            const blanks = blankIds.map((id) => ({
+              id,
+              points: 1,
+              accepted_answers: [""],
+              normalization: defaultNormalization(),
+            }));
+            replacement.prompt = prompt;
+            replacement.answer_config = { blanks };
+            replacement.points = blanks.reduce((total, blank) => total + blank.points, 0);
+            replacement.blankClientIds = blanks.map(() => createClientId("blk"));
+            replacement.blankAnswerClientIds = Object.fromEntries(
+              blanks.map((blank, blankIndex) => [blankIndex, blank.accepted_answers.map(() => createClientId("ans"))])
+            );
+          } else {
+            replacement.prompt = question.prompt;
+          }
+          targetConfiguration = captureQuestionTypeConfiguration(replacement);
+        }
+
+        configurations[type] = cloneQuestionTypeConfiguration(targetConfiguration);
         return {
-          ...replacement,
+          ...question,
           id: question.id,
           clientId: question.clientId,
           sort_order: question.sort_order,
-          prompt: nextPrompt,
-          points: type === "fill_in_the_blanks" ? replacement.points : question.points,
-          explanation: question.explanation,
+          question_type: type,
+          prompt: targetConfiguration.prompt,
+          options: targetConfiguration.options.map((option) => ({ ...option })),
+          answer_config: targetConfiguration.answer_config,
+          points: type === "fill_in_the_blanks"
+            ? sumBlankPoints((targetConfiguration.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
+            : targetConfiguration.points,
+          acceptedAnswerClientIds: targetConfiguration.acceptedAnswerClientIds
+            ? [...targetConfiguration.acceptedAnswerClientIds]
+            : undefined,
+          blankClientIds: targetConfiguration.blankClientIds
+            ? [...targetConfiguration.blankClientIds]
+            : undefined,
+          blankAnswerClientIds: targetConfiguration.blankAnswerClientIds
+            ? Object.fromEntries(
+                Object.entries(targetConfiguration.blankAnswerClientIds).map(([blankIndex, ids]) => [
+                  blankIndex,
+                  [...ids],
+                ])
+              )
+            : undefined,
+          typeConfigurations: configurations,
         };
       }),
     }));
@@ -442,6 +622,14 @@ export default function ExerciseDraftBuilder({
             ])
           )
         : undefined,
+      typeConfigurations: source.typeConfigurations
+        ? Object.fromEntries(
+            Object.entries(source.typeConfigurations).map(([type, configuration]) => [
+              type,
+              configuration ? cloneQuestionTypeConfiguration(configuration, false) : configuration,
+            ])
+          ) as DraftQuestion["typeConfigurations"]
+        : undefined,
     };
     updateDraft((current) => {
       const questions = [...current.questions];
@@ -472,23 +660,28 @@ export default function ExerciseDraftBuilder({
   };
 
   const handleDeleteDraft = async () => {
-    if (!draft || draft.status !== "draft" || inFlightActionRef.current) return;
+    if (!draft || draft.status !== "draft" || isLoading || inFlightActionRef.current) return;
     if (!window.confirm("Delete this exercise draft?")) return;
-    inFlightActionRef.current = "delete";
-    setIsBusy(true);
+    if (!beginAction("delete")) return;
+    setSaveStatus("saving");
+    let deleted = false;
     try {
       await deleteAdminExercise(centerSlug, courseSlug, lessonId, draft.id);
-      setDraft(null);
+      setActiveDraft(null);
       setSelectedQuestionClientId(null);
       setHasUnsavedEdits(false);
       setSaveStatus("idle");
+      setFieldErrors({});
       onDirtyChange(false);
-      await loadExercises();
+      deleted = true;
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : "Could not delete the draft.");
+      setSaveStatus("error");
     } finally {
-      inFlightActionRef.current = null;
-      setIsBusy(false);
+      finishAction("delete");
+    }
+    if (deleted) {
+      await refreshAfterWrite("Draft deleted successfully, but the exercise list could not refresh.");
     }
   };
 
@@ -524,7 +717,7 @@ export default function ExerciseDraftBuilder({
             <span
               role="status"
               className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${
-                saveStatus === "saving"
+                saveStatus === "saving" || saveStatus === "publishing"
                   ? "bg-amber-50 text-amber-800"
                   : saveStatus === "error"
                   ? "bg-rose-50 text-rose-800"
@@ -537,6 +730,8 @@ export default function ExerciseDraftBuilder({
             >
               {saveStatus === "saving"
                 ? "Saving…"
+                : saveStatus === "publishing"
+                ? "Publishing..."
                 : saveStatus === "error"
                 ? "Save failed"
                 : hasUnsavedEdits
@@ -548,7 +743,7 @@ export default function ExerciseDraftBuilder({
           )}
           <button
             type="button"
-            disabled={isBusy}
+          disabled={isBusy || isLoading}
             onClick={() => void handleNewDraft()}
             className="rounded-xl bg-[#0e8988] px-3 py-2 text-xs font-bold text-white disabled:opacity-50"
           >
@@ -560,6 +755,11 @@ export default function ExerciseDraftBuilder({
       {error && (
         <div role="alert" className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
           {error}
+        </div>
+      )}
+      {warning && (
+        <div role="status" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          {warning}
         </div>
       )}
 
@@ -580,7 +780,7 @@ export default function ExerciseDraftBuilder({
             return (
               <button
                 type="button"
-                disabled={isBusy}
+                disabled={isBusy || isLoading}
                 key={exercise.id}
                 aria-current={isSelected ? "true" : undefined}
                 onClick={() => handleSelectExercise(exercise)}
@@ -628,18 +828,30 @@ export default function ExerciseDraftBuilder({
             )}
 
             {/* Validation Summary */}
-            {Object.keys(fieldErrors).length > 0 && liveValidation && !liveValidation.valid && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-3 text-xs text-rose-900">
+            {Object.keys(fieldErrors).length > 0 && (
+              <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50/70 p-3 text-xs text-rose-900">
                 <p className="font-bold">Please resolve the following before publishing:</p>
                 <ul className="mt-1.5 list-disc space-y-1 pl-4">
-                  {fieldErrors.title && <li>{fieldErrors.title}</li>}
-                  {fieldErrors.passing_score && <li>{fieldErrors.passing_score}</li>}
-                  {fieldErrors.questions && <li>{fieldErrors.questions}</li>}
-                  {liveValidation.incompleteQuestions.map(({ index, count }) => (
+                  {Object.entries(fieldErrors).map(([path, message]) => (
+                    <li key={path}>
+                      <button
+                        type="button"
+                        onClick={() => focusFieldPath(path)}
+                        className="text-left font-semibold underline hover:text-rose-700"
+                      >
+                        {path.replaceAll(".", " · ")}: {message}
+                      </button>
+                    </li>
+                  ))}
+                  {liveValidation?.incompleteQuestions.map(({ index, count }) => (
                     <li key={draft.questions[index]?.clientId ?? index}>
                       <button
                         type="button"
-                        onClick={() => selectQuestionByIndex(draft.questions, index)}
+                        onClick={() => {
+                          const firstPath = Object.keys(liveValidation?.questionErrors[index] ?? {})[0];
+                          if (firstPath) focusFieldPath(firstPath);
+                          else selectQuestionByIndex(draft.questions, index);
+                        }}
                         className="font-semibold underline hover:text-rose-700"
                       >
                         Question {index + 1} ({count} {count === 1 ? "issue" : "issues"})
@@ -666,10 +878,12 @@ export default function ExerciseDraftBuilder({
                         updateDraft((current) => ({ ...current, title: event.target.value }), ["title"])
                       }
                       aria-invalid={Boolean(readError("title"))}
+                      aria-describedby={readError("title") ? "field-error-title" : undefined}
+                      data-field-path="title"
                       className={`mt-1 w-full rounded-lg border bg-white p-2 ${readError("title") ? "border-rose-400" : "border-slate-300"}`}
                     />
                     {readError("title") && (
-                      <span className="mt-1 block text-rose-700" role="alert">
+                      <span id="field-error-title" className="mt-1 block text-rose-700" role="alert">
                         {readError("title")}
                       </span>
                     )}
@@ -704,10 +918,12 @@ export default function ExerciseDraftBuilder({
                         )
                       }
                       aria-invalid={Boolean(readError("passing_score"))}
+                      aria-describedby={readError("passing_score") ? "field-error-passing-score" : undefined}
+                      data-field-path="passing_score"
                       className={`mt-1 w-full rounded-lg border bg-white p-2 ${readError("passing_score") ? "border-rose-400" : "border-slate-300"}`}
                     />
                     {readError("passing_score") && (
-                      <span className="mt-1 block text-rose-700" role="alert">
+                      <span id="field-error-passing-score" className="mt-1 block text-rose-700" role="alert">
                         {readError("passing_score")}
                       </span>
                     )}
@@ -737,6 +953,9 @@ export default function ExerciseDraftBuilder({
                       placeholder="Unlimited"
                       aria-label="Maximum attempts"
                       value={draft.max_attempts ?? ""}
+                      aria-invalid={Boolean(readError("max_attempts"))}
+                      aria-describedby={readError("max_attempts") ? "field-error-max-attempts" : undefined}
+                      data-field-path="max_attempts"
                       onChange={(event) =>
                         updateDraft((current) => ({
                           ...current,
@@ -745,6 +964,11 @@ export default function ExerciseDraftBuilder({
                       }
                       className="w-full rounded-lg border border-slate-300 bg-white p-2 disabled:bg-slate-100 disabled:text-slate-400"
                     />
+                    {readError("max_attempts") && (
+                      <span id="field-error-max-attempts" className="block text-rose-700" role="alert">
+                        {readError("max_attempts")}
+                      </span>
+                    )}
                   </div>
 
                   <label className="flex items-center gap-2 text-xs font-medium text-slate-700 sm:col-span-2">
@@ -866,6 +1090,9 @@ export default function ExerciseDraftBuilder({
                             aria-readonly={
                               selectedQuestion.question_type === "fill_in_the_blanks" ? "true" : undefined
                             }
+                            aria-invalid={Boolean(readError(`questions.${selectedQuestionIndex}.points`))}
+                            aria-describedby={readError(`questions.${selectedQuestionIndex}.points`) ? `field-error-question-${selectedQuestionIndex}-points` : undefined}
+                            data-field-path={`questions.${selectedQuestionIndex}.points`}
                             value={
                               selectedQuestion.question_type === "fill_in_the_blanks"
                                 ? sumBlankPoints(
@@ -881,14 +1108,18 @@ export default function ExerciseDraftBuilder({
                                 });
                               }
                             }}
-                            className={`mt-1 w-full rounded-lg border border-slate-300 p-2 ${
+                            className={`mt-1 w-full rounded-lg border p-2 ${
+                              readError(`questions.${selectedQuestionIndex}.points`)
+                                ? "border-rose-400"
+                                : "border-slate-300"
+                            } ${
                               selectedQuestion.question_type === "fill_in_the_blanks"
                                 ? "cursor-not-allowed bg-slate-100 text-slate-600"
                                 : "bg-white"
                             }`}
                           />
                           {readError(`questions.${selectedQuestionIndex}.points`) && (
-                            <span role="alert" className="mt-1 block text-rose-700">
+                            <span id={`field-error-question-${selectedQuestionIndex}-points`} role="alert" className="mt-1 block text-rose-700">
                               {readError(`questions.${selectedQuestionIndex}.points`)}
                             </span>
                           )}
@@ -904,6 +1135,8 @@ export default function ExerciseDraftBuilder({
                               }
                               rows={2}
                               aria-invalid={Boolean(readError(`questions.${selectedQuestionIndex}.prompt`))}
+                              aria-describedby={readError(`questions.${selectedQuestionIndex}.prompt`) ? `field-error-question-${selectedQuestionIndex}-prompt` : undefined}
+                              data-field-path={`questions.${selectedQuestionIndex}.prompt`}
                               className={`mt-1 w-full rounded-lg border bg-white p-2 ${
                                 readError(`questions.${selectedQuestionIndex}.prompt`)
                                   ? "border-rose-400"
@@ -911,7 +1144,7 @@ export default function ExerciseDraftBuilder({
                               }`}
                             />
                             {readError(`questions.${selectedQuestionIndex}.prompt`) && (
-                              <span role="alert" className="mt-1 block text-rose-700">
+                              <span id={`field-error-question-${selectedQuestionIndex}-prompt`} role="alert" className="mt-1 block text-rose-700">
                                 {readError(`questions.${selectedQuestionIndex}.prompt`)}
                               </span>
                             )}
@@ -1031,6 +1264,7 @@ export default function ExerciseDraftBuilder({
                 )}
                 <button
                   type="button"
+                  ref={previewButtonRef}
                   disabled={!draft.questions.length}
                   onClick={() => {
                     setPreviewSession((k) => k + 1);
@@ -1082,7 +1316,10 @@ export default function ExerciseDraftBuilder({
         <ExercisePreview
           key={`preview-${draft.id}-${previewSession}`}
           draft={draft}
-          onClose={() => setIsPreviewOpen(false)}
+          onClose={() => {
+            setIsPreviewOpen(false);
+            window.requestAnimationFrame(() => previewButtonRef.current?.focus());
+          }}
         />
       )}
     </section>

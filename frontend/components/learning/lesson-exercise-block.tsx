@@ -24,6 +24,9 @@ import {
   isQuestionAnswered,
   toAttemptAnswerPayload,
 } from "@/lib/exercise-authoring.mjs";
+import QuestionResponseRenderer, {
+  type QuestionResponseValue,
+} from "./question-response-renderer";
 
 type AnswerValue = number | number[] | string | Record<string, string> | null;
 
@@ -266,6 +269,7 @@ export default function LessonExerciseBlock({
     try {
       const newAttempt = await startExerciseAttempt(params, exerciseId);
       setActiveAttempt(newAttempt);
+      setCurrentQuestionIndex(0);
       const initialAnswers = answersFromAttempt(newAttempt.questions);
       latestAnswersRef.current = initialAnswers;
       setSelectedAnswers(initialAnswers);
@@ -348,6 +352,33 @@ export default function LessonExerciseBlock({
     }
     if (!activeAttempt || activeAttempt.status !== "in_progress") return;
     const updated = update(selectedAnswers);
+    latestAnswersRef.current = updated;
+    setSelectedAnswers(updated);
+    setSaveSuccessMessage(null);
+  };
+
+  const handleStudentResponseChange = (
+    question: AttemptQuestion,
+    value: QuestionResponseValue
+  ) => {
+    if (!activeAttempt || activeAttempt.status !== "in_progress") return;
+
+    let answer: AnswerValue;
+    if (question.question_type === "fill_in_the_blanks") {
+      answer = typeof value === "object" && value !== null && !Array.isArray(value)
+        ? value
+        : {};
+    } else if (question.question_type === "short_answer") {
+      answer = typeof value === "string" ? value : "";
+    } else if (question.question_type === "multiple_select") {
+      answer = Array.isArray(value)
+        ? value.filter((optionId): optionId is number => typeof optionId === "number")
+        : [];
+    } else {
+      answer = typeof value === "number" ? value : null;
+    }
+
+    const updated = { ...selectedAnswers, [question.id]: answer };
     latestAnswersRef.current = updated;
     setSelectedAnswers(updated);
     setSaveSuccessMessage(null);
@@ -772,14 +803,14 @@ export default function LessonExerciseBlock({
         </div>
 
         <div className="mt-5 space-y-5">
-          {activeAttempt.questions.map((question, questionIndex) => {
+          {activeAttempt.questions.slice(currentQuestionIndex, currentQuestionIndex + 1).map((question) => {
+            const questionIndex = currentQuestionIndex;
             const completionStatus = getQuestionCompletionStatus(question, selectedAnswers[question.id]);
             return (
             <div
               key={question.id}
               id={`attempt-question-${question.id}`}
-              aria-labelledby={`attempt-question-title-${question.id}`}
-              onFocusCapture={() => setCurrentQuestionIndex(questionIndex)}
+              aria-labelledby={`exercise-${exercise.id}-q-${question.id}-prompt`}
               className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 sm:p-5"
             >
               <div className="flex items-center justify-between gap-2">
@@ -799,99 +830,20 @@ export default function LessonExerciseBlock({
                 )}
               </div>
 
-              {question.question_type === "fill_in_the_blanks" ? (
-                <div
-                  id={`attempt-question-title-${question.id}`}
-                  className="mt-2 leading-relaxed text-sm font-semibold text-[#102b4c]"
-                >
-                  {(() => {
-                    let blankCounter = 0;
-                    return question.prompt.split(/(\[[a-zA-Z0-9_\-]+\])/g).map((part, pIdx) => {
-                      const match = part.match(/^\[([a-zA-Z0-9_\-]+)\]$/);
-                      if (match) {
-                        blankCounter += 1;
-                        const blankId = match[1];
-                        const blankValues = (typeof selectedAnswers[question.id] === "object" && selectedAnswers[question.id] !== null
-                          ? selectedAnswers[question.id]
-                          : {}) as Record<string, string>;
-                        const isBlankEmpty = !(blankValues[blankId] ?? "").trim();
-                        return (
-                          <input
-                            key={`attempt-blank-${blankId}-${pIdx}`}
-                            id={`exercise-${exercise.id}-q-${question.id}-blank-${blankId}`}
-                            type="text"
-                            data-blank-id={blankId}
-                            aria-label={`Question ${questionIndex + 1}, Blank ${blankCounter}`}
-                            aria-describedby={`fitb-guide-${question.id}`}
-                            aria-invalid={completionStatus === "partial" && isBlankEmpty ? "true" : undefined}
-                            maxLength={5000}
-                            value={blankValues[blankId] ?? ""}
-                            disabled={isSaving || isSubmitting}
-                            onChange={(e) => handleBlankAnswer(question.id, blankId, e.target.value)}
-                            className={`mx-1.5 inline-block w-28 sm:w-36 max-w-full rounded-lg border bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:outline-none focus:ring-2 focus:ring-[#0e8988]/40 ${
-                              completionStatus === "partial" && isBlankEmpty
-                                ? "border-amber-400"
-                                : "border-[#0e8988]/60"
-                            }`}
-                          />
-                        );
-                      }
-                      return <span key={pIdx}>{part}</span>;
-                    });
-                  })()}
-                  <p id={`fitb-guide-${question.id}`} className="mt-2 text-[11px] font-normal text-slate-500">
-                    {completionStatus === "partial"
-                      ? "Some blanks are still empty. Fill in all blanks to complete this question."
-                      : "Fill in each blank field."}
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <p id={`attempt-question-title-${question.id}`} className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
-                    {question.prompt}
-                  </p>
-                  {question.question_type === "short_answer" ? (
-                <label className="mt-4 block text-xs font-semibold text-slate-700">
-                  Your answer
-                  <input
-                    type="text"
-                    maxLength={5000}
-                    value={typeof selectedAnswers[question.id] === "string" ? selectedAnswers[question.id] as string : ""}
-                    onChange={(event) => handleSelectTextAnswer(question.id, event.target.value)}
-                    aria-describedby={`answer-guide-${question.id}`}
-                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white p-3 text-sm"
-                  />
-                  <span id={`answer-guide-${question.id}`} className="mt-1 block text-[11px] font-normal text-slate-500">Enter a short answer. Matching follows the teacher&apos;s configured rules.</span>
-                </label>
-              ) : (
-                <fieldset className="mt-4 space-y-2" role={question.question_type === "multiple_select" ? "group" : "radiogroup"} aria-label={question.question_type === "multiple_select" ? `Question ${questionIndex + 1} answers, select all that apply` : `Question ${questionIndex + 1} answers`}>
-                  {question.question_type === "multiple_select" && <legend className="mb-2 text-xs font-semibold text-slate-600">Select all that apply.</legend>}
-                  {question.options.map((option) => {
-                    const answer = selectedAnswers[question.id];
-                    const isSelected = question.question_type === "multiple_select"
-                      ? Array.isArray(answer) && answer.includes(option.id)
-                      : answer === option.id;
-
-                    return (
-                      <label key={option.id} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3.5 text-xs transition ${isSelected ? "border-[#0e8988] bg-teal-50/40 font-bold text-[#102b4c]" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"}`}>
-                        <input
-                          type={question.question_type === "multiple_select" ? "checkbox" : "radio"}
-                          name={`answer-${question.id}`}
-                          value={option.id}
-                          data-option-id={option.id}
-                          checked={isSelected}
-                          disabled={isSaving || isSubmitting}
-                          onChange={() => handleSelectOption(question.id, option.id, question.question_type)}
-                          className="h-4 w-4 accent-[#0e8988]"
-                        />
-                        <span>{option.option_text}</span>
-                      </label>
-                    );
-                  })}
-                </fieldset>
-                  )}
-                </>
-              )}
+              <QuestionResponseRenderer
+                questionType={question.question_type}
+                prompt={question.prompt}
+                options={question.options.map((option) => ({
+                  id: option.id,
+                  option_text: option.option_text,
+                }))}
+                value={selectedAnswers[question.id] ?? null}
+                onChange={(value) => handleStudentResponseChange(question, value)}
+                questionNumber={questionIndex + 1}
+                idPrefix={`exercise-${exercise.id}-q-${question.id}`}
+                disabled={isSaving || isSubmitting}
+                incomplete={completionStatus === "partial"}
+              />
             </div>
             );
           })}

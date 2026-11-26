@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const FIXTURE_PHP = path.join(REPO_ROOT, "backend/tests/fixtures/E2EFixtureManager.php");
 
-const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:3000";
+const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const API_URL = process.env.API_URL || "http://127.0.0.1:8000";
 
 async function getAdminExercises(page, fixture) {
@@ -26,7 +26,7 @@ async function getAdminExercises(page, fixture) {
     const json = await response.json();
     return { status: response.status, exercises: json.data ?? json };
   }, {
-    apiUrl: API_URL,
+    apiUrl: BASE_URL,
     centerSlug: fixture.centerSlug,
     courseSlug: fixture.courseSlug,
     lessonId: fixture.lessonId,
@@ -80,12 +80,32 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await activeCard(builder).getByRole("button", { name: "Remove option 3", exact: true }).click();
   assert.equal(await activeCard(builder).getByLabel("Question 1 option 3").count(), 0, "Draft builder removes an unused option.");
 
+  await activeCard(builder).getByLabel("Question type").selectOption("short_answer");
+  await activeCard(builder).locator('input[aria-label="Accepted answer 1"]').fill("hello");
+  await activeCard(builder).getByLabel("Case sensitive").check();
+  await activeCard(builder).getByLabel("Question type").selectOption("single_choice");
+  assert.equal(await activeCard(builder).getByLabel("Question 1 option 1").inputValue(), "Salut", "Switching back restores the original single-choice options.");
+  assert.equal(await activeCard(builder).getByLabel("Question 1 option 2").inputValue(), "Au revoir", "Switching back preserves option order and text.");
+  assert.equal(await activeCard(builder).getByLabel("Mark option 2 correct").isChecked(), true, "Switching back preserves the correct option.");
+  await activeCard(builder).getByLabel("Question type").selectOption("short_answer");
+  assert.equal(await activeCard(builder).locator('input[aria-label="Accepted answer 1"]').inputValue(), "hello", "Short-answer settings are retained across type switches.");
+  assert.equal(await activeCard(builder).getByLabel("Case sensitive").isChecked(), true, "Short-answer normalization settings are retained across type switches.");
+  await activeCard(builder).getByLabel("Question type").selectOption("single_choice");
+
   // Q2: True / False
   await selectQuestion(builder, 1);
   await activeCard(builder).getByLabel("Prompt").fill(prompts[1]);
   await activeCard(builder).getByLabel("Question type").selectOption("multiple_select");
+  await activeCard(builder).getByLabel("Question 2 option 1").fill("Yes");
+  await activeCard(builder).getByLabel("Question 2 option 2").fill("No");
+  await activeCard(builder).getByLabel("Question 2 option 3").fill("Maybe");
   await activeCard(builder).getByLabel("Question type").selectOption("true_false");
-  await activeCard(builder).getByLabel("Mark option 1 correct").check();
+  await activeCard(builder).getByLabel("Mark True correct").check();
+  await activeCard(builder).getByLabel("Question type").selectOption("multiple_select");
+  assert.equal(await activeCard(builder).getByLabel("Question 2 option 1").inputValue(), "Yes", "Multiple-select option text is restored after switching types.");
+  assert.equal(await activeCard(builder).getByLabel("Mark option 2 correct").isChecked(), true, "Multiple-select correct answers are restored after switching types.");
+  await activeCard(builder).getByLabel("Question type").selectOption("true_false");
+  assert.equal(await activeCard(builder).getByLabel("Mark True correct").isChecked(), true, "True/False configuration is restored after switching back.");
 
   // Q3: Multiple Select
   await selectQuestion(builder, 2);
@@ -116,6 +136,22 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
     "2",
     "FITB question total points automatically equals sum of blank points (2)."
   );
+  await activeCard(builder).getByLabel("Question type").selectOption("short_answer");
+  await activeCard(builder).getByLabel("Question type").selectOption("fill_in_the_blanks");
+  assert.equal(await activeCard(builder).locator('input[aria-label="Blank 1 accepted answer 1"]').inputValue(), "am", "FITB accepted answers survive changing question type.");
+  assert.equal(await activeCard(builder).locator('input[aria-label="Blank 2 accepted answer 1"]').inputValue(), "is", "All FITB blanks return after changing question type.");
+
+  await selectQuestion(builder, 4);
+  await activeCard(builder).getByRole("button", { name: "Duplicate", exact: true }).click();
+  assert.equal(await questionNavItems.count(), 6, "Duplicating a question adds a distinct draft question.");
+  assert.equal(await activeCard(builder).locator('input[aria-label="Blank 1 accepted answer 1"]').inputValue(), "am", "Duplicating a FITB question copies its blank configuration.");
+  await activeCard(builder).getByRole("button", { name: "Delete", exact: true }).click();
+  assert.equal(await questionNavItems.count(), 5, "Deleting the duplicate removes it from the draft.");
+  await selectQuestion(builder, 4);
+  await activeCard(builder).getByRole("button", { name: "Move up", exact: true }).click();
+  assert.ok((await activeCard(builder).locator("legend").innerText()).includes("Question 4"), "Moving a question updates its order.");
+  await activeCard(builder).getByRole("button", { name: "Move down", exact: true }).click();
+  assert.ok((await activeCard(builder).locator("legend").innerText()).includes("Question 5"), "Moving the question back restores the intended order.");
 
   // Switch away from Q4 then trigger Publish -> must reject and auto-select Q4
   let prematurePublishRequests = 0;
@@ -127,7 +163,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   page.on("request", onPrematurePublish);
   await builder.getByRole("button", { name: "Publish", exact: true }).click();
   await builder.getByRole("alert").filter({ hasText: "Review the marked fields before publishing." }).waitFor({ timeout: 5000 });
-  await builder.getByRole("alert").filter({ hasText: "Add at least one accepted answer." }).waitFor({ timeout: 5000 });
+  await builder.getByText("Add at least one accepted answer.", { exact: true }).waitFor({ timeout: 5000 });
   await page.waitForTimeout(100);
   page.off("request", onPrematurePublish);
   assert.equal(prematurePublishRequests, 0, "Invalid exercise configuration is rejected before publishing.");
@@ -141,11 +177,26 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
 
   await builder.getByLabel("Show correct answers and explanations after submission").check();
 
-  const exerciseUrl = `${API_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises/${exerciseId}`;
+  const exerciseUrl = `${BASE_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises/${exerciseId}`;
+  const exerciseListUrl = `${BASE_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises`;
   const exercisePath = new URL(exerciseUrl).pathname;
+  intentionalFailures.add(`422:${exercisePath}`);
   intentionalFailures.add(`500:${exercisePath}`);
+  let failedValidationInjected = false;
   let failedSaveInjected = false;
   await page.route(exerciseUrl, async (route) => {
+    if (route.request().method() === "PATCH" && !failedValidationInjected) {
+      failedValidationInjected = true;
+      await route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({
+          message: "Injected server-side validation error.",
+          errors: { title: ["Server rejected the exercise title."] },
+        }),
+      });
+      return;
+    }
     if (route.request().method() === "PATCH" && !failedSaveInjected) {
       failedSaveInjected = true;
       await route.fulfill({
@@ -157,6 +208,20 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
     }
     await route.continue();
   });
+
+  const serverValidationPromise = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
+  { timeout: 15000 });
+  await builder.getByRole("button", { name: "Save Draft", exact: true }).click();
+  const serverValidationResponse = await serverValidationPromise;
+  assert.equal(serverValidationResponse.status(), 422, "Injected Laravel validation response is received.");
+  const serverErrorLink = builder.getByRole("button", { name: /title: Server rejected the exercise title\./ });
+  await serverErrorLink.waitFor({ state: "visible", timeout: 5000 });
+  assert.equal(await builder.getByLabel("Exercise title").getAttribute("aria-invalid"), "true", "Server validation errors mark fields invalid even when local validation passes.");
+  await serverErrorLink.click();
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-field-path") === "title", { timeout: 5000 });
+  assert.equal(await builder.getByLabel("Exercise title").evaluate((element) => element === document.activeElement), true, "Clicking a server error summary entry focuses its field.");
+  await builder.getByLabel("Exercise title").fill(title);
 
   const failedSavePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
@@ -172,9 +237,28 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   const initialSavePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
   { timeout: 15000 });
+  intentionalFailures.add(`500:${new URL(exerciseListUrl).pathname}`);
+  let failedListRefreshInjected = false;
+  await page.route(exerciseListUrl, async (route) => {
+    if (route.request().method() === "GET" && !failedListRefreshInjected) {
+      failedListRefreshInjected = true;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "Injected one-time E2E list refresh failure." }),
+      });
+      return;
+    }
+    await route.continue();
+  });
   await builder.getByRole("button", { name: "Save Draft", exact: true }).click();
   const initialSaveResponse = await initialSavePromise;
-  assert.equal(initialSaveResponse.status(), 200, "Exercise draft saves after retry.");
+  const initialSaveBody = await initialSaveResponse.text();
+  assert.equal(initialSaveResponse.status(), 200, `Exercise draft saves after retry. Response: ${initialSaveBody}`);
+  await builder.getByRole("status").filter({ hasText: /^Saved$/ }).waitFor({ timeout: 5000 });
+  await builder.getByRole("status").filter({ hasText: "Exercise saved successfully, but the exercise list could not refresh." }).waitFor({ timeout: 5000 });
+  assert.equal(await builder.getByRole("alert").filter({ hasText: "Could not save" }).count(), 0, "A list refresh failure does not report that the successful save failed.");
+  await page.unroute(exerciseListUrl);
 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Exercise Drafts", exact: true }).click();
@@ -210,7 +294,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await selectQuestion(reopenedBuilder, 1);
   await activeCard(reopenedBuilder).getByLabel("Question type").selectOption("multiple_select");
   await activeCard(reopenedBuilder).getByLabel("Question type").selectOption("true_false");
-  await activeCard(reopenedBuilder).getByLabel("Mark option 1 correct").check();
+  await activeCard(reopenedBuilder).getByLabel("Mark True correct").check();
   await selectQuestion(reopenedBuilder, 2);
   await activeCard(reopenedBuilder).getByRole("button", { name: "+ Add option", exact: true }).click();
   await activeCard(reopenedBuilder).getByLabel("Question 3 option 4").fill("Temporary option");
@@ -234,14 +318,41 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   assert.equal(after.questions[0].options[0].is_correct, true, "Correct-answer edits persist.");
   assert.deepEqual(after.questions[3].answer_config.accepted_answers, ["Bonjour", "salut"], "Accepted-answer edits persist.");
 
-  await reopenedBuilder.getByRole("button", { name: "Preview", exact: true }).click();
+  const previewButton = reopenedBuilder.getByRole("button", { name: "Preview", exact: true });
+  let previewAttemptRequests = 0;
+  const onPreviewAttemptRequest = (request) => {
+    if (new URL(request.url()).pathname.includes("/attempts")) previewAttemptRequests += 1;
+  };
+  page.on("request", onPreviewAttemptRequest);
+  await previewButton.click();
   const preview = page.getByRole("dialog");
   await preview.waitFor({ state: "visible" });
-  const previewText = await preview.innerText();
-  assert.ok(previewText.includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
-  for (const prompt of prompts.slice(0, 4)) assert.ok(previewText.includes(prompt), `Preview includes: ${prompt}`);
-  assert.ok(previewText.includes("learning English because it"), "Preview includes FITB inline prompt.");
-  await preview.getByRole("button", { name: "Close", exact: true }).click();
+  assert.ok((await preview.innerText()).includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
+  assert.ok((await preview.innerText()).includes("Question 1 of 5"), "Preview shows one question and its position.");
+  assert.equal(await preview.getByRole("button", { name: "Close", exact: true }).evaluate((element) => element === document.activeElement), true, "Preview focuses its Close button when opened.");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await preview.getByRole("button", { name: "Next question", exact: true }).evaluate((element) => element === document.activeElement), true, "Preview keeps keyboard focus inside the dialog.");
+  await page.keyboard.press("Tab");
+  assert.equal(await preview.getByRole("button", { name: "Close", exact: true }).evaluate((element) => element === document.activeElement), true, "Preview wraps keyboard focus at the end of the dialog.");
+
+  await preview.getByLabel("Question 1, option 1: Salut").check();
+  await preview.getByRole("button", { name: "Next question", exact: true }).click();
+  assert.ok((await preview.innerText()).includes(prompts[1]), "Preview navigates to the True/False question.");
+  await preview.getByLabel("Question 2, option 1: True").check();
+  await preview.getByRole("button", { name: "Next question", exact: true }).click();
+  assert.ok((await preview.innerText()).includes(prompts[2]), "Preview navigates to the Multiple Select question.");
+  await preview.getByLabel("Question 3, option 1: Green").check();
+  await preview.getByRole("button", { name: "Next question", exact: true }).click();
+  assert.ok((await preview.innerText()).includes(prompts[3]), "Preview navigates to the Short Answer question.");
+  await preview.getByLabel("Your answer").fill("bonjour");
+  await preview.getByRole("button", { name: "Next question", exact: true }).click();
+  assert.ok((await preview.innerText()).includes("learning English because it"), "Preview includes the Fill in the Blanks inline prompt.");
+  await preview.getByLabel("Question 5, blank 1").fill("am");
+  await page.keyboard.press("Escape");
+  await preview.waitFor({ state: "detached" });
+  assert.equal(await previewButton.evaluate((element) => element === document.activeElement), true, "Closing preview restores focus to the Preview button.");
+  page.off("request", onPreviewAttemptRequest);
+  assert.equal(previewAttemptRequests, 0, "Admin preview does not create or save a student attempt.");
 
   const finalSavePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",
@@ -250,10 +361,28 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
     const url = new URL(response.url());
     return url.pathname.endsWith(`/exercises/${exerciseId}/publish`) && response.request().method() === "POST";
   }, { timeout: 15000 });
+  intentionalFailures.add(`500:${new URL(exerciseListUrl).pathname}`);
+  let failedPublishRefreshInjected = false;
+  await page.route(exerciseListUrl, async (route) => {
+    if (route.request().method() === "GET" && !failedPublishRefreshInjected) {
+      failedPublishRefreshInjected = true;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "Injected one-time E2E publish refresh failure." }),
+      });
+      return;
+    }
+    await route.continue();
+  });
   await reopenedBuilder.getByRole("button", { name: "Publish", exact: true }).click();
   const [finalSaveResponse, publishResponse] = await Promise.all([finalSavePromise, publishPromise]);
   assert.equal(finalSaveResponse.status(), 200, "Publish saves the latest exercise draft first.");
   assert.equal(publishResponse.status(), 200, "Valid exercise publishes successfully.");
+  await reopenedBuilder.getByRole("button", { name: "Insert into lesson", exact: true }).waitFor({ timeout: 5000 });
+  await reopenedBuilder.getByRole("status").filter({ hasText: "Exercise published successfully, but the exercise list could not refresh." }).waitFor({ timeout: 5000 });
+  assert.equal(await reopenedBuilder.getByRole("alert").filter({ hasText: "publishing failed" }).count(), 0, "A list refresh failure does not report that successful publication failed.");
+  await page.unroute(exerciseListUrl);
 
   const publishedResponse = await getAdminExercises(page, fixture);
   const published = publishedResponse.exercises.find((row) => row.id === exerciseId);
@@ -439,6 +568,34 @@ async function main() {
     });
 
     await adminPage.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
+
+    const csrfProbe = await adminPage.evaluate(async () => {
+      const response = await fetch("/api/auth/csrf-cookie", {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      const xsrfCookie = document.cookie
+        .split("; ")
+        .find((cookie) => cookie.startsWith("XSRF-TOKEN="));
+      return { status: response.status, xsrfCookie: Boolean(xsrfCookie) };
+    });
+    assert.ok([200, 204].includes(csrfProbe.status), "Same-origin CSRF endpoint responds successfully through the Next.js proxy.");
+    assert.equal(csrfProbe.xsrfCookie, true, "The proxied CSRF response stores the readable XSRF cookie.");
+
+    await adminPage.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Mock Google sign-in</title>" })
+    );
+    const googleRedirectPromise = adminPage.waitForResponse((response) =>
+      new URL(response.url()).pathname === "/api/auth/google/redirect" && response.request().method() === "GET",
+      { timeout: 15000 }
+    );
+    await adminPage.getByRole("button", { name: "Sign in with Google" }).click();
+    const googleRedirectResponse = await googleRedirectPromise;
+    assert.ok([301, 302, 303, 307, 308].includes(googleRedirectResponse.status()), "Google auth endpoint returns a redirect.");
+    const googleLocation = googleRedirectResponse.headers().location;
+    assert.ok(googleLocation && new URL(googleLocation).hostname === "accounts.google.com", "Google auth redirect targets Google's OAuth host.");
+    await adminPage.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
+
     await adminPage.fill('input[name="email"]', fixture.adminEmail);
     await adminPage.fill('input[name="password"]', fixture.adminPassword);
 
@@ -465,6 +622,14 @@ async function main() {
       200,
       `Login failed: HTTP ${loginResponse.status()}\n${loginBody}`
     );
+    assert.ok(loginResponse.request().headers()["x-xsrf-token"], "Login sends the stored CSRF token through the same-origin proxy.");
+
+    const authenticatedMe = await adminPage.evaluate(async () => {
+      const response = await fetch("/api/auth/me", { credentials: "include", headers: { Accept: "application/json" } });
+      return { status: response.status, body: await response.json() };
+    });
+    assert.equal(authenticatedMe.status, 200, "Authenticated /api/auth/me succeeds through the proxy.");
+    assert.equal((authenticatedMe.body.user ?? authenticatedMe.body).email, fixture.adminEmail, "Authenticated /me returns the logged-in admin.");
 
     await adminPage.waitForURL(
       (url) => url.pathname === "/admin/users",
@@ -723,30 +888,10 @@ async function main() {
     console.log("✓ Google Drive asset created, safely previewed, and inserted into the draft.");
 
     // -----------------------------------------------------------------------
-    // ASSERTION 9: Adding an Exercise Block
+    // ASSERTION 9: Open the dedicated Exercise Draft Builder
     // -----------------------------------------------------------------------
-    console.log("\n[Assertion 9] Adding Assessment Exercise Block...");
-    const addExerciseBtn = adminPage.locator('button:has-text("+ Add Exercise")');
-    await addExerciseBtn.click();
-    await adminPage.waitForSelector('h3:has-text("Add Assessment Exercise")', { timeout: 5000 });
-
-    const exerciseSelect = adminPage.locator('select').filter({ hasText: 'Choose an exercise' });
-    await exerciseSelect.waitFor({ state: "visible" });
-    await exerciseSelect.selectOption(String(fixture.exerciseId));
-
-    const attachExerciseBtn = adminPage.locator('button:has-text("Insert Exercise Block")');
-    await attachExerciseBtn.waitFor({ state: "visible" });
-    const saveExercisePromise = adminPage.waitForResponse(
-      (resp) => resp.url().includes("/blocks/exercise") && (resp.status() === 201 || resp.status() === 200)
-    );
-    await attachExerciseBtn.click();
-    const exerciseRes = await saveExercisePromise;
-    assert.ok(exerciseRes.status() === 201 || exerciseRes.status() === 200, "Exercise block API returned success");
-    await adminPage.getByText("E2E Assessment Quiz", { exact: true }).first().waitFor({
-      state: "visible",
-      timeout: 10000,
-    });
-    console.log("✓ Exercise block attached via API.");
+    console.log("\n[Assertion 9] Opening the dedicated Exercise Draft Builder...");
+    await adminPage.getByRole("button", { name: "Exercise Drafts", exact: true }).waitFor({ state: "visible", timeout: 10000 });
 
     
     // -----------------------------------------------------------------------
@@ -757,7 +902,7 @@ async function main() {
       "\n[Assertion 10] Testing Block Reordering in Timeline via Accessible UI..."
     );
     
-    console.log("\n[Assertion 9a] Admin exercise draft lifecycle and four question types...");
+    console.log("\n[Assertion 9a] Admin exercise draft lifecycle and all five question types...");
     authoredExercise = await verifyAdminExerciseDraftBuilder(
       adminPage,
       fixture,
@@ -801,7 +946,7 @@ async function main() {
         return payload.draft_revision;
       },
       {
-        apiUrl: API_URL,
+        apiUrl: BASE_URL,
         centerSlug: fixture.centerSlug,
         courseSlug: fixture.courseSlug,
         lessonId: fixture.lessonId,
@@ -977,7 +1122,7 @@ async function main() {
         return payload.draft_revision;
       },
       {
-        apiUrl: API_URL,
+        apiUrl: BASE_URL,
         centerSlug: fixture.centerSlug,
         courseSlug: fixture.courseSlug,
         lessonId: fixture.lessonId,
@@ -1108,6 +1253,29 @@ async function main() {
     await publishV2Btn.click();
     await publishV2Promise;
     console.log("✓ Final revision published for student access.");
+
+    const logoutResult = await adminPage.evaluate(async () => {
+      const xsrfCookie = document.cookie.split("; ").find((cookie) => cookie.startsWith("XSRF-TOKEN="));
+      const xsrfToken = xsrfCookie ? decodeURIComponent(xsrfCookie.slice("XSRF-TOKEN=".length)) : "";
+      const response = await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-XSRF-TOKEN": xsrfToken,
+        },
+        body: "{}",
+      });
+      const meResponse = await fetch("/api/auth/me", {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      return { logoutStatus: response.status, meStatus: meResponse.status };
+    });
+    assert.ok([200, 204].includes(logoutResult.logoutStatus), "Logout succeeds through the same-origin proxy.");
+    assert.ok([401, 403].includes(logoutResult.meStatus), "Authenticated /me rejects the session after logout.");
+    console.log("Logout and post-logout authentication rejection verified through the proxy.");
 
     await adminContext.close();
 
@@ -1269,7 +1437,7 @@ async function main() {
         base64: btoa(binary),
       };
     }, {
-      apiUrl: API_URL,
+      apiUrl: BASE_URL,
       centerSlug: fixture.centerSlug,
       courseSlug: fixture.courseSlug,
       lessonId: fixture.lessonId,
@@ -1293,7 +1461,7 @@ async function main() {
       );
       return { status: res.status };
     }, {
-      apiUrl: API_URL,
+      apiUrl: BASE_URL,
       centerSlug: fixture.centerSlug,
       courseSlug: fixture.courseSlug,
       lessonId: fixture.lessonId,
@@ -1382,7 +1550,7 @@ async function main() {
     const q5 = authoredExercise.questions.find((q) => q.question_type === "fill_in_the_blanks");
     assert.ok(q5?.id, "Fill in the Blanks question found.");
 
-    // Select answers across all four question types while testing navigation:
+    // Select answers across all five question types while testing navigation:
     // Question 1: Single Choice ("Salut")
     const salutInput = authoredBlock.locator(`input[data-option-id="${salutOption.id}"]`);
     await salutInput.waitFor({ state: "visible", timeout: 10000 });
@@ -1507,25 +1675,21 @@ async function main() {
     const reloadedBlock = studentPage.locator("article").filter({ hasText: authoredExercise.title });
     await reloadedBlock.waitFor({ state: "visible", timeout: 15000 });
 
-    await studentPage.waitForFunction(
-      ({ opt1, opt2, opt3a, opt3b }) => {
-        const el1 = document.querySelector(`input[data-option-id="${opt1}"]`);
-        const el2 = document.querySelector(`input[data-option-id="${opt2}"]`);
-        const el3a = document.querySelector(`input[data-option-id="${opt3a}"]`);
-        const el3b = document.querySelector(`input[data-option-id="${opt3b}"]`);
-        return el1?.checked === true && el2?.checked === true && el3a?.checked === true && el3b?.checked === true;
-      },
-      {
-        opt1: salutOption.id,
-        opt2: trueOption.id,
-        opt3a: greenOption.id,
-        opt3b: orangeOption.id,
-      },
-      { timeout: 15000 }
-    );
-
+    const restoredQ1Input = reloadedBlock.locator(`input[data-option-id="${salutOption.id}"]`);
+    await restoredQ1Input.waitFor({ state: "visible", timeout: 10000 });
+    assert.equal(await restoredQ1Input.isChecked(), true, "Single-choice answer restores after reload.");
+    await reloadedBlock.getByRole("button", { name: "Next question" }).click();
+    const restoredQ2Input = reloadedBlock.locator(`input[data-option-id="${trueOption.id}"]`);
+    assert.equal(await restoredQ2Input.isChecked(), true, "True/False answer restores after reload.");
+    await reloadedBlock.getByRole("button", { name: "Next question" }).click();
+    const restoredQ3Green = reloadedBlock.locator(`input[data-option-id="${greenOption.id}"]`);
+    const restoredQ3Orange = reloadedBlock.locator(`input[data-option-id="${orangeOption.id}"]`);
+    assert.equal(await restoredQ3Green.isChecked(), true, "Multiple-select answer 1 restores after reload.");
+    assert.equal(await restoredQ3Orange.isChecked(), true, "Multiple-select answer 2 restores after reload.");
+    await reloadedBlock.getByRole("button", { name: "Next question" }).click();
     const reloadedTextInput = reloadedBlock.locator(`#attempt-question-${q4.id}`).locator('input[type="text"]');
     assert.equal(await reloadedTextInput.inputValue(), "BONJOUR", "Text answer BONJOUR restored from server after reload.");
+    await reloadedBlock.getByRole("button", { name: "Next question" }).click();
     const reloadedQ5Card = reloadedBlock.locator(`#attempt-question-${q5.id}`);
     assert.equal(await reloadedQ5Card.locator('input[data-blank-id="blank_1"]').inputValue(), "am", "FITB blank_1 restored after reload.");
     assert.equal(await reloadedQ5Card.locator('input[data-blank-id="blank_2"]').inputValue(), "is", "FITB blank_2 restored after reload.");
@@ -1552,8 +1716,8 @@ async function main() {
     assert.equal(submitResponse.status(), 200, "Assessment submission must return HTTP 200.");
     const submittedJson = await submitResponse.json();
     const submittedAttempt = submittedJson.data ?? submittedJson;
-    assert.equal(submittedAttempt.passed, true, "All four correct answers must pass the assessment.");
-    assert.equal(Number(submittedAttempt.percentage), 100, "All four correct answers must score 100%.");
+    assert.equal(submittedAttempt.passed, true, "All five correct answers must pass the assessment.");
+    assert.equal(Number(submittedAttempt.percentage), 100, "All five question types must score 100%.");
     console.log("✓ Attempt submitted and graded at 100% (Passed).");
 
     // Idempotent duplicate submission verification
@@ -1572,7 +1736,7 @@ async function main() {
         return { status: res.status, data };
       },
       {
-        apiUrl: API_URL,
+        apiUrl: BASE_URL,
         centerSlug: fixture.centerSlug,
         courseSlug: fixture.courseSlug,
         lessonId: fixture.lessonId,
@@ -1603,7 +1767,7 @@ async function main() {
         return { status: res.status };
       },
       {
-        apiUrl: API_URL,
+        apiUrl: BASE_URL,
         centerSlug: fixture.centerSlug,
         courseSlug: fixture.courseSlug,
         lessonId: fixture.lessonId,
@@ -1655,7 +1819,12 @@ async function main() {
     const retakeAttempt = (await retakeStartRes.json()).data ?? (await retakeStartRes.json());
     const retakeAttemptId = Number(retakeAttempt.id);
 
-    const partialQ5Card = studentPage.locator("article").filter({ hasText: authoredExercise.title }).locator(`#attempt-question-${q5.id}`);
+    const retakeBlock = studentPage.locator("article").filter({ hasText: authoredExercise.title });
+    for (let questionIndex = 0; questionIndex < 4; questionIndex += 1) {
+      await retakeBlock.getByRole("button", { name: "Next question" }).click();
+    }
+
+    const partialQ5Card = retakeBlock.locator(`#attempt-question-${q5.id}`);
     await partialQ5Card.locator('input[data-blank-id="blank_1"]').fill("am");
     await partialQ5Card.locator('input[data-blank-id="blank_2"]').fill("wrong");
 
@@ -1676,7 +1845,7 @@ async function main() {
     console.log("✓ Partial-credit FITB attempt verified (1 / 2 pts = 50% on FITB question).");
 
     console.log(
-      "✓ Assessment lifecycle fully verified across all 4 question types: Start, Privacy, Navigate, Save, Reload, Submit, Idempotency, Conflict-rejection, Result, and History."
+      "✓ Assessment lifecycle fully verified across all 5 question types: Start, Privacy, Navigate, Save, Reload, Submit, Idempotency, Conflict-rejection, Result, and History."
     );
     // -----------------------------------------------------------------------
     // ASSERTION 17: Administrative Controls are Inaccessible to Students
