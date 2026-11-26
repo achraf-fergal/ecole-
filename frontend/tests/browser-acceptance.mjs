@@ -51,10 +51,14 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   assert.ok(exerciseId > 0, "Created exercise draft has an ID.");
 
   await builder.getByLabel("Exercise title").fill(title);
-  const questionCards = builder.locator("fieldset.rounded-xl.border-slate-200");
+  const selectQuestion = async (root, idx) => {
+    await root.locator('nav[aria-label="Question list"] button').nth(idx).click();
+  };
+  const activeCard = (root) => root.locator("fieldset.rounded-xl.border-slate-200").first();
+  const questionNavItems = builder.locator('nav[aria-label="Question list"] button');
   const addQuestion = builder.getByRole("button", { name: "+ Add question", exact: true });
   for (let index = 0; index < 5; index += 1) await addQuestion.click();
-  assert.equal(await questionCards.count(), 5, "Draft builder adds five questions.");
+  assert.equal(await questionNavItems.count(), 5, "Draft builder adds five questions.");
 
   const prompts = [
     "Choose the greeting.",
@@ -63,34 +67,57 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
     "Translate hello into French.",
     "I [blank_1] learning English because it [blank_2] useful.",
   ];
-  for (let index = 0; index < prompts.length; index += 1) {
-    await questionCards.nth(index).getByLabel("Prompt").fill(prompts[index]);
-  }
 
-  await questionCards.nth(0).getByLabel("Question type").selectOption("single_choice");
-  await questionCards.nth(0).getByLabel("Question 1 option 1").fill("Salut");
-  await questionCards.nth(0).getByLabel("Question 1 option 2").fill("Au revoir");
-  await questionCards.nth(0).getByLabel("Mark option 2 correct").check();
-  await questionCards.nth(0).getByRole("button", { name: "+ Add option", exact: true }).click();
-  await questionCards.nth(0).getByLabel("Question 1 option 3").fill("Temporary option");
-  await questionCards.nth(0).getByRole("button", { name: "Remove option 3", exact: true }).click();
-  assert.equal(await questionCards.nth(0).getByLabel("Question 1 option 3").count(), 0, "Draft builder removes an unused option.");
+  // Q1: Single Choice
+  await selectQuestion(builder, 0);
+  await activeCard(builder).getByLabel("Question type").selectOption("single_choice");
+  await activeCard(builder).getByLabel("Prompt").fill(prompts[0]);
+  await activeCard(builder).getByLabel("Question 1 option 1").fill("Salut");
+  await activeCard(builder).getByLabel("Question 1 option 2").fill("Au revoir");
+  await activeCard(builder).getByLabel("Mark option 2 correct").check();
+  await activeCard(builder).getByRole("button", { name: "+ Add option", exact: true }).click();
+  await activeCard(builder).getByLabel("Question 1 option 3").fill("Temporary option");
+  await activeCard(builder).getByRole("button", { name: "Remove option 3", exact: true }).click();
+  assert.equal(await activeCard(builder).getByLabel("Question 1 option 3").count(), 0, "Draft builder removes an unused option.");
 
-  await questionCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
-  await questionCards.nth(1).getByLabel("Question type").selectOption("true_false");
-  await questionCards.nth(1).getByLabel("Mark option 1 correct").check();
+  // Q2: True / False
+  await selectQuestion(builder, 1);
+  await activeCard(builder).getByLabel("Prompt").fill(prompts[1]);
+  await activeCard(builder).getByLabel("Question type").selectOption("multiple_select");
+  await activeCard(builder).getByLabel("Question type").selectOption("true_false");
+  await activeCard(builder).getByLabel("Mark option 1 correct").check();
 
-  await questionCards.nth(2).getByLabel("Question type").selectOption("multiple_select");
-  await questionCards.nth(2).getByLabel("Question 3 option 1").fill("Green");
-  await questionCards.nth(2).getByLabel("Question 3 option 2").fill("Orange");
-  await questionCards.nth(2).getByLabel("Question 3 option 3").fill("White");
-  await questionCards.nth(2).getByLabel("Mark option 1 correct").check();
-  await questionCards.nth(2).getByLabel("Mark option 2 correct").check();
-  await questionCards.nth(2).getByLabel("Mark option 3 correct").uncheck();
+  // Q3: Multiple Select
+  await selectQuestion(builder, 2);
+  await activeCard(builder).getByLabel("Prompt").fill(prompts[2]);
+  await activeCard(builder).getByLabel("Question type").selectOption("multiple_select");
+  await activeCard(builder).getByLabel("Question 3 option 1").fill("Green");
+  await activeCard(builder).getByLabel("Question 3 option 2").fill("Orange");
+  await activeCard(builder).getByLabel("Question 3 option 3").fill("White");
+  await activeCard(builder).getByLabel("Mark option 1 correct").check();
+  await activeCard(builder).getByLabel("Mark option 2 correct").check();
+  await activeCard(builder).getByLabel("Mark option 3 correct").uncheck();
 
-  await questionCards.nth(3).getByLabel("Question type").selectOption("short_answer");
-  await questionCards.nth(3).getByLabel("Explanation (shown only when answer review is allowed)").fill("Bonjour means hello.");
+  // Q4: Short Answer (initially missing accepted answer to test validation jump)
+  await selectQuestion(builder, 3);
+  await activeCard(builder).getByLabel("Prompt").fill(prompts[3]);
+  await activeCard(builder).getByLabel("Question type").selectOption("short_answer");
+  await activeCard(builder).getByLabel("Explanation (shown only when answer review is allowed)").fill("Bonjour means hello.");
 
+  // Q5: Fill in the Blanks
+  await selectQuestion(builder, 4);
+  await activeCard(builder).getByLabel("Question type").selectOption("fill_in_the_blanks");
+  await activeCard(builder).getByLabel("Prompt").fill(prompts[4]);
+  await activeCard(builder).locator('input[aria-label="Blank 1 accepted answer 1"]').fill("am");
+  await activeCard(builder).getByRole("button", { name: "+ Add blank", exact: true }).click();
+  await activeCard(builder).locator('input[aria-label="Blank 2 accepted answer 1"]').fill("is");
+  assert.equal(
+    await activeCard(builder).getByLabel("Total points (from blanks)").inputValue(),
+    "2",
+    "FITB question total points automatically equals sum of blank points (2)."
+  );
+
+  // Switch away from Q4 then trigger Publish -> must reject and auto-select Q4
   let prematurePublishRequests = 0;
   const onPrematurePublish = (request) => {
     if (new URL(request.url()).pathname.endsWith(`/exercises/${exerciseId}/publish`)) {
@@ -108,21 +135,9 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   assert.equal(invalidDraft.status, 200);
   assert.equal(invalidDraft.exercises.find((row) => row.id === exerciseId)?.status, "draft", "Failed publish leaves the exercise as a draft.");
 
-  await questionCards.nth(3).locator('input[aria-label="Accepted answer 1"]').fill("bonjour");
-  await questionCards.nth(3).getByRole("button", { name: "+ Add accepted answer", exact: true }).click();
-  await questionCards.nth(3).locator('input[aria-label="Accepted answer 2"]').fill("salut");
-
-  // Question 5: Fill in the Blanks
-  await questionCards.nth(4).getByLabel("Question type").selectOption("fill_in_the_blanks");
-  await questionCards.nth(4).getByLabel("Prompt").fill(prompts[4]);
-  await questionCards.nth(4).locator('input[aria-label="Blank 1 accepted answer 1"]').fill("am");
-  await questionCards.nth(4).getByRole("button", { name: "+ Add blank", exact: true }).click();
-  await questionCards.nth(4).locator('input[aria-label="Blank 2 accepted answer 1"]').fill("is");
-  assert.equal(
-    await questionCards.nth(4).getByLabel("Total points (from blanks)").inputValue(),
-    "2",
-    "FITB question total points automatically equals sum of blank points (2)."
-  );
+  await activeCard(builder).locator('input[aria-label="Accepted answer 1"]').fill("bonjour");
+  await activeCard(builder).getByRole("button", { name: "+ Add accepted answer", exact: true }).click();
+  await activeCard(builder).locator('input[aria-label="Accepted answer 2"]').fill("salut");
 
   await builder.getByLabel("Show correct answers and explanations after submission").check();
 
@@ -151,7 +166,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   assert.equal(failedSaveResponse.status(), 500, "Injected transient exercise save fails as expected.");
   await builder.getByRole("alert").first().waitFor({ state: "visible", timeout: 5000 });
   assert.equal(await builder.getByLabel("Exercise title").inputValue(), title, "Failed save preserves the exercise title.");
-  assert.equal(await questionCards.nth(3).locator('input[aria-label="Accepted answer 1"]').inputValue(), "bonjour", "Failed save preserves accepted-answer edits.");
+  assert.equal(await activeCard(builder).locator('input[aria-label="Accepted answer 1"]').inputValue(), "bonjour", "Failed save preserves accepted-answer edits.");
   await page.unroute(exerciseUrl);
 
   const initialSavePromise = page.waitForResponse((response) =>
@@ -189,17 +204,20 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   const originalSingleOptionIds = before.questions[0].options.map((option) => Number(option.id));
   const originalMultipleOptionIds = before.questions[2].options.map((option) => Number(option.id));
 
-  const reopenedCards = reopenedBuilder.locator("fieldset.rounded-xl.border-slate-200");
-  await reopenedCards.nth(0).getByLabel("Question 1 option 2").fill("Goodbye");
-  await reopenedCards.nth(0).getByLabel("Mark option 1 correct").check();
-  await reopenedCards.nth(1).getByLabel("Question type").selectOption("multiple_select");
-  await reopenedCards.nth(1).getByLabel("Question type").selectOption("true_false");
-  await reopenedCards.nth(1).getByLabel("Mark option 1 correct").check();
-  await reopenedCards.nth(2).getByRole("button", { name: "+ Add option", exact: true }).click();
-  await reopenedCards.nth(2).getByLabel("Question 3 option 4").fill("Temporary option");
-  await reopenedCards.nth(2).getByRole("button", { name: "Remove option 4", exact: true }).click();
-  await reopenedCards.nth(3).locator('input[aria-label="Accepted answer 1"]').fill("Bonjour");
-  await reopenedCards.nth(3).locator('input[aria-label="Accepted answer 2"]').fill("salut");
+  await selectQuestion(reopenedBuilder, 0);
+  await activeCard(reopenedBuilder).getByLabel("Question 1 option 2").fill("Goodbye");
+  await activeCard(reopenedBuilder).getByLabel("Mark option 1 correct").check();
+  await selectQuestion(reopenedBuilder, 1);
+  await activeCard(reopenedBuilder).getByLabel("Question type").selectOption("multiple_select");
+  await activeCard(reopenedBuilder).getByLabel("Question type").selectOption("true_false");
+  await activeCard(reopenedBuilder).getByLabel("Mark option 1 correct").check();
+  await selectQuestion(reopenedBuilder, 2);
+  await activeCard(reopenedBuilder).getByRole("button", { name: "+ Add option", exact: true }).click();
+  await activeCard(reopenedBuilder).getByLabel("Question 3 option 4").fill("Temporary option");
+  await activeCard(reopenedBuilder).getByRole("button", { name: "Remove option 4", exact: true }).click();
+  await selectQuestion(reopenedBuilder, 3);
+  await activeCard(reopenedBuilder).locator('input[aria-label="Accepted answer 1"]').fill("Bonjour");
+  await activeCard(reopenedBuilder).locator('input[aria-label="Accepted answer 2"]').fill("salut");
 
   const editSavePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === exercisePath && response.request().method() === "PATCH",

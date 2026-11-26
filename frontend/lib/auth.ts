@@ -61,7 +61,8 @@ export function sanitizeRedirect(
  */
 function getApiBaseUrl(): string {
   if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    // Route browser requests through Next.js so they remain same-origin.
+    return "";
   }
 
   return process.env.LARAVEL_API_URL || "http://localhost:8000";

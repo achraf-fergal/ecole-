@@ -8,6 +8,10 @@ const remotePatterns: {
   pathname: string;
 }[] = [];
 
+const laravelApiUrl = (
+  process.env.LARAVEL_API_URL || "http://localhost:8000"
+).replace(/\/+$/, "");
+
 // Optional: allow images from the configured Laravel media host.
 if (process.env.MEDIA_BASE_URL) {
   const mediaUrl = new URL(process.env.MEDIA_BASE_URL);
@@ -33,6 +37,15 @@ if (process.env.MEDIA_BASE_URL) {
 }
 
 const nextConfig: NextConfig = {
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${laravelApiUrl}/api/:path*`,
+      },
+    ];
+  },
+
   images: {
     remotePatterns,
   },

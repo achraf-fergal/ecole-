@@ -6,7 +6,18 @@ export const DEFAULT_SHORT_ANSWER_NORMALIZATION = Object.freeze({
   diacritic_sensitive: true,
 });
 
-/** @param {string} type */
+let clientIdCounter = 0;
+
+/** @param {string} [prefix] */
+export function createClientId(prefix = "cid") {
+  clientIdCounter += 1;
+  if (typeof globalThis !== "undefined" && globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+    return `${prefix}_${globalThis.crypto.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now().toString(36)}_${clientIdCounter}`;
+}
+
+/** @param {"single_choice"|"true_false"|"multiple_select"|"short_answer"|"fill_in_the_blanks"} [type] */
 export function createQuestionDraft(type = "single_choice") {
   const question = {
     prompt: "",
@@ -311,4 +322,257 @@ export function toAttemptAnswerPayload(questionId, type, value) {
     question_id: questionId,
     selected_option_id: typeof value === "number" ? value : null,
   };
+}
+
+/**
+ * Convert a prompt text selection (or cursor position) into a FITB `[blank_id]` placeholder and blank definition.
+ * @param {string} prompt
+ * @param {number} selectionStart
+ * @param {number} selectionEnd
+ * @param {Array<{ id?: string }>} existingBlanks
+ */
+export function convertPromptSelectionToBlank(prompt, selectionStart, selectionEnd, existingBlanks = []) {
+  const source = String(prompt ?? "");
+  const start = Math.max(0, Math.min(selectionStart ?? source.length, source.length));
+  const end = Math.max(start, Math.min(selectionEnd ?? start, source.length));
+  const selectedText = source.slice(start, end).trim();
+  const blankId = generateUniqueBlankId(existingBlanks, source);
+  const placeholder = `[${blankId}]`;
+  const nextPrompt = source.slice(0, start) + placeholder + source.slice(end);
+  const blank = {
+    id: blankId,
+    points: 1,
+    accepted_answers: [selectedText || ""],
+    normalization: { ...DEFAULT_SHORT_ANSWER_NORMALIZATION },
+  };
+  return {
+    prompt: nextPrompt,
+    blank,
+    cursorPosition: start + placeholder.length,
+  };
+}
+
+/**
+ * Synchronize a blank ID rename inside the prompt text.
+ * @param {string} prompt
+ * @param {string} oldId
+ * @param {string} newId
+ */
+export function syncBlankIdRenameInPrompt(prompt, oldId, newId) {
+  const source = String(prompt ?? "");
+  if (!oldId || !newId || oldId === newId) return source;
+  return source.split(`[${oldId}]`).join(`[${newId}]`);
+}
+
+/**
+ * Remove a deleted blank's `[blank_id]` placeholder from the prompt text.
+ * @param {string} prompt
+ * @param {string} blankId
+ * @param {string} [fallbackText]
+ */
+export function removeBlankFromPrompt(prompt, blankId, fallbackText = "") {
+  const source = String(prompt ?? "");
+  if (!blankId) return source;
+  return source.split(`[${blankId}]`).join(fallbackText);
+}
+
+/**
+ * Validate a single question draft for publication readiness.
+ * @param {any} question
+ * @param {number} questionIndex
+ * @returns {Record<string, string>}
+ */
+export function validateQuestionDraft(question, questionIndex) {
+  /** @type {Record<string, string>} */
+  const errors = {};
+  const prefix = `questions.${questionIndex}`;
+
+  if (!String(question?.prompt ?? "").trim()) {
+    errors[`${prefix}.prompt`] = "Question prompt is required.";
+  }
+
+  if (question?.question_type === "fill_in_the_blanks") {
+    const blanks = Array.isArray(question?.answer_config?.blanks) ? question.answer_config.blanks : [];
+    if (blanks.length === 0) {
+      errors[`${prefix}.answer_config.blanks`] = "Add at least one blank.";
+    } else {
+      const seenIds = new Set();
+      blanks.forEach((/** @type {any} */ blank, /** @type {number} */ blankIndex) => {
+        const bPrefix = `${prefix}.answer_config.blanks.${blankIndex}`;
+        const id = typeof blank?.id === "string" ? blank.id.trim() : "";
+        if (!id) {
+          errors[`${bPrefix}.id`] = "Blank ID is required.";
+        } else if (!/^[a-zA-Z0-9_\-]+$/.test(id)) {
+          errors[`${bPrefix}.id`] = "Blank ID must contain only alphanumeric characters, underscores, and hyphens.";
+        } else if (seenIds.has(id)) {
+          errors[`${bPrefix}.id`] = `Blank ID '${id}' is duplicated.`;
+        } else {
+          seenIds.add(id);
+        }
+
+        if (blank?.points !== undefined && (!Number.isFinite(Number(blank.points)) || Number(blank.points) <= 0)) {
+          errors[`${bPrefix}.points`] = "Points must be greater than zero.";
+        }
+
+        const accepted = Array.isArray(blank?.accepted_answers) ? blank.accepted_answers : [];
+        if (!accepted.some((/** @type {any} */ a) => typeof a === "string" && a.trim() !== "")) {
+          errors[`${bPrefix}.accepted_answers`] = "Add at least one accepted answer.";
+        }
+        if (accepted.length > 20) {
+          errors[`${bPrefix}.accepted_answers`] = "A maximum of 20 accepted answers is allowed per blank.";
+        }
+        const duplicateAccepted = findDuplicateAcceptedAnswerIndexes(accepted, blank?.normalization ?? {});
+        if (duplicateAccepted.length > 0) {
+          errors[`${bPrefix}.accepted_answers`] = `Accepted answer ${duplicateAccepted[0] + 1} duplicates an earlier answer.`;
+        }
+        accepted.forEach((/** @type {any} */ ans, /** @type {number} */ aIdx) => {
+          if (typeof ans === "string" && ans.length > 500) {
+            errors[`${bPrefix}.accepted_answers.${aIdx}`] = "Accepted answers may not exceed 500 characters.";
+          }
+        });
+      });
+
+      const placeholderCheck = validateFitbPromptPlaceholders(question.prompt, blanks);
+      if (placeholderCheck.promptErrors.length > 0 && !errors[`${prefix}.prompt`]) {
+        errors[`${prefix}.prompt`] = placeholderCheck.promptErrors[0];
+      }
+      if (placeholderCheck.blanksErrors.length > 0 && !errors[`${prefix}.answer_config.blanks`]) {
+        errors[`${prefix}.answer_config.blanks`] = placeholderCheck.blanksErrors[0];
+      }
+      if (sumBlankPoints(blanks) <= 0) {
+        errors[`${prefix}.points`] = "Total blank points must be greater than zero.";
+      }
+    }
+    return errors;
+  }
+
+  if (!Number.isFinite(Number(question?.points)) || Number(question.points) <= 0) {
+    errors[`${prefix}.points`] = "Points must be greater than zero.";
+  }
+
+  if (question?.question_type === "short_answer") {
+    const accepted = Array.isArray(question?.answer_config?.accepted_answers)
+      ? question.answer_config.accepted_answers
+      : [];
+    const normalization = question?.answer_config?.normalization ?? {};
+    if (!accepted.some((/** @type {any} */ answer) => typeof answer === "string" && answer.trim() !== "")) {
+      errors[`${prefix}.answer_config.accepted_answers`] = "Add at least one accepted answer.";
+    }
+    const duplicateAccepted = findDuplicateAcceptedAnswerIndexes(accepted, normalization);
+    if (duplicateAccepted.length > 0) {
+      errors[`${prefix}.answer_config.accepted_answers`] = `Accepted answer ${duplicateAccepted[0] + 1} duplicates an earlier answer after normalization.`;
+    }
+    accepted.forEach((/** @type {any} */ answer, /** @type {number} */ answerIndex) => {
+      if (typeof answer === "string" && answer.length > 500) {
+        errors[`${prefix}.answer_config.accepted_answers.${answerIndex}`] = "Accepted answers may not exceed 500 characters.";
+      }
+    });
+    if (accepted.length > 20) {
+      errors[`${prefix}.answer_config.accepted_answers`] = "A maximum of 20 accepted answers is allowed.";
+    }
+    return errors;
+  }
+
+  const options = Array.isArray(question?.options) ? question.options : [];
+  options.forEach((/** @type {any} */ option, /** @type {number} */ optionIndex) => {
+    if (!String(option?.option_text ?? "").trim()) {
+      errors[`${prefix}.options.${optionIndex}.option_text`] = "Option text is required before publishing.";
+    }
+  });
+
+  const duplicateOptions = findDuplicateOptionIndexes(
+    options.map((/** @type {any} */ option) => String(option?.option_text ?? ""))
+  );
+  if (duplicateOptions.length > 0) {
+    errors[`${prefix}.options.${duplicateOptions[0]}.option_text`] = "This option duplicates another option in this question.";
+  }
+
+  const correctCount = options.filter((/** @type {any} */ option) => Boolean(option?.is_correct)).length;
+  if (question?.question_type === "single_choice" && (options.length < 2 || correctCount !== 1)) {
+    errors[`${prefix}.options`] = "Add at least two options and mark exactly one correct answer.";
+  } else if (question?.question_type === "true_false" && (options.length !== 2 || correctCount !== 1)) {
+    errors[`${prefix}.options`] = "True / False must have exactly two options and one correct answer.";
+  } else if (
+    question?.question_type === "multiple_select"
+    && (options.length < 3 || correctCount < 2 || correctCount >= options.length)
+  ) {
+    errors[`${prefix}.options`] = "Multiple select needs at least three options, two correct answers, and one incorrect answer.";
+  }
+
+  return errors;
+}
+
+/**
+ * Centralized validation for an entire exercise draft before publishing.
+ * @param {any} draft
+ */
+export function validateExerciseDraft(draft) {
+  /** @type {Record<string, string>} */
+  const errors = {};
+  /** @type {Record<number, Record<string, string>>} */
+  const questionErrors = {};
+  /** @type {Array<{ index: number, count: number }>} */
+  const incompleteQuestions = [];
+
+  if (!String(draft?.title ?? "").trim()) {
+    errors.title = "An exercise title is required.";
+  }
+  const passingScore = Number(draft?.passing_score);
+  if (!Number.isFinite(passingScore) || passingScore < 0 || passingScore > 100) {
+    errors.passing_score = "Passing score must be between 0 and 100.";
+  }
+  if (draft?.max_attempts !== null && draft?.max_attempts !== undefined && draft?.max_attempts !== "") {
+    const maxAttempts = Number(draft.max_attempts);
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      errors.max_attempts = "Maximum attempts must be at least 1 or unlimited.";
+    }
+  }
+
+  const questions = Array.isArray(draft?.questions) ? draft.questions : [];
+  if (questions.length === 0) {
+    errors.questions = "Add at least one question before publishing.";
+  }
+
+  /** @type {number | null} */
+  let firstInvalidQuestionIndex = null;
+
+  questions.forEach((/** @type {any} */ question, /** @type {number} */ index) => {
+    const qErrors = validateQuestionDraft(question, index);
+    const keys = Object.keys(qErrors);
+    if (keys.length > 0) {
+      questionErrors[index] = qErrors;
+      incompleteQuestions.push({ index, count: keys.length });
+      if (firstInvalidQuestionIndex === null) {
+        firstInvalidQuestionIndex = index;
+      }
+      Object.assign(errors, qErrors);
+    }
+  });
+
+  return {
+    valid: Object.keys(errors).length === 0,
+    errors,
+    questionErrors,
+    firstInvalidQuestionIndex,
+    incompleteQuestions,
+  };
+}
+
+/**
+ * Find the first question index referenced by a field error map.
+ * @param {Record<string, string>} errors
+ * @returns {number | null}
+ */
+export function extractFirstErrorQuestionIndex(errors) {
+  let minIndex = null;
+  for (const key of Object.keys(errors ?? {})) {
+    const match = /^questions\.(\d+)\./.exec(key);
+    if (match) {
+      const idx = Number(match[1]);
+      if (minIndex === null || idx < minIndex) {
+        minIndex = idx;
+      }
+    }
+  }
+  return minIndex;
 }

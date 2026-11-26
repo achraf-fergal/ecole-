@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   areAllBlanksAnswered,
+  convertPromptSelectionToBlank,
   createQuestionDraft,
+  extractFirstErrorQuestionIndex,
   findDuplicateAcceptedAnswerIndexes,
   findDuplicateOptionIndexes,
   generateUniqueBlankId,
@@ -11,8 +13,11 @@ import {
   isQuestionAnswered,
   normalizeOptionLabel,
   normalizeShortAnswer,
+  removeBlankFromPrompt,
   sumBlankPoints,
+  syncBlankIdRenameInPrompt,
   toAttemptAnswerPayload,
+  validateExerciseDraft,
   validateFitbPromptPlaceholders,
 } from "../lib/exercise-authoring.mjs";
 
@@ -120,4 +125,33 @@ test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, 
     validateFitbPromptPlaceholders("[blank_1] and [blank_1].", [{ id: "blank_1" }]).valid,
     false
   );
+});
+
+test("FITB inline blank conversion, rename sync, delete sync, and centralized draft validation", () => {
+  const converted = convertPromptSelectionToBlank("I love Paris very much.", 7, 12, []);
+  assert.equal(converted.prompt, "I love [blank_1] very much.");
+  assert.equal(converted.blank.id, "blank_1");
+  assert.deepEqual(converted.blank.accepted_answers, ["Paris"]);
+
+  const renamed = syncBlankIdRenameInPrompt(converted.prompt, "blank_1", "city_1");
+  assert.equal(renamed, "I love [city_1] very much.");
+
+  const removed = removeBlankFromPrompt(renamed, "city_1", "Paris");
+  assert.equal(removed, "I love Paris very much.");
+
+  const invalidDraft = {
+    title: "Test Quiz",
+    passing_score: 70,
+    max_attempts: null,
+    questions: [
+      createQuestionDraft("true_false"),
+      createQuestionDraft("short_answer"),
+    ],
+  };
+  invalidDraft.questions[0].prompt = "The sky is blue.";
+  // questions[1] has empty prompt and empty accepted answer
+  const validation = validateExerciseDraft(invalidDraft);
+  assert.equal(validation.valid, false);
+  assert.equal(validation.firstInvalidQuestionIndex, 1);
+  assert.equal(extractFirstErrorQuestionIndex(validation.errors), 1);
 });
