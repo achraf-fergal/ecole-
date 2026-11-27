@@ -1426,6 +1426,13 @@ export default function UnifiedLessonEditor({
               onCancel={handleCancelTextEditor}
               onDirtyChange={setIsTextDirty}
               onSave={(document) => handleAddText(document)}
+              routeParams={routeParams}
+              imageAssets={assets}
+              onImageAssetUploaded={(uploaded) =>
+                setAssets((prev) =>
+                  prev.some((item) => item.id === uploaded.id) ? prev : [...prev, uploaded]
+                )
+              }
             />
           </div>
         )}
@@ -1841,10 +1848,17 @@ export default function UnifiedLessonEditor({
                         onCancel={handleCancelTextEditor}
                         onDirtyChange={setIsTextDirty}
                         onSave={(document) => handleUpdateTextBlock(block.id, document)}
+                        routeParams={routeParams}
+                        imageAssets={assets}
+                        onImageAssetUploaded={(uploaded) =>
+                          setAssets((prev) =>
+                            prev.some((item) => item.id === uploaded.id) ? prev : [...prev, uploaded]
+                          )
+                        }
                       />
                     ) : (
                       <>
-                        {block.block_type === "text" && <LessonTextBlock block={block} />}
+                        {block.block_type === "text" && <LessonTextBlock block={block} params={routeParams} />}
                         {block.block_type === "media" && (
                           <LessonMediaBlock block={block} params={routeParams} />
                         )}
@@ -1967,7 +1981,7 @@ export default function UnifiedLessonEditor({
                     <p className="mb-3 text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
                       {index + 1}. {blockTypeName(block)}
                     </p>
-                    {block.block_type === "text" && <LessonTextBlock block={block} />}
+                    {block.block_type === "text" && <LessonTextBlock block={block} params={routeParams} />}
                     {block.block_type === "media" && (
                       <LessonMediaBlock block={block} params={routeParams} />
                     )}

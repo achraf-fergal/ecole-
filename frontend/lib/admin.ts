@@ -308,6 +308,96 @@ export interface AdminLearningOverview {
   modules: AdminLearningModule[];
 }
 
+export type PlatformCourseStatus = "draft" | "published" | "archived";
+
+export interface PlatformCourseLanguage {
+  id: number;
+  code: string;
+  name: string;
+  native_name: string | null;
+}
+
+export interface PlatformCourseLevel {
+  id: number;
+  code: string;
+  name: string;
+}
+
+export interface PlatformCourseMetadata {
+  id: number;
+  title: string;
+  slug: string;
+  short_description: string | null;
+  description: string | null;
+  source_locale: string;
+  study_format: "online" | "in_person" | "hybrid";
+  duration_hours: number | null;
+  cover_image_url: string | null;
+  cover_image_alt: string | null;
+  status: PlatformCourseStatus;
+  published_at: string | null;
+  updated_at: string | null;
+  language: PlatformCourseLanguage | null;
+  level: PlatformCourseLevel | null;
+}
+
+export interface PlatformCourseDetails {
+  center: { id: number; name: string; slug: string };
+  course: PlatformCourseMetadata;
+  statistics: {
+    modules: number;
+    lessons: number;
+    published_lessons: number;
+    draft_lessons: number;
+    archived_lessons: number;
+    exercises: number;
+    assets: number;
+  };
+  modules: Array<{
+    id: number;
+    title: string;
+    description: string | null;
+    sort_order: number;
+    status: PlatformCourseStatus;
+    published_at: string | null;
+    lesson_count: number;
+    published_lesson_count: number;
+    lessons: Array<AdminLearningLesson & {
+      updated_at: string | null;
+      assets_count: number;
+      exercises_count: number;
+    }>;
+  }>;
+  language_options: PlatformCourseLanguage[];
+  level_options: PlatformCourseLevel[];
+}
+
+export interface PlatformCourseUpdatePayload {
+  title?: string;
+  slug?: string;
+  short_description?: string | null;
+  description?: string | null;
+  language_id?: number;
+  level_id?: number;
+  source_locale?: string;
+  study_format?: PlatformCourseMetadata["study_format"];
+  duration_hours?: number | null;
+  cover_image_url?: string | null;
+  cover_image_alt?: string | null;
+  status?: PlatformCourseStatus;
+}
+
+export class PlatformCourseApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly errors?: Record<string, string[]>
+  ) {
+    super(message);
+    this.name = "PlatformCourseApiError";
+  }
+}
+
 /**
  * Fetch all platform centers independently of user memberships.
  */
@@ -402,6 +492,65 @@ export async function apiGetPlatformCenterCourses(
   }
 
   return data;
+}
+
+/** Retrieve one center-scoped course and its lightweight curriculum summary. */
+export async function apiGetPlatformCourseDetails(
+  centerSlug: string,
+  courseSlug: string
+): Promise<PlatformCourseDetails> {
+  const response = await authFetch(
+    `/api/platform-admin/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}`,
+    { method: "GET", cache: "no-store" }
+  );
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new PlatformCourseApiError(
+      body?.message || "Unable to load course details.",
+      response.status,
+      body?.errors && typeof body.errors === "object" ? body.errors : undefined
+    );
+  }
+
+  const details = body?.data as PlatformCourseDetails | undefined;
+  if (!details?.course || !Array.isArray(details.modules)) {
+    throw new PlatformCourseApiError("The course details response is invalid.", response.status);
+  }
+
+  return details;
+}
+
+/** Update course metadata or change its publication state. */
+export async function apiUpdatePlatformCourse(
+  centerSlug: string,
+  courseSlug: string,
+  payload: PlatformCourseUpdatePayload
+): Promise<PlatformCourseMetadata> {
+  const response = await authFetch(
+    `/api/platform-admin/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new PlatformCourseApiError(
+      body?.message || "Unable to save course changes.",
+      response.status,
+      body?.errors && typeof body.errors === "object" ? body.errors : undefined
+    );
+  }
+
+  const course = body?.data as PlatformCourseMetadata | undefined;
+  if (!course?.id) {
+    throw new PlatformCourseApiError("The updated course response is invalid.", response.status);
+  }
+
+  return course;
 }
 
 /**

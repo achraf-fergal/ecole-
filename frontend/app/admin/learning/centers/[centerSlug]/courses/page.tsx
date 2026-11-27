@@ -384,20 +384,29 @@ function PlatformCenterCoursesContent() {  const params = useParams<{ centerSlug
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      disabled={
-                        center?.status !== "active" ||
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <Link
+                        href={`/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(course.slug)}`}
+                        aria-label={`Manage ${course.title}`}
+                        className="inline-flex min-h-11 items-center justify-center rounded-xl border border-slate-200 px-4 text-xs font-extrabold text-[#102b4c] transition hover:border-teal-300 hover:text-[#0e8988]"
+                      >
+                        Manage Course
+                      </Link>
+                      <button
+                        type="button"
+                        disabled={
+                          center?.status !== "active" ||
+                          isLoadingPreview
+                        }
+                        onClick={() => void handleInspectCourse(course)}
+                        className="min-h-11 rounded-xl bg-[#092443] px-5 text-xs font-extrabold text-white transition hover:bg-[#123b64] disabled:cursor-not-allowed disabled:bg-slate-300"
+                      >
+                        {selectedCourse?.id === course.id &&
                         isLoadingPreview
-                      }
-                      onClick={() => void handleInspectCourse(course)}
-                      className="min-h-11 shrink-0 rounded-xl bg-[#092443] px-5 text-xs font-extrabold text-white transition hover:bg-[#123b64] disabled:cursor-not-allowed disabled:bg-slate-300"
-                    >
-                      {selectedCourse?.id === course.id &&
-                      isLoadingPreview
-                        ? "Loading..."
-                        : "Inspect Curriculum"}
-                    </button>
+                          ? "Loading..."
+                          : "Inspect Curriculum"}
+                      </button>
+                    </div>
                   </div>
                 </article>
               ))}

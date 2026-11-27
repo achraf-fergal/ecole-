@@ -328,7 +328,7 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await previewButton.click();
   const preview = page.getByRole("dialog");
   await preview.waitFor({ state: "visible" });
-  assert.ok((await preview.innerText()).includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
+  assert.ok((await preview.innerText()).toLowerCase().includes("no attempt is created"), "Admin preview explains that it creates no attempt.");
   assert.ok((await preview.innerText()).includes("Question 1 of 5"), "Preview shows one question and its position.");
   assert.equal(await preview.getByRole("button", { name: "Close", exact: true }).evaluate((element) => element === document.activeElement), true, "Preview focuses its Close button when opened.");
   await page.keyboard.press("Shift+Tab");
@@ -399,7 +399,8 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await reopenedBuilder.getByRole("button", { name: "Insert into lesson", exact: true }).click();
   const insertResponse = await insertPromise;
   assert.ok([200, 201].includes(insertResponse.status()), "Published exercise inserts into the draft lesson revision.");
-  await page.getByText(title, { exact: true }).first().waitFor({ state: "visible", timeout: 10000 });
+  await reopenedBuilder.waitFor({ state: "detached", timeout: 10000 });
+  await page.locator("article").filter({ hasText: title }).last().waitFor({ state: "visible", timeout: 10000 });
 
   return published;
 }
@@ -1722,19 +1723,23 @@ async function main() {
     console.log("✓ Attempt submitted and graded at 100% (Passed).");
 
     // Idempotent duplicate submission verification
+    const originalSubmissionBody = submitResponse.request().postDataJSON();
+    assert.ok(Array.isArray(originalSubmissionBody?.answers), "Capture the exact answer payload for a safe retry.");
     const duplicateSubmitProbe = await studentPage.evaluate(
-      async ({ apiUrl, centerSlug, courseSlug, lessonId, exerciseId, attemptId }) => {
+      async ({ apiUrl, centerSlug, courseSlug, lessonId, exerciseId, attemptId, requestBody }) => {
+        const csrfMatch = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);
+        const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : "";
         const res = await fetch(
-          `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
+          `${apiUrl}/api/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/learn/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            headers: { "Content-Type": "application/json", Accept: "application/json", "X-XSRF-TOKEN": csrfToken },
             credentials: "include",
-            body: JSON.stringify({ answers: [] }),
+            body: JSON.stringify(requestBody),
           }
         );
         const data = await res.json();
-        return { status: res.status, data };
+        return { status: res.status, data, url: res.url };
       },
       {
         apiUrl: BASE_URL,
@@ -1743,20 +1748,23 @@ async function main() {
         lessonId: fixture.lessonId,
         exerciseId: authoredExercise.id,
         attemptId,
+        requestBody: originalSubmissionBody,
       }
     );
-    assert.equal(duplicateSubmitProbe.status, 200, "Duplicate submission of graded attempt returns HTTP 200 (idempotent).");
+    assert.equal(duplicateSubmitProbe.status, 200, `Duplicate submission of graded attempt returns HTTP 200 (idempotent): ${JSON.stringify(duplicateSubmitProbe)}`);
     assert.equal((duplicateSubmitProbe.data.data ?? duplicateSubmitProbe.data).passed, true);
     console.log("✓ Duplicate submission is idempotent (HTTP 200).");
 
     // Altered submission payload verification (HTTP 409 Conflict)
     const conflictingSubmitProbe = await studentPage.evaluate(
       async ({ apiUrl, centerSlug, courseSlug, lessonId, exerciseId, attemptId, wrongOptionId, q1Id }) => {
+        const csrfMatch = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);
+        const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : "";
         const res = await fetch(
-          `${apiUrl}/api/centers/${centerSlug}/student/courses/${courseSlug}/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
+          `${apiUrl}/api/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/learn/lessons/${lessonId}/exercises/${exerciseId}/attempts/${attemptId}/submit`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            headers: { "Content-Type": "application/json", Accept: "application/json", "X-XSRF-TOKEN": csrfToken },
             credentials: "include",
             body: JSON.stringify({
               answers: [

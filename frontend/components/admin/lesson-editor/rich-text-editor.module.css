@@ -113,6 +113,22 @@
   border-top: 1px solid #cbd5e1;
 }
 
+.surface .proseMirror img {
+  display: block;
+  max-width: 100%;
+  max-height: 24rem;
+  height: auto;
+  margin: 0.75rem auto;
+  border-radius: 0.75rem;
+  border: 1px solid #e2e8f0;
+  object-fit: contain;
+}
+
+.surface .proseMirror img.ProseMirror-selectednode {
+  outline: 2px solid #0e8988;
+  outline-offset: 2px;
+}
+
 .surface .proseMirror p.is-editor-empty:first-child::before {
   float: inline-start;
   height: 0;

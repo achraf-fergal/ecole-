@@ -617,6 +617,7 @@ export default function LearningPageClient({
                         <LessonTextBlock
                           key={`block-${block.id}`}
                           block={block}
+                          params={routeParams}
                         />
                       );
                     case "media":

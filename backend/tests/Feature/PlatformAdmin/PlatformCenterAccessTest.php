@@ -4,6 +4,10 @@ namespace Tests\Feature\PlatformAdmin;
 
 use App\Models\Center;
 use App\Models\Course;
+use App\Models\CourseModule;
+use App\Models\Exercise;
+use App\Models\Lesson;
+use App\Models\LessonAsset;
 use App\Models\Language;
 use App\Models\Level;
 use App\Models\PlatformAdmin;
@@ -361,5 +365,195 @@ class PlatformCenterAccessTest extends TestCase
         );
 
         $response->assertForbidden();
+    }
+
+    public function test_platform_admin_can_view_course_details_and_content_counts(): void
+    {
+        $user = $this->createPlatformAdmin();
+        $center = Center::factory()->create();
+        $language = Language::factory()->for($center)->create();
+        $level = Level::factory()->for($center)->create();
+        $course = $this->createCourse(
+            $center,
+            $language,
+            $level,
+            'published',
+            'Course Details Overview'
+        );
+
+        $module = CourseModule::factory()
+            ->forCourse($course)
+            ->published()
+            ->create(['title' => 'Module One']);
+
+        $publishedLesson = Lesson::factory()
+            ->forModule($module)
+            ->published()
+            ->create(['title' => 'Published Lesson']);
+        $draftLesson = Lesson::factory()
+            ->forModule($module)
+            ->create(['title' => 'Draft Lesson']);
+        $archivedLesson = Lesson::factory()
+            ->forModule($module)
+            ->archived()
+            ->create(['title' => 'Archived Lesson']);
+
+        $asset = LessonAsset::factory()
+            ->forLesson($publishedLesson)
+            ->image()
+            ->create(['storage_key' => 'private/course-cover-not-to-leak.jpg']);
+
+        Exercise::factory()
+            ->forLesson($publishedLesson)
+            ->create();
+
+        $token = $this->tokenFor($user);
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.platform.centers.courses.show', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ])
+        );
+
+        $response->assertOk()
+            ->assertJsonPath('data.course.id', $course->id)
+            ->assertJsonPath('data.course.language.id', $language->id)
+            ->assertJsonPath('data.course.level.id', $level->id)
+            ->assertJsonPath('data.statistics.modules', 1)
+            ->assertJsonPath('data.statistics.lessons', 3)
+            ->assertJsonPath('data.statistics.published_lessons', 1)
+            ->assertJsonPath('data.statistics.draft_lessons', 1)
+            ->assertJsonPath('data.statistics.archived_lessons', 1)
+            ->assertJsonPath('data.statistics.assets', 1)
+            ->assertJsonPath('data.statistics.exercises', 1)
+            ->assertJsonPath('data.modules.0.lesson_count', 3)
+            ->assertJsonPath('data.modules.0.published_lesson_count', 1)
+            ->assertJsonPath('data.modules.0.lessons.0.id', $publishedLesson->id)
+            ->assertJsonPath('data.modules.0.lessons.1.id', $draftLesson->id)
+            ->assertJsonPath('data.modules.0.lessons.2.id', $archivedLesson->id)
+            ->assertJsonPath('data.modules.0.lessons.0.assets_count', 1)
+            ->assertJsonPath('data.modules.0.lessons.0.exercises_count', 1)
+            ->assertJsonMissing(['storage_key' => $asset->storage_key]);
+    }
+
+    public function test_platform_admin_can_edit_course_and_change_publication_state(): void
+    {
+        $user = $this->createPlatformAdmin();
+        $center = Center::factory()->create();
+        $language = Language::factory()->for($center)->create();
+        $level = Level::factory()->for($center)->create();
+        $replacementLanguage = Language::factory()->french()->for($center)->create();
+        $replacementLevel = Level::factory()->for($center)->create();
+        $course = $this->createCourse(
+            $center,
+            $language,
+            $level,
+            'draft',
+            'Course Before Edit'
+        );
+        $token = $this->tokenFor($user);
+
+        $response = $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->putJson(
+            route('api.platform.centers.courses.update', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ]),
+            [
+                'title' => 'Course After Edit',
+                'slug' => 'course-after-edit',
+                'short_description' => 'A concise course summary.',
+                'description' => 'Full course description.',
+                'language_id' => $replacementLanguage->id,
+                'level_id' => $replacementLevel->id,
+                'source_locale' => 'fr',
+                'study_format' => 'hybrid',
+                'duration_hours' => 24,
+                'cover_image_url' => 'https://media.example.test/course.jpg',
+                'cover_image_alt' => 'Students in a language classroom',
+                'status' => 'published',
+            ]
+        );
+
+        $response->assertOk()
+            ->assertJsonPath('data.title', 'Course After Edit')
+            ->assertJsonPath('data.slug', 'course-after-edit')
+            ->assertJsonPath('data.language.id', $replacementLanguage->id)
+            ->assertJsonPath('data.level.id', $replacementLevel->id)
+            ->assertJsonPath('data.status', 'published');
+
+        $course->refresh();
+        $this->assertNotNull($course->published_at);
+        $this->assertSame('https://media.example.test/course.jpg', $course->cover_image_url);
+
+        $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->putJson(
+            route('api.platform.centers.courses.update', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ]),
+            ['status' => 'draft']
+        )->assertOk()
+            ->assertJsonPath('data.status', 'draft')
+            ->assertJsonPath('data.published_at', null);
+
+        $otherCenter = Center::factory()->create();
+        $otherLanguage = Language::factory()->for($otherCenter)->create();
+        $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->putJson(
+            route('api.platform.centers.courses.update', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ]),
+            ['language_id' => $otherLanguage->id]
+        )->assertUnprocessable();
+    }
+
+    public function test_non_platform_admin_cannot_view_or_edit_course_details(): void
+    {
+        $center = Center::factory()->create();
+        $language = Language::factory()->for($center)->create();
+        $level = Level::factory()->for($center)->create();
+        $course = $this->createCourse(
+            $center,
+            $language,
+            $level,
+            'draft',
+            'Private Course'
+        );
+        $user = User::factory()->create([
+            'email_verified_at' => now(),
+        ]);
+        $token = $this->tokenFor($user);
+
+        $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->getJson(
+            route('api.platform.centers.courses.show', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ])
+        )->assertForbidden();
+
+        $this->withHeader(
+            'Authorization',
+            "Bearer {$token}"
+        )->putJson(
+            route('api.platform.centers.courses.update', [
+                'center' => $center->slug,
+                'courseSlug' => $course->slug,
+            ]),
+            ['title' => 'Unauthorized edit']
+        )->assertForbidden();
     }
 }

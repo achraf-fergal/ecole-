@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\Learning\LessonAssetAccessController;
 use App\Http\Controllers\Api\Learning\LessonAssetManagementController;
 use App\Http\Controllers\Api\Learning\LessonContentController;
 use App\Http\Controllers\Api\PlatformCenterController;
+use App\Http\Controllers\Api\PlatformCourseController;
 use App\Http\Controllers\Api\PlatformUserController;
 use App\Http\Controllers\Api\PublicCourseController;
 use App\Http\Controllers\Api\PublicCourseDetailsController;
@@ -590,4 +591,19 @@ Route::prefix('platform-admin')
             PlatformCenterController::class,
             'courses',
         ])->name('api.platform.centers.courses.index');
+
+        Route::get('/centers/{center:slug}/courses/{courseSlug}', [
+            PlatformCourseController::class,
+            'show',
+        ])
+            ->where('courseSlug', '[^/]+')
+            ->name('api.platform.centers.courses.show');
+
+        Route::put('/centers/{center:slug}/courses/{courseSlug}', [
+            PlatformCourseController::class,
+            'update',
+        ])
+            ->where('courseSlug', '[^/]+')
+            ->middleware('csrf.api')
+            ->name('api.platform.centers.courses.update');
     });

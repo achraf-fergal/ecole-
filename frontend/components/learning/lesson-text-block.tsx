@@ -1,15 +1,18 @@
 "use client";
 
-import React from "react";
-import type {
-  LessonBlock,
-  TipTapDocument,
-  TipTapMark,
-  TipTapNode,
+import React, { useEffect, useState } from "react";
+import {
+  getLessonAssetAccess,
+  type LearningRouteParams,
+  type LessonBlock,
+  type TipTapDocument,
+  type TipTapMark,
+  type TipTapNode,
 } from "@/lib/learning";
 
 interface LessonTextBlockProps {
   block: LessonBlock;
+  params?: LearningRouteParams;
 }
 
 function sanitizeHref(href: unknown): string | null {
@@ -19,6 +22,91 @@ function sanitizeHref(href: unknown): string | null {
     return trimmed;
   }
   return null;
+}
+
+function sanitizeImageSrc(src: unknown): string | null {
+  if (typeof src !== "string") return null;
+  const trimmed = src.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+}
+
+function InlineLessonImage({
+  assetId,
+  fallbackSrc,
+  alt,
+  title,
+  params,
+}: {
+  assetId: number | null;
+  fallbackSrc: string | null;
+  alt: string;
+  title?: string;
+  params?: LearningRouteParams;
+}) {
+  const [fetchedSrc, setFetchedSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!assetId || !params) return;
+
+    let cancelled = false;
+    getLessonAssetAccess(params, assetId)
+      .then((access) => {
+        if (cancelled) return;
+        if ("url" in access && typeof access.url === "string") {
+          setFetchedSrc(access.url);
+        } else if (fallbackSrc) {
+          setFetchedSrc(fallbackSrc);
+        } else {
+          setFailed(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          if (fallbackSrc) {
+            setFetchedSrc(fallbackSrc);
+          } else {
+            setFailed(true);
+          }
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assetId, fallbackSrc, params]);
+
+  const resolvedSrc = assetId && params ? fetchedSrc : fallbackSrc;
+
+  if (failed) {
+    return (
+      <div className="my-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-xs text-slate-500">
+        Image unavailable
+      </div>
+    );
+  }
+
+  if (!resolvedSrc) {
+    return (
+      <div className="my-4 h-48 w-full animate-pulse rounded-xl bg-slate-100" />
+    );
+  }
+
+  return (
+    <figure className="my-5">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={resolvedSrc}
+        alt={alt}
+        title={title}
+        className="mx-auto max-h-[560px] w-auto max-w-full rounded-xl border border-slate-100 object-contain"
+        loading="lazy"
+      />
+    </figure>
+  );
 }
 
 function renderTextWithMarks(
@@ -99,7 +187,8 @@ function renderTextWithMarks(
 
 function renderNode(
   node: TipTapNode,
-  index: number
+  index: number,
+  params?: LearningRouteParams
 ): React.ReactNode {
   const key = `node-${index}`;
 
@@ -107,7 +196,7 @@ function renderNode(
     case "paragraph":
       return (
         <p key={key} className="mt-4 text-sm leading-8 text-slate-700 first:mt-0">
-          {node.content?.map((child, i) => renderNode(child, i)) ?? null}
+          {node.content?.map((child, i) => renderNode(child, i, params)) ?? null}
         </p>
       );
 
@@ -116,7 +205,7 @@ function renderNode(
       const level = Number.isInteger(rawLevel) && rawLevel >= 1 && rawLevel <= 6
         ? rawLevel
         : 1;
-      const children = node.content?.map((child, i) => renderNode(child, i));
+      const children = node.content?.map((child, i) => renderNode(child, i, params));
 
       if (level === 1) {
         return (
@@ -174,7 +263,7 @@ function renderNode(
     case "bulletList":
       return (
         <ul key={key} className="mt-4 list-disc space-y-1 pl-6 text-sm leading-7 text-slate-700">
-          {node.content?.map((child, i) => renderNode(child, i))}
+          {node.content?.map((child, i) => renderNode(child, i, params))}
         </ul>
       );
 
@@ -186,7 +275,7 @@ function renderNode(
           start={start}
           className="mt-4 list-decimal space-y-1 pl-6 text-sm leading-7 text-slate-700"
         >
-          {node.content?.map((child, i) => renderNode(child, i))}
+          {node.content?.map((child, i) => renderNode(child, i, params))}
         </ol>
       );
     }
@@ -194,7 +283,7 @@ function renderNode(
     case "listItem":
       return (
         <li key={key} className="leading-7">
-          {node.content?.map((child, i) => renderNode(child, i))}
+          {node.content?.map((child, i) => renderNode(child, i, params))}
         </li>
       );
 
@@ -204,7 +293,7 @@ function renderNode(
           key={key}
           className="mt-5 border-l-4 border-[#0e8988] bg-slate-50/70 py-2 pl-4 pr-3 italic text-slate-700 rounded-r-xl"
         >
-          {node.content?.map((child, i) => renderNode(child, i))}
+          {node.content?.map((child, i) => renderNode(child, i, params))}
         </blockquote>
       );
 
@@ -226,6 +315,30 @@ function renderNode(
     case "hardBreak":
       return <br key={key} />;
 
+    case "image": {
+      const rawAssetId = node.attrs?.assetId;
+      const assetId =
+        typeof rawAssetId === "number" && Number.isInteger(rawAssetId) && rawAssetId > 0
+          ? rawAssetId
+          : null;
+      const fallbackSrc = sanitizeImageSrc(node.attrs?.src);
+      if (!assetId && !fallbackSrc) return null;
+
+      const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt : "";
+      const title = typeof node.attrs?.title === "string" ? node.attrs.title : undefined;
+
+      return (
+        <InlineLessonImage
+          key={key}
+          assetId={assetId}
+          fallbackSrc={fallbackSrc}
+          alt={alt}
+          title={title}
+          params={params}
+        />
+      );
+    }
+
     case "text":
       return renderTextWithMarks(node.text ?? "", node.marks, key);
 
@@ -233,7 +346,7 @@ function renderNode(
       if (node.content && node.content.length > 0) {
         return (
           <div key={key}>
-            {node.content.map((child, i) => renderNode(child, i))}
+            {node.content.map((child, i) => renderNode(child, i, params))}
           </div>
         );
       }
@@ -241,7 +354,7 @@ function renderNode(
   }
 }
 
-export default function LessonTextBlock({ block }: LessonTextBlockProps) {
+export default function LessonTextBlock({ block, params }: LessonTextBlockProps) {
   const content = block.content_json as TipTapDocument | null;
 
   if (!content || !Array.isArray(content.content) || content.content.length === 0) {
@@ -251,7 +364,7 @@ export default function LessonTextBlock({ block }: LessonTextBlockProps) {
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-xs">
       <div className="prose prose-slate max-w-none text-slate-700">
-        {content.content.map((node, i) => renderNode(node, i))}
+        {content.content.map((node, i) => renderNode(node, i, params))}
       </div>
     </article>
   );
