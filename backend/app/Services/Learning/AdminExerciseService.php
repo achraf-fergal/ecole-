@@ -132,6 +132,20 @@ class AdminExerciseService
                     'sort_order',
                 ]));
 
+                if (array_key_exists('result_settings', $data) && is_array($data['result_settings'])) {
+                    $normalizedResultSettings = Exercise::normalizeResultSettings($data['result_settings']);
+                    $fillable['result_settings'] = $normalizedResultSettings;
+                    $fillable['show_correct_answers_after_submission'] = (bool) $normalizedResultSettings['show_correct_answers'];
+                } elseif (array_key_exists('show_correct_answers_after_submission', $data)) {
+                    $legacyFlag = (bool) $data['show_correct_answers_after_submission'];
+                    $existingSettings = is_array($lockedExercise->result_settings)
+                        ? $lockedExercise->result_settings
+                        : Exercise::defaultResultSettings($legacyFlag);
+                    $existingSettings['show_correct_answers'] = $legacyFlag;
+                    $existingSettings['show_explanations'] = $legacyFlag;
+                    $fillable['result_settings'] = Exercise::normalizeResultSettings($existingSettings);
+                }
+
                 $lockedExercise->update($fillable);
                 $exercise = $lockedExercise;
             } else {
@@ -144,6 +158,12 @@ class AdminExerciseService
                     $sortOrder = $maxOrder !== null ? $maxOrder + 1 : 0;
                 }
 
+                $legacyShowCorrect = (bool) ($data['show_correct_answers_after_submission'] ?? false);
+                $normalizedResultSettings = Exercise::normalizeResultSettings(
+                    is_array($data['result_settings'] ?? null) ? $data['result_settings'] : null,
+                    $legacyShowCorrect
+                );
+
                 $exercise = Exercise::query()->create([
                     'center_id' => $lockedLesson->center_id,
                     'lesson_id' => $lockedLesson->id,
@@ -151,7 +171,8 @@ class AdminExerciseService
                     'instructions' => $data['instructions'] ?? null,
                     'max_attempts' => $data['max_attempts'] ?? null,
                     'passing_score' => $data['passing_score'] ?? 70.00,
-                    'show_correct_answers_after_submission' => (bool) ($data['show_correct_answers_after_submission'] ?? false),
+                    'show_correct_answers_after_submission' => (bool) $normalizedResultSettings['show_correct_answers'],
+                    'result_settings' => $normalizedResultSettings,
                     'sort_order' => $sortOrder,
                     'status' => Exercise::STATUS_DRAFT,
                     'published_at' => null,

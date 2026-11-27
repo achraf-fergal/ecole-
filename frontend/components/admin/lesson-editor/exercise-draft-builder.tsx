@@ -12,6 +12,8 @@ import {
   type BlankAnswerConfigPayload,
   type CreateExercisePayload,
   type CreateQuestionPayload,
+  type ExerciseResultSettingsPayload,
+  type ResultReleaseTiming,
   type ShortAnswerConfigPayload,
 } from "@/lib/admin-learning";
 import {
@@ -29,6 +31,7 @@ import {
   cloneQuestionTypeConfiguration,
   defaultNormalization,
   QUESTION_TYPE_OPTIONS,
+  resolveDraftResultSettings,
   toDraftExercise,
   type DraftQuestion,
   type ExerciseDraft,
@@ -303,40 +306,44 @@ export default function ExerciseDraftBuilder({
     }
   };
 
-  const buildPayload = (value: ExerciseDraft): CreateExercisePayload => ({
-    title: value.title,
-    instructions: value.instructions,
-    passing_score: value.passing_score,
-    max_attempts: value.max_attempts,
-    show_correct_answers_after_submission: value.show_correct_answers_after_submission,
-    sort_order: value.sort_order,
-    questions: value.questions.map((question, index): CreateQuestionPayload => {
-      const isTextBased =
-        question.question_type === "short_answer" || question.question_type === "fill_in_the_blanks";
-      const points =
-        question.question_type === "fill_in_the_blanks"
-          ? sumBlankPoints((question.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
-          : question.points;
+  const buildPayload = (value: ExerciseDraft): CreateExercisePayload => {
+    const resolvedSettings = resolveDraftResultSettings(value);
+    return {
+      title: value.title,
+      instructions: value.instructions,
+      passing_score: value.passing_score,
+      max_attempts: value.max_attempts,
+      show_correct_answers_after_submission: resolvedSettings.show_correct_answers,
+      result_settings: resolvedSettings,
+      sort_order: value.sort_order,
+      questions: value.questions.map((question, index): CreateQuestionPayload => {
+        const isTextBased =
+          question.question_type === "short_answer" || question.question_type === "fill_in_the_blanks";
+        const points =
+          question.question_type === "fill_in_the_blanks"
+            ? sumBlankPoints((question.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
+            : question.points;
 
-      return {
-        ...(question.id ? { id: question.id } : {}),
-        prompt: question.prompt,
-        question_type: question.question_type,
-        explanation: question.explanation ?? null,
-        points,
-        sort_order: index,
-        answer_config: isTextBased ? (question.answer_config ?? null) : null,
-        options: isTextBased
-          ? []
-          : question.options.map((option, optionIndex) => ({
-              ...(option.id ? { id: option.id } : {}),
-              option_text: option.option_text,
-              is_correct: option.is_correct,
-              sort_order: optionIndex,
-            })),
-      };
-    }),
-  });
+        return {
+          ...(question.id ? { id: question.id } : {}),
+          prompt: question.prompt,
+          question_type: question.question_type,
+          explanation: question.explanation ?? null,
+          points,
+          sort_order: index,
+          answer_config: isTextBased ? (question.answer_config ?? null) : null,
+          options: isTextBased
+            ? []
+            : question.options.map((option, optionIndex) => ({
+                ...(option.id ? { id: option.id } : {}),
+                option_text: option.option_text,
+                is_correct: option.is_correct,
+                sort_order: optionIndex,
+              })),
+        };
+      }),
+    };
+  };
 
   const persistDraft = async (
     snapshot: ExerciseDraft,
@@ -936,12 +943,19 @@ export default function ExerciseDraftBuilder({
                         <input
                           type="checkbox"
                           checked={draft.max_attempts === null}
-                          onChange={(event) =>
-                            updateDraft((current) => ({
-                              ...current,
-                              max_attempts: event.target.checked ? null : 1,
-                            }))
-                          }
+                          onChange={(event) => {
+                            const unlimited = event.target.checked;
+                            updateDraft((current) => {
+                              const currentSettings = resolveDraftResultSettings(current);
+                              return {
+                                ...current,
+                                max_attempts: unlimited ? null : 1,
+                                result_settings: unlimited && currentSettings.release_timing === "after_final_attempt"
+                                  ? { ...currentSettings, release_timing: "immediately" }
+                                  : currentSettings,
+                              };
+                            }, ["max_attempts"]);
+                          }}
                         />
                         Unlimited
                       </label>
@@ -960,7 +974,7 @@ export default function ExerciseDraftBuilder({
                         updateDraft((current) => ({
                           ...current,
                           max_attempts: event.target.value === "" ? null : Number(event.target.value),
-                        }))
+                        }), ["max_attempts"])
                       }
                       className="w-full rounded-lg border border-slate-300 bg-white p-2 disabled:bg-slate-100 disabled:text-slate-400"
                     />
@@ -970,22 +984,177 @@ export default function ExerciseDraftBuilder({
                       </span>
                     )}
                   </div>
-
-                  <label className="flex items-center gap-2 text-xs font-medium text-slate-700 sm:col-span-2">
-                    <input
-                      type="checkbox"
-                      checked={draft.show_correct_answers_after_submission}
-                      onChange={(event) =>
-                        updateDraft((current) => ({
-                          ...current,
-                          show_correct_answers_after_submission: event.target.checked,
-                        }))
-                      }
-                    />
-                    Show correct answers and explanations after submission
-                  </label>
                 </div>
               </section>
+
+              {/* Results & Feedback */}
+              {(() => {
+                const rs = resolveDraftResultSettings(draft);
+                const updateRs = (patch: Partial<ExerciseResultSettingsPayload>) => {
+                  updateDraft((current) => {
+                    const base = resolveDraftResultSettings(current);
+                    const next: ExerciseResultSettingsPayload = { ...base, ...patch };
+                    if (!next.show_question_results) {
+                      next.show_correct_answers = false;
+                      next.show_explanations = false;
+                    }
+                    return {
+                      ...current,
+                      result_settings: next,
+                      show_correct_answers_after_submission: next.show_correct_answers,
+                    };
+                  });
+                };
+
+                const visibleSummary: string[] = [];
+                if (rs.show_score) visibleSummary.push("Total score");
+                if (rs.show_percentage) visibleSummary.push("Percentage");
+                if (rs.show_pass_fail) visibleSummary.push("Pass/Fail");
+                if (rs.show_question_results) {
+                  visibleSummary.push("Question status");
+                  if (rs.show_student_answers) visibleSummary.push("Submitted answers");
+                  if (rs.show_points_per_question) visibleSummary.push("Points per question");
+                  if (rs.show_correct_answers) visibleSummary.push("Correct answers");
+                  if (rs.show_explanations) visibleSummary.push("Explanations");
+                }
+
+                return (
+                  <section aria-label="Results & Feedback" className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 sm:p-4 space-y-4">
+                    <div>
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-600">
+                        Results &amp; Feedback
+                      </h4>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Control what students see after submitting and when detailed results are released.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs font-bold text-slate-700">Overall Results</p>
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={rs.show_score}
+                            onChange={(e) => updateRs({ show_score: e.target.checked })}
+                          />
+                          Show total score
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={rs.show_percentage}
+                            onChange={(e) => updateRs({ show_percentage: e.target.checked })}
+                          />
+                          Show percentage
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={rs.show_pass_fail}
+                            onChange={(e) => updateRs({ show_pass_fail: e.target.checked })}
+                          />
+                          Show pass/fail status
+                        </label>
+                      </div>
+
+                      <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs font-bold text-slate-700">Question Review</p>
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={rs.show_question_results}
+                            onChange={(e) => updateRs({ show_question_results: e.target.checked })}
+                          />
+                          Show individual question results
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="checkbox"
+                            checked={rs.show_student_answers}
+                            onChange={(e) => updateRs({ show_student_answers: e.target.checked })}
+                          />
+                          Show student&apos;s submitted answers
+                        </label>
+                        <label className={`flex items-center gap-2 text-xs ${rs.show_question_results ? "text-slate-700" : "text-slate-400"}`}>
+                          <input
+                            type="checkbox"
+                            disabled={!rs.show_question_results}
+                            checked={rs.show_points_per_question}
+                            onChange={(e) => updateRs({ show_points_per_question: e.target.checked })}
+                          />
+                          Show points awarded per question
+                        </label>
+                        <label className={`flex items-center gap-2 text-xs ${rs.show_question_results ? "text-slate-700" : "text-slate-400"}`}>
+                          <input
+                            type="checkbox"
+                            disabled={!rs.show_question_results}
+                            checked={rs.show_correct_answers}
+                            onChange={(e) => updateRs({ show_correct_answers: e.target.checked })}
+                          />
+                          Show correct answers
+                        </label>
+                        <label className={`flex items-center gap-2 text-xs ${rs.show_question_results ? "text-slate-700" : "text-slate-400"}`}>
+                          <input
+                            type="checkbox"
+                            disabled={!rs.show_question_results}
+                            checked={rs.show_explanations}
+                            onChange={(e) => updateRs({ show_explanations: e.target.checked })}
+                          />
+                          Show question explanations
+                        </label>
+                        {!rs.show_question_results && (
+                          <p className="text-[10px] text-amber-700">
+                            Correct answers and explanations require &quot;Show individual question results&quot; to be enabled.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-2">
+                      <p className="text-xs font-bold text-slate-700">Result Release Timing</p>
+                      <div className="flex flex-wrap gap-4">
+                        <label className="flex items-center gap-2 text-xs text-slate-700">
+                          <input
+                            type="radio"
+                            name={`release-timing-${draft.id}`}
+                            value="immediately"
+                            checked={rs.release_timing === "immediately"}
+                            onChange={() => updateRs({ release_timing: "immediately" as ResultReleaseTiming })}
+                          />
+                          Immediately after submission
+                        </label>
+                        <label className={`flex items-center gap-2 text-xs ${draft.max_attempts === null ? "text-slate-400" : "text-slate-700"}`}>
+                          <input
+                            type="radio"
+                            name={`release-timing-${draft.id}`}
+                            value="after_final_attempt"
+                            disabled={draft.max_attempts === null}
+                            checked={rs.release_timing === "after_final_attempt"}
+                            onChange={() => updateRs({ release_timing: "after_final_attempt" as ResultReleaseTiming })}
+                          />
+                          After the student&apos;s final permitted attempt
+                        </label>
+                      </div>
+                      {draft.max_attempts === null && (
+                        <p className="text-[10px] text-slate-500">
+                          Set a finite Maximum attempts limit above to enable releasing results after the final permitted attempt.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg border border-teal-100 bg-teal-50/50 p-2.5 text-[11px] text-teal-950">
+                      <span className="font-bold">Student visibility summary:</span>{" "}
+                      {rs.release_timing === "after_final_attempt"
+                        ? "Results withheld until final permitted attempt. "
+                        : "Released immediately after submission. "}
+                      {visibleSummary.length > 0
+                        ? `Visible: ${visibleSummary.join(", ")}.`
+                        : "All score and question review details are hidden."}
+                    </div>
+                  </section>
+                );
+              })()}
 
               {/* C. Question Management */}
               <div className="flex items-center justify-between border-t border-slate-100 pt-3">

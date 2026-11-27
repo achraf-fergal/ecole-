@@ -552,7 +552,7 @@ class AssessmentEngineTest extends TestCase
         $this->assertStudentResponseHidesPrivateAnswers($submitRes, [
             $privateExplanation,
             $privateAcceptedAnswer,
-        ]);
+        ], true);
 
         $explicitSubmitRes = $this->withHeaders($studentHeaders)->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [
@@ -564,7 +564,7 @@ class AssessmentEngineTest extends TestCase
         $this->assertStudentResponseHidesPrivateAnswers($explicitSubmitRes, [
             $privateExplanation,
             $privateAcceptedAnswer,
-        ]);
+        ], true);
 
         $legacyNoActive = $this->withHeaders($studentHeaders)->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.submit', $studentRouteParameters),
@@ -578,7 +578,7 @@ class AssessmentEngineTest extends TestCase
         $this->assertStudentResponseHidesPrivateAnswers($historyRes, [
             $privateExplanation,
             $privateAcceptedAnswer,
-        ]);
+        ], true);
 
         $currentAfterSubmit = $this->withHeaders($studentHeaders)->getJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.current', $studentRouteParameters)
@@ -586,15 +586,14 @@ class AssessmentEngineTest extends TestCase
         $this->assertStudentResponseHidesPrivateAnswers($currentAfterSubmit, [
             $privateExplanation,
             $privateAcceptedAnswer,
-        ]);
+        ], true);
     }
 
-    private function assertStudentResponseHidesPrivateAnswers($response, array $privateValues): void
+    private function assertStudentResponseHidesPrivateAnswers($response, array $privateValues, bool $allowQuestionStatus = false): void
     {
         $content = $response->getContent();
 
-        foreach ([
-            'is_correct',
+        $privateFields = [
             'correct_option_id',
             'correct_option_ids',
             'accepted_answers',
@@ -604,7 +603,12 @@ class AssessmentEngineTest extends TestCase
             'correct_option_ids_snapshot',
             'options_snapshot',
             'explanation',
-        ] as $privateField) {
+        ];
+        if (! $allowQuestionStatus) {
+            $privateFields[] = 'is_correct';
+        }
+
+        foreach ($privateFields as $privateField) {
             $this->assertStringNotContainsString('"'.$privateField.'"', $content);
         }
 
@@ -2625,5 +2629,199 @@ class AssessmentEngineTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$otherToken}")->postJson(
             route('api.centers.courses.learn.lessons.exercises.attempts.start', $attemptRouteParams)
         )->assertForbidden();
+    }
+
+    public function test_granular_result_visibility_and_after_final_attempt_release_timing(): void
+    {
+        $ctx = $this->createAdminContext();
+        $adminToken = $this->tokenFor($ctx['user']);
+        $routeParameters = [
+            'center' => $ctx['center']->slug,
+            'course' => $ctx['course']->slug,
+            'lesson' => $ctx['lesson']->id,
+        ];
+        $normalization = [
+            'case_sensitive' => false,
+            'trim_whitespace' => true,
+            'collapse_internal_whitespace' => true,
+            'punctuation_sensitive' => true,
+            'diacritic_sensitive' => true,
+        ];
+
+        // Dependency normalization: show_question_results=false forces show_correct_answers=false & show_explanations=false
+        $hiddenReviewCreate = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'Hidden Score & Review',
+                'max_attempts' => 2,
+                'result_settings' => [
+                    'show_score' => false,
+                    'show_percentage' => false,
+                    'show_pass_fail' => false,
+                    'show_question_results' => false,
+                    'show_student_answers' => false,
+                    'show_correct_answers' => true,
+                    'show_explanations' => true,
+                    'show_points_per_question' => false,
+                    'release_timing' => Exercise::RELEASE_TIMING_IMMEDIATELY,
+                ],
+                'questions' => [[
+                    'question_type' => Question::TYPE_TRUE_FALSE,
+                    'prompt' => 'Earth is round.',
+                    'explanation' => 'SECRET_EXPLANATION_HIDDEN',
+                    'points' => 1,
+                    'options' => [
+                        ['option_text' => 'True', 'is_correct' => true],
+                        ['option_text' => 'False', 'is_correct' => false],
+                    ],
+                ]],
+            ]
+        )->assertCreated()
+            ->assertJsonPath('data.result_settings.show_question_results', false)
+            ->assertJsonPath('data.result_settings.show_correct_answers', false)
+            ->assertJsonPath('data.result_settings.show_explanations', false)
+            ->assertJsonPath('data.show_correct_answers_after_submission', false);
+
+        $hiddenExId = (int) $hiddenReviewCreate->json('data.id');
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $hiddenExId])
+        )->assertOk();
+
+        // Second exercise: show_question_results=true, show_correct_answers=false, release_timing=after_final_attempt
+        $timedCreate = $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.store', $routeParameters),
+            [
+                'title' => 'Timed Release Assessment',
+                'max_attempts' => 2,
+                'passing_score' => 50,
+                'result_settings' => [
+                    'show_score' => true,
+                    'show_percentage' => true,
+                    'show_pass_fail' => true,
+                    'show_question_results' => true,
+                    'show_student_answers' => true,
+                    'show_correct_answers' => false,
+                    'show_explanations' => false,
+                    'show_points_per_question' => true,
+                    'release_timing' => Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT,
+                ],
+                'questions' => [
+                    [
+                        'question_type' => Question::TYPE_SINGLE_CHOICE,
+                        'prompt' => 'Capital of France?',
+                        'explanation' => 'SECRET_TIMED_EXPLANATION',
+                        'points' => 1,
+                        'options' => [
+                            ['option_text' => 'Paris', 'is_correct' => true],
+                            ['option_text' => 'Lyon', 'is_correct' => false],
+                        ],
+                    ],
+                    [
+                        'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+                        'prompt' => 'Water is [blank_1].',
+                        'points' => 1,
+                        'answer_config' => [
+                            'blanks' => [
+                                ['id' => 'blank_1', 'points' => 1, 'accepted_answers' => ['SECRET_FITB_KEY'], 'normalization' => $normalization],
+                            ],
+                        ],
+                        'options' => [],
+                    ],
+                ],
+            ]
+        )->assertCreated();
+
+        $timedExId = (int) $timedCreate->json('data.id');
+        $this->withHeader('Authorization', "Bearer {$adminToken}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $timedExId])
+        )->assertOk();
+
+        /** @var LessonRevisionService $revisionService */
+        $revisionService = app(LessonRevisionService::class);
+        $draft = $revisionService->createDraft($ctx['lesson'], $ctx['user']);
+        $revisionService->addExerciseBlock($draft, $hiddenExId);
+        $revisionService->addExerciseBlock($draft, $timedExId);
+        $revisionService->publish($ctx['lesson'], $ctx['user']);
+
+        $studentCtx = $this->createStudentContext($ctx['center'], $ctx['course'], $ctx['lesson']);
+        $studentToken = $this->tokenFor($studentCtx['studentUser']);
+
+        // 1. Verify hidden score & hidden review leak nothing
+        $hiddenStart = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', [...$routeParameters, 'exercise' => $hiddenExId])
+        )->assertCreated();
+        $hiddenOptId = (int) $hiddenStart->json('data.questions.0.options.0.id');
+        $hiddenQId = (int) $hiddenStart->json('data.questions.0.id');
+
+        $hiddenSubmit = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [
+                ...$routeParameters,
+                'exercise' => $hiddenExId,
+                'attempt' => (int) $hiddenStart->json('data.id'),
+            ]),
+            ['answers' => [['question_id' => $hiddenQId, 'selected_option_id' => $hiddenOptId]]]
+        )->assertOk()
+            ->assertJsonPath('data.score', null)
+            ->assertJsonPath('data.max_score', null)
+            ->assertJsonPath('data.percentage', null)
+            ->assertJsonPath('data.passed', null)
+            ->assertJsonPath('data.correct_count', null)
+            ->assertJsonMissingPath('data.questions.0.is_correct')
+            ->assertJsonMissingPath('data.questions.0.points_awarded')
+            ->assertJsonMissingPath('data.questions.0.correct_option_id')
+            ->assertJsonMissingPath('data.questions.0.explanation');
+        $this->assertStringNotContainsString('SECRET_EXPLANATION_HIDDEN', $hiddenSubmit->getContent());
+
+        // 2. Verify release_timing=after_final_attempt withholds Attempt #1, then releases on Attempt #2
+        $timedParams = [...$routeParameters, 'exercise' => $timedExId];
+        $attempt1 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $timedParams)
+        )->assertCreated();
+        $scQId = (int) $attempt1->json('data.questions.0.id');
+        $scParisId = (int) $attempt1->json('data.questions.0.options.0.id');
+        $fitbQId = (int) $attempt1->json('data.questions.1.id');
+
+        $submit1 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [...$timedParams, 'attempt' => (int) $attempt1->json('data.id')]),
+            ['answers' => [['question_id' => $scQId, 'selected_option_id' => $scParisId]]]
+        )->assertOk()
+            ->assertJsonPath('data.result_visibility.results_released', false)
+            ->assertJsonPath('data.score', null)
+            ->assertJsonPath('data.percentage', null)
+            ->assertJsonPath('data.passed', null)
+            ->assertJsonMissingPath('data.questions.0.is_correct');
+        $this->assertStringNotContainsString('SECRET_FITB_KEY', $submit1->getContent());
+
+        // Attempt #2 (final permitted attempt = 2 of 2) -> results released, question results shown, correct answers & explanations still hidden!
+        $attempt2 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.start', $timedParams)
+        )->assertCreated();
+
+        $submit2 = $this->withHeader('Authorization', "Bearer {$studentToken}")->postJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.submit-specific', [...$timedParams, 'attempt' => (int) $attempt2->json('data.id')]),
+            ['answers' => [['question_id' => $scQId, 'selected_option_id' => $scParisId]]]
+        )->assertOk()
+            ->assertJsonPath('data.result_visibility.results_released', true)
+            ->assertJsonPath('data.score', 1)
+            ->assertJsonPath('data.max_score', 2)
+            ->assertJsonPath('data.percentage', 50)
+            ->assertJsonPath('data.passed', true)
+            ->assertJsonPath('data.correct_count', 1)
+            ->assertJsonPath('data.incorrect_count', 0)
+            ->assertJsonPath('data.unanswered_count', 1)
+            ->assertJsonPath('data.questions.0.result_status', 'correct')
+            ->assertJsonPath('data.questions.1.result_status', 'unanswered')
+            ->assertJsonMissingPath('data.questions.0.correct_option_id')
+            ->assertJsonMissingPath('data.questions.0.explanation')
+            ->assertJsonMissingPath('data.questions.1.blanks.0.accepted_answers');
+        $this->assertStringNotContainsString('SECRET_TIMED_EXPLANATION', $submit2->getContent());
+        $this->assertStringNotContainsString('SECRET_FITB_KEY', $submit2->getContent());
+
+        // History now shows both attempts with released results
+        $this->withHeader('Authorization', "Bearer {$studentToken}")->getJson(
+            route('api.centers.courses.learn.lessons.exercises.attempts.history', $timedParams)
+        )->assertOk()
+            ->assertJsonPath('data.0.result_visibility.results_released', true)
+            ->assertJsonPath('data.1.result_visibility.results_released', true);
     }
 }

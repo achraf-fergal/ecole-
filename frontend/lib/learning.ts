@@ -867,17 +867,30 @@ export interface AttemptQuestionOption {
 export interface AttemptBlankFeedback {
   id: string;
   is_correct: boolean;
-  student_answer: string;
-  accepted_answers: string[];
-  points_awarded: number;
-  points_possible: number;
+  student_answer?: string;
+  accepted_answers?: string[];
+  points_awarded?: number;
+  points_possible?: number;
+}
+
+export interface ResultVisibilityPolicy {
+  results_released: boolean;
+  release_timing: "immediately" | "after_final_attempt";
+  show_score: boolean;
+  show_percentage: boolean;
+  show_pass_fail: boolean;
+  show_question_results: boolean;
+  show_student_answers: boolean;
+  show_correct_answers: boolean;
+  show_explanations: boolean;
+  show_points_per_question: boolean;
 }
 
 export interface AttemptQuestion {
   id: number;
   question_type: QuestionType;
   prompt: string;
-  points_possible: number;
+  points_possible: number | null;
   selected_option_id: number | null;
   selected_option_ids?: number[] | null;
   text_answer?: string | null;
@@ -885,6 +898,7 @@ export interface AttemptQuestion {
   blanks?: AttemptBlankFeedback[];
   options: AttemptQuestionOption[];
   is_correct?: boolean;
+  result_status?: "correct" | "incorrect" | "unanswered";
   points_awarded?: number;
   correct_option_id?: number;
   correct_option_ids?: number[];
@@ -897,15 +911,19 @@ export interface ExerciseAttemptData {
   exercise_id: number;
   attempt_number: number;
   status: "in_progress" | "submitted" | "graded";
-  passing_score: number;
-  max_score: number;
+  passing_score: number | null;
+  max_score: number | null;
   score: number | null;
   percentage: number | null;
   passed: boolean | null;
+  correct_count?: number | null;
+  incorrect_count?: number | null;
+  unanswered_count?: number | null;
   started_at: string;
   submitted_at: string | null;
   graded_at: string | null;
   show_correct_answers: boolean;
+  result_visibility?: ResultVisibilityPolicy;
   questions: AttemptQuestion[];
 }
 

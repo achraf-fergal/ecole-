@@ -5,6 +5,7 @@ import type {
   CreateExerciseOptionPayload,
   CreateQuestionPayload,
   ExerciseAnswerConfigPayload,
+  ExerciseResultSettingsPayload,
   ShortAnswerConfigPayload,
   ShortAnswerNormalizationPayload,
 } from "@/lib/admin-learning";
@@ -78,6 +79,34 @@ export const NORMALIZATION_RULE_DESCRIPTIONS: {
     description: "Require accented characters (such as café vs cafe) to match.",
   },
 ];
+
+export function defaultResultSettings(showCorrect = false): ExerciseResultSettingsPayload {
+  return {
+    show_score: true,
+    show_percentage: true,
+    show_pass_fail: true,
+    show_question_results: true,
+    show_student_answers: true,
+    show_correct_answers: showCorrect,
+    show_explanations: showCorrect,
+    show_points_per_question: true,
+    release_timing: "immediately",
+  };
+}
+
+export function resolveDraftResultSettings(exercise: {
+  result_settings?: ExerciseResultSettingsPayload;
+  show_correct_answers_after_submission: boolean;
+}): ExerciseResultSettingsPayload {
+  const base = defaultResultSettings(Boolean(exercise.show_correct_answers_after_submission));
+  if (!exercise.result_settings) return base;
+  const merged: ExerciseResultSettingsPayload = { ...base, ...exercise.result_settings };
+  if (!merged.show_question_results) {
+    merged.show_correct_answers = false;
+    merged.show_explanations = false;
+  }
+  return merged;
+}
 
 export function defaultNormalization(): ShortAnswerNormalizationPayload {
   return { ...DEFAULT_SHORT_ANSWER_NORMALIZATION };
@@ -253,6 +282,7 @@ export function toDraftQuestion(
 export function toDraftExercise(exercise: AdminFullExercise, existingDraft?: ExerciseDraft | null): ExerciseDraft {
   return {
     ...exercise,
+    result_settings: resolveDraftResultSettings(exercise),
     questions: exercise.questions.map((question) => {
       const existingQuestion =
         existingDraft?.questions.find((q) => q.id && q.id === question.id) ??

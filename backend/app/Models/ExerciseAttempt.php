@@ -25,7 +25,9 @@ class ExerciseAttempt extends Model
         'attempt_number',
         'status',
         'passing_score_snapshot',
+        'max_attempts_snapshot',
         'show_correct_answers_after_submission_snapshot',
+        'result_settings_snapshot',
         'score',
         'max_score',
         'percentage',
@@ -41,7 +43,9 @@ class ExerciseAttempt extends Model
         return [
             'attempt_number' => 'integer',
             'passing_score_snapshot' => 'decimal:2',
+            'max_attempts_snapshot' => 'integer',
             'show_correct_answers_after_submission_snapshot' => 'boolean',
+            'result_settings_snapshot' => 'array',
             'score' => 'decimal:2',
             'max_score' => 'decimal:2',
             'percentage' => 'decimal:2',
@@ -157,5 +161,18 @@ class ExerciseAttempt extends Model
             self::STATUS_SUBMITTED,
             self::STATUS_GRADED,
         ], true);
+    }
+
+    /**
+     * Resolve effective result visibility settings from the immutable attempt snapshot.
+     *
+     * @return array<string, bool|string>
+     */
+    public function resolvedResultSettings(): array
+    {
+        return Exercise::normalizeResultSettings(
+            is_array($this->result_settings_snapshot) ? $this->result_settings_snapshot : null,
+            (bool) $this->show_correct_answers_after_submission_snapshot
+        );
     }
 }

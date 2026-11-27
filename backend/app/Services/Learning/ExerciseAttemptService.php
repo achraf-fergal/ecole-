@@ -387,6 +387,8 @@ class ExerciseAttemptService
                 }
             }
 
+            $resolvedResultSettings = $lockedExercise->resolvedResultSettings();
+
             $attempt = ExerciseAttempt::query()->create([
                 'center_id' => $center->id,
                 'exercise_id' => $lockedExercise->id,
@@ -394,7 +396,9 @@ class ExerciseAttemptService
                 'attempt_number' => $nextAttemptNumber,
                 'status' => ExerciseAttempt::STATUS_IN_PROGRESS,
                 'passing_score_snapshot' => $lockedExercise->passing_score,
-                'show_correct_answers_after_submission_snapshot' => (bool) $lockedExercise->show_correct_answers_after_submission,
+                'max_attempts_snapshot' => $lockedExercise->max_attempts,
+                'show_correct_answers_after_submission_snapshot' => (bool) $resolvedResultSettings['show_correct_answers'],
+                'result_settings_snapshot' => $resolvedResultSettings,
                 'score' => null,
                 'max_score' => $this->minorUnitsToDecimalString($maxScoreMinorUnits),
                 'percentage' => null,
@@ -608,58 +612,199 @@ class ExerciseAttemptService
         bool $isAdmin = false
     ): array {
         $isFinished = $attempt->isFinished();
-        $canRevealAnswers = $isAdmin || (
-            $isFinished && (bool) $attempt->show_correct_answers_after_submission_snapshot
-        );
+        $settings = $attempt->resolvedResultSettings();
+
+        $resultsReleased = false;
+        if ($isAdmin) {
+            $resultsReleased = true;
+        } elseif ($isFinished) {
+            if (($settings['release_timing'] ?? Exercise::RELEASE_TIMING_IMMEDIATELY) === Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT) {
+                $maxAttempts = $attempt->max_attempts_snapshot;
+                $resultsReleased = $maxAttempts !== null && (
+                    $attempt->attempt_number >= $maxAttempts
+                    || ExerciseAttempt::query()
+                        ->forCenter((int) $attempt->center_id)
+                        ->forExercise((int) $attempt->exercise_id)
+                        ->forStudent((int) $attempt->student_profile_id)
+                        ->completed()
+                        ->where('attempt_number', '>=', $maxAttempts)
+                        ->exists()
+                );
+            } else {
+                $resultsReleased = true;
+            }
+        }
+
+        $showScore = $isAdmin || ($resultsReleased && (bool) $settings['show_score']);
+        $showPercentage = $isAdmin || ($resultsReleased && (bool) $settings['show_percentage']);
+        $showPassFail = $isAdmin || ($resultsReleased && (bool) $settings['show_pass_fail']);
+        $showQuestionResults = $isAdmin || ($resultsReleased && (bool) $settings['show_question_results']);
+        $showStudentAnswers = $isAdmin || ! $isFinished || ($resultsReleased && (bool) $settings['show_student_answers']);
+        $showCorrectAnswers = $isAdmin || ($resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_correct_answers']);
+        $showExplanations = $isAdmin || ($resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_explanations']);
+        $showPointsPerQuestion = $isAdmin || ($resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_points_per_question']);
+
+        $correctCount = 0;
+        $incorrectCount = 0;
+        $unansweredCount = 0;
+
+        if ($isFinished) {
+            foreach ($attempt->answers as $answer) {
+                if ($this->isAnswerUnanswered($answer)) {
+                    $unansweredCount += 1;
+                } elseif ((bool) $answer->is_correct) {
+                    $correctCount += 1;
+                } else {
+                    $incorrectCount += 1;
+                }
+            }
+        }
 
         return [
             'id' => $attempt->id,
             'exercise_id' => $attempt->exercise_id,
             'attempt_number' => $attempt->attempt_number,
             'status' => $attempt->status,
-            'passing_score' => (float) $attempt->passing_score_snapshot,
-            'max_score' => (float) $attempt->max_score,
-            'score' => $isFinished ? (float) $attempt->score : null,
-            'percentage' => $isFinished ? (float) $attempt->percentage : null,
-            'passed' => $isFinished ? (bool) $attempt->passed : null,
+            'passing_score' => (! $isFinished || $showPassFail) ? (float) $attempt->passing_score_snapshot : null,
+            'max_score' => (! $isFinished || $showScore) ? (float) $attempt->max_score : null,
+            'score' => ($isFinished && $showScore) ? (float) $attempt->score : null,
+            'percentage' => ($isFinished && $showPercentage) ? (float) $attempt->percentage : null,
+            'passed' => ($isFinished && $showPassFail) ? (bool) $attempt->passed : null,
+            'correct_count' => ($isFinished && $showQuestionResults) ? $correctCount : null,
+            'incorrect_count' => ($isFinished && $showQuestionResults) ? $incorrectCount : null,
+            'unanswered_count' => ($isFinished && $showQuestionResults) ? $unansweredCount : null,
             'started_at' => $attempt->started_at?->toIso8601String(),
             'submitted_at' => $attempt->submitted_at?->toIso8601String(),
             'graded_at' => $attempt->graded_at?->toIso8601String(),
-            'show_correct_answers' => $canRevealAnswers,
-            'questions' => $attempt->answers->map(function (ExerciseAttemptAnswer $answer) use ($canRevealAnswers): array {
+            'show_correct_answers' => $showCorrectAnswers,
+            'result_visibility' => [
+                'results_released' => $resultsReleased,
+                'release_timing' => $settings['release_timing'],
+                'show_score' => (bool) $settings['show_score'],
+                'show_percentage' => (bool) $settings['show_percentage'],
+                'show_pass_fail' => (bool) $settings['show_pass_fail'],
+                'show_question_results' => (bool) $settings['show_question_results'],
+                'show_student_answers' => (bool) $settings['show_student_answers'],
+                'show_correct_answers' => (bool) $settings['show_correct_answers'],
+                'show_explanations' => (bool) $settings['show_explanations'],
+                'show_points_per_question' => (bool) $settings['show_points_per_question'],
+            ],
+            'questions' => $attempt->answers->map(function (ExerciseAttemptAnswer $answer) use (
+                $isFinished,
+                $showQuestionResults,
+                $showStudentAnswers,
+                $showCorrectAnswers,
+                $showExplanations,
+                $showPointsPerQuestion
+            ): array {
                 $data = [
                     'id' => $answer->question_id,
                     'question_type' => $answer->question_type_snapshot,
                     'prompt' => $answer->prompt_snapshot,
-                    'points_possible' => (float) $answer->points_possible,
-                    'selected_option_id' => $answer->selected_option_id,
-                    'selected_option_ids' => $answer->selected_option_ids,
-                    'text_answer' => $answer->text_answer,
+                    'points_possible' => (! $isFinished || $showPointsPerQuestion) ? (float) $answer->points_possible : null,
                     'options' => $answer->options_snapshot,
                 ];
 
-                if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
-                    $decoded = $answer->text_answer !== null ? json_decode($answer->text_answer, true) : null;
-                    $data['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass();
+                if ($showStudentAnswers) {
+                    $data['selected_option_id'] = $answer->selected_option_id;
+                    $data['selected_option_ids'] = $answer->selected_option_ids;
+                    $data['text_answer'] = $answer->text_answer;
+
+                    if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                        $decoded = $answer->text_answer !== null ? json_decode($answer->text_answer, true) : null;
+                        $data['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass();
+                    }
+                } else {
+                    $data['selected_option_id'] = null;
+                    $data['selected_option_ids'] = null;
+                    $data['text_answer'] = null;
+                    if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                        $data['blank_answers'] = new \stdClass();
+                    }
                 }
 
-                if ($canRevealAnswers) {
+                if ($showQuestionResults) {
+                    $unanswered = $this->isAnswerUnanswered($answer);
                     $data['is_correct'] = $answer->is_correct;
-                    $data['points_awarded'] = (float) $answer->points_awarded;
-                    $data['correct_option_id'] = $answer->correct_option_id_snapshot;
-                    $data['correct_option_ids'] = $answer->correct_option_ids_snapshot ?? [];
-                    if ($answer->question_type_snapshot === Question::TYPE_SHORT_ANSWER) {
-                        $data['accepted_answers'] = $answer->answer_config_snapshot['accepted_answers'] ?? [];
-                    } elseif ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
-                        $gradeResult = $this->answerGrader->gradeFillInTheBlanks($answer);
-                        $data['blanks'] = $gradeResult['blanks_feedback'];
+                    $data['result_status'] = $unanswered
+                        ? 'unanswered'
+                        : ((bool) $answer->is_correct ? 'correct' : 'incorrect');
+
+                    if ($showPointsPerQuestion) {
+                        $data['points_awarded'] = (float) $answer->points_awarded;
                     }
+
+                    if ($showCorrectAnswers) {
+                        $data['correct_option_id'] = $answer->correct_option_id_snapshot;
+                        $data['correct_option_ids'] = $answer->correct_option_ids_snapshot ?? [];
+                        if ($answer->question_type_snapshot === Question::TYPE_SHORT_ANSWER) {
+                            $data['accepted_answers'] = $answer->answer_config_snapshot['accepted_answers'] ?? [];
+                        }
+                    }
+
+                    if ($answer->question_type_snapshot === Question::TYPE_FILL_IN_THE_BLANKS) {
+                        $gradeResult = $this->answerGrader->gradeFillInTheBlanks($answer);
+                        $data['blanks'] = array_map(
+                            static function (array $blank) use ($showStudentAnswers, $showCorrectAnswers, $showPointsPerQuestion): array {
+                                $item = [
+                                    'id' => $blank['id'],
+                                    'is_correct' => $blank['is_correct'],
+                                ];
+                                if ($showStudentAnswers) {
+                                    $item['student_answer'] = $blank['student_answer'];
+                                }
+                                if ($showCorrectAnswers) {
+                                    $item['accepted_answers'] = $blank['accepted_answers'];
+                                }
+                                if ($showPointsPerQuestion) {
+                                    $item['points_awarded'] = $blank['points_awarded'];
+                                    $item['points_possible'] = $blank['points_possible'];
+                                }
+
+                                return $item;
+                            },
+                            $gradeResult['blanks_feedback']
+                        );
+                    }
+                }
+
+                if ($showExplanations) {
                     $data['explanation'] = $answer->explanation_snapshot;
                 }
 
                 return $data;
             })->values()->all(),
         ];
+    }
+
+    private function isAnswerUnanswered(ExerciseAttemptAnswer $answer): bool
+    {
+        return match ($answer->question_type_snapshot) {
+            Question::TYPE_SINGLE_CHOICE,
+            Question::TYPE_TRUE_FALSE => $answer->selected_option_id === null,
+            Question::TYPE_MULTIPLE_SELECT => ! is_array($answer->selected_option_ids) || $answer->selected_option_ids === [],
+            Question::TYPE_SHORT_ANSWER => $answer->text_answer === null || trim($answer->text_answer) === '',
+            Question::TYPE_FILL_IN_THE_BLANKS => $this->areAllBlanksEmpty($answer->text_answer),
+            default => true,
+        };
+    }
+
+    private function areAllBlanksEmpty(?string $textAnswer): bool
+    {
+        if ($textAnswer === null || trim($textAnswer) === '') {
+            return true;
+        }
+        $decoded = json_decode($textAnswer, true);
+        if (! is_array($decoded) || $decoded === []) {
+            return true;
+        }
+        foreach ($decoded as $val) {
+            if (is_string($val) && trim($val) !== '') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /** Validate a type-specific entry against the immutable attempt snapshot. */

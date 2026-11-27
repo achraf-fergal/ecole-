@@ -591,12 +591,27 @@ export interface CreateQuestionPayload {
   options: CreateExerciseOptionPayload[];
 }
 
+export type ResultReleaseTiming = "immediately" | "after_final_attempt";
+
+export interface ExerciseResultSettingsPayload {
+  show_score: boolean;
+  show_percentage: boolean;
+  show_pass_fail: boolean;
+  show_question_results: boolean;
+  show_student_answers: boolean;
+  show_correct_answers: boolean;
+  show_explanations: boolean;
+  show_points_per_question: boolean;
+  release_timing: ResultReleaseTiming;
+}
+
 export interface CreateExercisePayload {
   title: string;
   instructions?: string | null;
   max_attempts?: number | null;
   passing_score?: number;
   show_correct_answers_after_submission?: boolean;
+  result_settings?: ExerciseResultSettingsPayload;
   sort_order?: number;
   questions?: CreateQuestionPayload[];
 }
@@ -608,6 +623,7 @@ export interface AdminFullExercise {
   max_attempts: number | null;
   passing_score: number;
   show_correct_answers_after_submission: boolean;
+  result_settings?: ExerciseResultSettingsPayload;
   sort_order: number;
   status: "draft" | "published" | "archived";
   published_at: string | null;

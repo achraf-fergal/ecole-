@@ -175,7 +175,8 @@ async function verifyAdminExerciseDraftBuilder(page, fixture, intentionalFailure
   await activeCard(builder).getByRole("button", { name: "+ Add accepted answer", exact: true }).click();
   await activeCard(builder).locator('input[aria-label="Accepted answer 2"]').fill("salut");
 
-  await builder.getByLabel("Show correct answers and explanations after submission").check();
+  await builder.getByLabel("Show correct answers").check();
+  await builder.getByLabel("Show question explanations").check();
 
   const exerciseUrl = `${BASE_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises/${exerciseId}`;
   const exerciseListUrl = `${BASE_URL}/api/centers/${encodeURIComponent(fixture.centerSlug)}/admin/courses/${encodeURIComponent(fixture.courseSlug)}/lessons/${fixture.lessonId}/exercises`;

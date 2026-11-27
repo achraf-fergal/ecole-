@@ -6,6 +6,7 @@ import type {
   LearningRouteParams,
   ExerciseAttemptData,
   AttemptQuestion,
+  ResultVisibilityPolicy,
   SaveAttemptAnswerPayload,
   ExerciseCurrentAttemptState,
   PaginatedExerciseAttempts,
@@ -80,6 +81,220 @@ function renderFitbReviewPrompt(
       </span>
     );
   });
+}
+
+function resolveAttemptVisibility(attempt: ExerciseAttemptData): ResultVisibilityPolicy {
+  if (attempt.result_visibility) {
+    return attempt.result_visibility;
+  }
+  const showCorrect = Boolean(attempt.show_correct_answers);
+  return {
+    results_released: true,
+    release_timing: "immediately",
+    show_score: attempt.score !== null,
+    show_percentage: attempt.percentage !== null,
+    show_pass_fail: attempt.passed !== null,
+    show_question_results: showCorrect,
+    show_student_answers: true,
+    show_correct_answers: showCorrect,
+    show_explanations: showCorrect,
+    show_points_per_question: showCorrect,
+  };
+}
+
+function AttemptQuestionReviewCard({
+  question,
+  questionIndex,
+  visibility,
+  compact = false,
+}: {
+  question: AttemptQuestion;
+  questionIndex: number;
+  visibility: ResultVisibilityPolicy;
+  compact?: boolean;
+}) {
+  const showStatus = visibility.results_released && visibility.show_question_results;
+  const showPoints = showStatus && visibility.show_points_per_question;
+  const showStudentAnswers = visibility.results_released && visibility.show_student_answers;
+  const showCorrect = showStatus && visibility.show_correct_answers;
+  const showExplanation = showStatus && visibility.show_explanations;
+
+  const resultStatus =
+    question.result_status ??
+    (question.is_correct === true ? "correct" : question.is_correct === false ? "incorrect" : undefined);
+
+  return (
+    <div
+      className={
+        compact
+          ? "rounded-lg border border-slate-100 bg-white p-3.5"
+          : "rounded-xl border border-slate-100 bg-slate-50/60 p-4 sm:p-5"
+      }
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+          Question {questionIndex + 1}
+          {showPoints && question.points_possible !== null
+            ? ` (${question.points_possible} ${Number(question.points_possible) === 1 ? "point" : "points"})`
+            : ""}
+        </span>
+        <div className="flex items-center gap-2">
+          {showStatus && resultStatus && (
+            <span
+              className={`rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                resultStatus === "correct"
+                  ? "bg-emerald-50 text-emerald-700"
+                  : resultStatus === "unanswered"
+                  ? "bg-amber-50 text-amber-800"
+                  : "bg-rose-50 text-rose-700"
+              }`}
+            >
+              {resultStatus === "correct"
+                ? "✓ Correct"
+                : resultStatus === "unanswered"
+                ? "— Unanswered"
+                : "✗ Incorrect"}
+            </span>
+          )}
+          {showPoints && question.points_awarded !== undefined && (
+            <span
+              className={`text-[10px] font-bold ${
+                Number(question.points_awarded) > 0 ? "text-emerald-700" : "text-slate-500"
+              }`}
+            >
+              {Number(question.points_awarded) > 0 ? `+${question.points_awarded} pts` : "0 pts"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {question.question_type === "fill_in_the_blanks" ? (
+        <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-white p-3 text-xs">
+          <div className="font-semibold leading-relaxed text-slate-800">
+            {renderFitbReviewPrompt(
+              question.prompt,
+              question.blanks,
+              showStudentAnswers ? question.blank_answers : undefined,
+              showStatus
+            )}
+          </div>
+          {showStatus && question.blanks && question.blanks.length > 0 && (showCorrect || showPoints) && (
+            <div className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">
+              {question.blanks.map((b) => (
+                <div key={b.id} className="flex flex-wrap items-center gap-2">
+                  <span className="font-bold text-slate-700">[{b.id}]:</span>
+                  {showCorrect && b.accepted_answers && (
+                    <span>Accepted: {b.accepted_answers.join(" · ")}</span>
+                  )}
+                  {showPoints && b.points_awarded !== undefined && b.points_possible !== undefined && (
+                    <span className="text-[10px] text-slate-400">
+                      ({b.points_awarded} / {b.points_possible} pts)
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <p className={`mt-2 font-semibold text-[#102b4c] ${compact ? "text-xs leading-5" : "text-sm leading-6"}`}>
+            {question.prompt}
+          </p>
+          {question.question_type === "short_answer" ? (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs">
+              {showStudentAnswers ? (
+                <p>
+                  <span className="font-bold">Your answer:</span>{" "}
+                  {question.text_answer || "No answer"}
+                </p>
+              ) : (
+                <p className="text-slate-500">Student response is hidden.</p>
+              )}
+              {showCorrect && question.accepted_answers && (
+                <p className="mt-2">
+                  <span className="font-bold">Accepted answers:</span>{" "}
+                  {question.accepted_answers.join(" · ")}
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {question.options.map((option) => {
+                const wasSelected =
+                  showStudentAnswers &&
+                  (question.selected_option_id === option.id ||
+                    (question.selected_option_ids ?? []).includes(option.id));
+                const isCorrect = showCorrect
+                  ? question.correct_option_ids
+                    ? question.correct_option_ids.includes(option.id)
+                    : question.correct_option_id === option.id
+                  : undefined;
+
+                let optionBorder = "border-slate-200 bg-white text-slate-700";
+                if (wasSelected && isCorrect === true) {
+                  optionBorder = "border-emerald-300 bg-emerald-50/70 text-emerald-900 font-bold";
+                } else if (wasSelected && isCorrect === false) {
+                  optionBorder = "border-rose-300 bg-rose-50/70 text-rose-900 font-bold";
+                } else if (isCorrect === true) {
+                  optionBorder = "border-emerald-200 bg-emerald-50/40 text-emerald-900";
+                } else if (wasSelected) {
+                  optionBorder = "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold";
+                }
+
+                return (
+                  <div
+                    key={option.id}
+                    className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-xs ${optionBorder}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                          wasSelected
+                            ? "border-[#0e8988] bg-[#0e8988] text-white"
+                            : "border-slate-300 bg-white"
+                        }`}
+                      >
+                        {wasSelected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                      </span>
+                      <span>{option.option_text}</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {wasSelected && (
+                        <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[9px] font-semibold text-slate-600">
+                          Your Answer
+                        </span>
+                      )}
+                      {isCorrect === true && (
+                        <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[9px] font-extrabold text-emerald-800">
+                          ✓ Correct
+                        </span>
+                      )}
+                      {wasSelected && isCorrect === false && (
+                        <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[9px] font-extrabold text-rose-800">
+                          ✗ Incorrect
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {showExplanation && question.explanation && (
+        <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/80 p-3">
+          <p className="text-[10px] font-extrabold uppercase tracking-wide text-indigo-700">
+            Explanation
+          </p>
+          <p className="mt-1 text-xs leading-6 text-indigo-950">{question.explanation}</p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function answersFromAttempt(questions: AttemptQuestion[]): Record<number, AnswerValue> {
@@ -951,17 +1166,34 @@ export default function LessonExerciseBlock({
           </div>
         </div>
 
-        {completedAttempt ? (
-          <span
-            className={`rounded-full px-3 py-1 text-[10px] font-extrabold uppercase ${
-              completedAttempt.passed
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-rose-50 text-rose-700"
-            }`}
-          >
-            {completedAttempt.passed ? "Passed" : "Failed"}
-          </span>
-        ) : (
+        {completedAttempt ? (() => {
+          const vis = resolveAttemptVisibility(completedAttempt);
+          if (!vis.results_released) {
+            return (
+              <span className="rounded-full bg-amber-50 px-3 py-1 text-[10px] font-extrabold uppercase text-amber-800">
+                Submitted
+              </span>
+            );
+          }
+          if (!vis.show_pass_fail || completedAttempt.passed === null) {
+            return (
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-extrabold uppercase text-slate-700">
+                Completed
+              </span>
+            );
+          }
+          return (
+            <span
+              className={`rounded-full px-3 py-1 text-[10px] font-extrabold uppercase ${
+                completedAttempt.passed
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "bg-rose-50 text-rose-700"
+              }`}
+            >
+              {completedAttempt.passed ? "Passed" : "Failed"}
+            </span>
+          );
+        })() : (
           <span className="rounded-full bg-[#e5f5f2] px-3 py-1 text-[10px] font-extrabold uppercase text-[#087b83]">
             Practice Assessment
           </span>
@@ -975,195 +1207,120 @@ export default function LessonExerciseBlock({
       )}
 
       {/* Score Summary Card if completed attempt exists */}
-      {completedAttempt && (
-        <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50/80 p-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
-                Latest Result (Attempt #{completedAttempt.attempt_number})
-              </p>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="text-2xl font-black text-[#102b4c]">
-                  {completedAttempt.score ?? 0} / {completedAttempt.max_score}
-                </span>
-                <span className="text-sm font-bold text-slate-500">
-                  ({completedAttempt.percentage ?? 0}%)
-                </span>
-              </div>
-            </div>
-
-            <div className="text-right">
-              <span
-                className={`inline-block rounded-xl px-3 py-1.5 text-xs font-black ${
-                  completedAttempt.passed
-                    ? "bg-emerald-100 text-emerald-800"
-                    : "bg-rose-100 text-rose-800"
-                }`}
-              >
-                {completedAttempt.passed
-                  ? "✓ Assessment Passed"
-                  : "✗ Passing Score Not Reached"}
-              </span>
-              <p className="mt-1 text-[10px] text-slate-400">
-                Passing requirement: {exercise.passing_score}%
+      {completedAttempt && (() => {
+        const vis = resolveAttemptVisibility(completedAttempt);
+        if (!vis.results_released) {
+          return (
+            <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50/70 p-5 text-xs text-amber-950">
+              <p className="font-bold">Attempt #{completedAttempt.attempt_number} submitted</p>
+              <p className="mt-1 text-amber-900">
+                Results and detailed feedback will be released after your final permitted attempt.
               </p>
             </div>
-          </div>
-        </div>
-      )}
+          );
+        }
 
-      {/* Review of questions from completed attempt */}
-      {completedAttempt && completedAttempt.questions.length > 0 && (
-        <div className="mt-5 space-y-5">
-          <h5 className="text-xs font-extrabold uppercase tracking-wider text-slate-600">
-            Question Review
-          </h5>
-
-          {completedAttempt.questions.map((question, questionIndex) => (
-            <div
-              key={question.id}
-              className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 sm:p-5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
-                  Question {questionIndex + 1} ({question.points_possible}{" "}
-                  {Number(question.points_possible) === 1 ? "point" : "points"})
-                </span>
-                {completedAttempt.show_correct_answers && question.is_correct !== undefined && (
-                  <span
-                    className={`text-[10px] font-bold ${
-                      question.is_correct
-                        ? "text-emerald-700"
-                        : "text-rose-700"
-                    }`}
-                  >
-                    {Number(question.points_awarded ?? 0) > 0
-                      ? `+${question.points_awarded ?? question.points_possible} pts`
-                      : "0 pts"}
-                  </span>
+        return (
+          <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50/80 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                  Latest Result (Attempt #{completedAttempt.attempt_number})
+                </p>
+                {(vis.show_score || vis.show_percentage) ? (
+                  <div className="mt-1 flex items-baseline gap-2">
+                    {vis.show_score && completedAttempt.score !== null && completedAttempt.max_score !== null && (
+                      <span className="text-2xl font-black text-[#102b4c]">
+                        {completedAttempt.score} / {completedAttempt.max_score}
+                      </span>
+                    )}
+                    {vis.show_percentage && completedAttempt.percentage !== null && (
+                      <span className="text-sm font-bold text-slate-500">
+                        {vis.show_score ? `(${completedAttempt.percentage}%)` : `${completedAttempt.percentage}%`}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs font-semibold text-slate-600">
+                    Your responses have been recorded.
+                  </p>
                 )}
               </div>
 
-              {question.question_type === "fill_in_the_blanks" ? (
-                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs space-y-2">
-                  <div className="font-semibold text-slate-800 leading-relaxed">
-                    {renderFitbReviewPrompt(
-                      question.prompt,
-                      question.blanks,
-                      question.blank_answers,
-                      Boolean(completedAttempt.show_correct_answers)
-                    )}
-                  </div>
-                  {completedAttempt.show_correct_answers && question.blanks && question.blanks.length > 0 && (
-                    <div className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">
-                      {question.blanks.map((b) => (
-                        <div key={b.id} className="flex flex-wrap items-center gap-2">
-                          <span className="font-bold text-slate-700">[{b.id}]:</span>
-                          <span>Accepted: {b.accepted_answers.join(" · ")}</span>
-                          <span className="text-[10px] text-slate-400">({b.points_awarded} / {b.points_possible} pts)</span>
-                        </div>
-                      ))}
-                    </div>
+              {vis.show_pass_fail && completedAttempt.passed !== null && (
+                <div className="text-right">
+                  <span
+                    className={`inline-block rounded-xl px-3 py-1.5 text-xs font-black ${
+                      completedAttempt.passed
+                        ? "bg-emerald-100 text-emerald-800"
+                        : "bg-rose-100 text-rose-800"
+                    }`}
+                  >
+                    {completedAttempt.passed
+                      ? "✓ Assessment Passed"
+                      : "✗ Passing Score Not Reached"}
+                  </span>
+                  {completedAttempt.passing_score !== null && (
+                    <p className="mt-1 text-[10px] text-slate-400">
+                      Passing requirement: {completedAttempt.passing_score}%
+                    </p>
                   )}
-                </div>
-              ) : (
-                <>
-                  <p className="mt-2 text-sm font-semibold leading-6 text-[#102b4c]">
-                    {question.prompt}
-                  </p>
-                  {question.question_type === "short_answer" ? (
-                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs">
-                  <p><span className="font-bold">Your answer:</span> {question.text_answer || "No answer"}</p>
-                  {completedAttempt.show_correct_answers && question.accepted_answers && (
-                    <p className="mt-2"><span className="font-bold">Accepted answers:</span> {question.accepted_answers.join(" · ")}</p>
-                  )}
-                </div>
-              ) : (
-
-              <div className="mt-4 space-y-2">
-                {question.options.map((option) => {
-                  const wasSelected = question.selected_option_id === option.id
-                    || (question.selected_option_ids ?? []).includes(option.id);
-                  const isCorrect = completedAttempt.show_correct_answers
-                    ? question.correct_option_ids
-                      ? question.correct_option_ids.includes(option.id)
-                      : question.correct_option_id === option.id
-                    : undefined;
-
-                  let optionBorder = "border-slate-200 bg-white text-slate-700";
-                  if (wasSelected && isCorrect === true) {
-                    optionBorder =
-                      "border-emerald-300 bg-emerald-50/70 text-emerald-900 font-bold";
-                  } else if (wasSelected && isCorrect === false) {
-                    optionBorder =
-                      "border-rose-300 bg-rose-50/70 text-rose-900 font-bold";
-                  } else if (isCorrect === true) {
-                    optionBorder =
-                      "border-emerald-200 bg-emerald-50/40 text-emerald-900";
-                  } else if (wasSelected) {
-                    optionBorder =
-                      "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold";
-                  }
-
-                  return (
-                    <div
-                      key={option.id}
-                      className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3.5 text-xs ${optionBorder}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                            wasSelected
-                              ? "border-[#0e8988] bg-[#0e8988] text-white"
-                              : "border-slate-300 bg-white"
-                          }`}
-                        >
-                          {wasSelected && (
-                            <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                          )}
-                        </span>
-                        <span>{option.option_text}</span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        {wasSelected && (
-                          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[9px] font-semibold text-slate-600">
-                            Your Answer
-                          </span>
-                        )}
-                        {isCorrect === true && (
-                          <span className="rounded-md bg-emerald-100 px-2 py-0.5 text-[9px] font-extrabold text-emerald-800">
-                            ✓ Correct
-                          </span>
-                        )}
-                        {wasSelected && isCorrect === false && (
-                          <span className="rounded-md bg-rose-100 px-2 py-0.5 text-[9px] font-extrabold text-rose-800">
-                            ✗ Incorrect
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-                  )}
-                </>
-              )}
-
-              {completedAttempt.show_correct_answers && question.explanation && (
-                <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50/80 p-3.5">
-                  <p className="text-[10px] font-extrabold uppercase tracking-wide text-indigo-700">
-                    Explanation
-                  </p>
-                  <p className="mt-1 text-xs leading-6 text-indigo-950">
-                    {question.explanation}
-                  </p>
                 </div>
               )}
             </div>
-          ))}
-        </div>
-      )}
+
+            {vis.show_question_results &&
+              completedAttempt.correct_count !== null &&
+              completedAttempt.correct_count !== undefined && (
+                <div className="flex flex-wrap gap-2 border-t border-slate-200/70 pt-3 text-[11px] font-bold">
+                  <span className="rounded-lg bg-emerald-50 px-2.5 py-1 text-emerald-800">
+                    ✓ {completedAttempt.correct_count} Correct
+                  </span>
+                  <span className="rounded-lg bg-rose-50 px-2.5 py-1 text-rose-800">
+                    ✗ {completedAttempt.incorrect_count ?? 0} Incorrect
+                  </span>
+                  {(completedAttempt.unanswered_count ?? 0) > 0 && (
+                    <span className="rounded-lg bg-amber-50 px-2.5 py-1 text-amber-800">
+                      — {completedAttempt.unanswered_count} Unanswered
+                    </span>
+                  )}
+                </div>
+              )}
+          </div>
+        );
+      })()}
+
+      {/* Review of questions from completed attempt */}
+      {completedAttempt && completedAttempt.questions.length > 0 && (() => {
+        const vis = resolveAttemptVisibility(completedAttempt);
+        if (!vis.results_released) {
+          return null;
+        }
+        if (!vis.show_question_results && !vis.show_student_answers) {
+          return (
+            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+              Detailed question review is disabled for this assessment.
+            </div>
+          );
+        }
+
+        return (
+          <div className="mt-5 space-y-5">
+            <h5 className="text-xs font-extrabold uppercase tracking-wider text-slate-600">
+              Question Review
+            </h5>
+
+            {completedAttempt.questions.map((question, questionIndex) => (
+              <AttemptQuestionReviewCard
+                key={question.id}
+                question={question}
+                questionIndex={questionIndex}
+                visibility={vis}
+              />
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Attempt History Section */}
       {attemptsCount > 0 && (
@@ -1213,6 +1370,7 @@ export default function LessonExerciseBlock({
               {historyData &&
                 historyData.data.map((hist) => {
                   const isInspecting = inspectingAttemptId === hist.id;
+                  const histVis = resolveAttemptVisibility(hist);
 
                   return (
                     <div
@@ -1225,15 +1383,25 @@ export default function LessonExerciseBlock({
                             <span className="text-xs font-black text-[#102b4c]">
                               Attempt #{hist.attempt_number}
                             </span>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase ${
-                                hist.passed === true
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-rose-50 text-rose-700"
-                              }`}
-                            >
-                              {hist.passed === true ? "Passed" : "Failed"}
-                            </span>
+                            {!histVis.results_released ? (
+                              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[9px] font-extrabold uppercase text-amber-800">
+                                Results Withheld
+                              </span>
+                            ) : histVis.show_pass_fail && hist.passed !== null ? (
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase ${
+                                  hist.passed === true
+                                    ? "bg-emerald-50 text-emerald-700"
+                                    : "bg-rose-50 text-rose-700"
+                                }`}
+                              >
+                                {hist.passed === true ? "Passed" : "Failed"}
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-extrabold uppercase text-slate-600">
+                                Submitted
+                              </span>
+                            )}
                           </div>
 
                           <p className="mt-1 text-[11px] text-slate-500">
@@ -1253,182 +1421,48 @@ export default function LessonExerciseBlock({
                         </div>
 
                         <div className="flex items-center gap-4">
-                          <div className="text-right">
-                            <span className="text-sm font-black text-[#102b4c]">
-                              {hist.score ?? 0} / {hist.max_score}
-                            </span>
-                            <span className="ml-1 text-xs text-slate-500">
-                              ({hist.percentage ?? 0}%)
-                            </span>
-                          </div>
+                          {histVis.results_released && (histVis.show_score || histVis.show_percentage) && (
+                            <div className="text-right">
+                              {histVis.show_score && hist.score !== null && hist.max_score !== null && (
+                                <span className="text-sm font-black text-[#102b4c]">
+                                  {hist.score} / {hist.max_score}
+                                </span>
+                              )}
+                              {histVis.show_percentage && hist.percentage !== null && (
+                                <span className="ml-1 text-xs text-slate-500">
+                                  ({hist.percentage}%)
+                                </span>
+                              )}
+                            </div>
+                          )}
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setInspectingAttemptId(
-                                isInspecting ? null : hist.id
-                              )
-                            }
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100"
-                          >
-                            {isInspecting ? "Close Review" : "Review Answers"}
-                          </button>
+                          {histVis.results_released && (histVis.show_question_results || histVis.show_student_answers) && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInspectingAttemptId(
+                                  isInspecting ? null : hist.id
+                                )
+                              }
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-100"
+                            >
+                              {isInspecting ? "Close Review" : "Review Answers"}
+                            </button>
+                          )}
                         </div>
                       </div>
 
                       {/* Detailed Review for this historical attempt */}
-                      {isInspecting && hist.questions.length > 0 && (
+                      {isInspecting && histVis.results_released && hist.questions.length > 0 && (
                         <div className="mt-4 space-y-4 border-t border-slate-200/60 pt-4">
                           {hist.questions.map((q, qIdx) => (
-                            <div
+                            <AttemptQuestionReviewCard
                               key={q.id}
-                              className="rounded-lg border border-slate-100 bg-white p-3.5"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
-                                  Question {qIdx + 1} ({q.points_possible}{" "}
-                                  {Number(q.points_possible) === 1
-                                    ? "point"
-                                    : "points"}
-                                  )
-                                </span>
-                                {hist.show_correct_answers && q.is_correct !== undefined && (
-                                  <span
-                                    className={`text-[10px] font-bold ${
-                                      q.is_correct
-                                        ? "text-emerald-700"
-                                        : "text-rose-700"
-                                    }`}
-                                  >
-                                    {Number(q.points_awarded ?? 0) > 0
-                                      ? `+${
-                                          q.points_awarded ?? q.points_possible
-                                        } pts`
-                                      : "0 pts"}
-                                  </span>
-                                )}
-                              </div>
-
-                              {q.question_type === "fill_in_the_blanks" ? (
-                                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs space-y-1.5">
-                                  <div className="font-semibold text-slate-800 leading-relaxed">
-                                    {renderFitbReviewPrompt(
-                                      q.prompt,
-                                      q.blanks,
-                                      q.blank_answers,
-                                      Boolean(hist.show_correct_answers)
-                                    )}
-                                  </div>
-                                  {hist.show_correct_answers && q.blanks && q.blanks.length > 0 && (
-                                    <div className="mt-1 space-y-0.5 border-t border-slate-100 pt-1 text-[10px] text-slate-600">
-                                      {q.blanks.map((b) => (
-                                        <div key={b.id} className="flex flex-wrap items-center gap-1.5">
-                                          <span className="font-bold text-slate-700">[{b.id}]:</span>
-                                          <span>Accepted: {b.accepted_answers.join(" · ")}</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                <>
-                                  <p className="mt-1 text-xs font-semibold leading-5 text-[#102b4c]">
-                                    {q.prompt}
-                                  </p>
-                                  {q.question_type === "short_answer" ? (
-                                <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs">
-                                  <p><span className="font-bold">Your answer:</span> {q.text_answer || "No answer"}</p>
-                                  {hist.show_correct_answers && q.accepted_answers && (
-                                    <p className="mt-1"><span className="font-bold">Accepted answers:</span> {q.accepted_answers.join(" · ")}</p>
-                                  )}
-                                </div>
-                              ) : (
-
-                              <div className="mt-3 space-y-1.5">
-                                {q.options.map((opt) => {
-                                  const wasSelected = q.selected_option_id === opt.id
-                                    || (q.selected_option_ids ?? []).includes(opt.id);
-                                  const isCorrect = hist.show_correct_answers
-                                    ? q.correct_option_ids
-                                      ? q.correct_option_ids.includes(opt.id)
-                                      : q.correct_option_id === opt.id
-                                    : undefined;
-
-                                  let optBorder =
-                                    "border-slate-200 bg-white text-slate-700";
-                                  if (wasSelected && isCorrect === true) {
-                                    optBorder =
-                                      "border-emerald-300 bg-emerald-50/70 text-emerald-900 font-bold";
-                                  } else if (
-                                    wasSelected &&
-                                    isCorrect === false
-                                  ) {
-                                    optBorder =
-                                      "border-rose-300 bg-rose-50/70 text-rose-900 font-bold";
-                                  } else if (isCorrect === true) {
-                                    optBorder =
-                                      "border-emerald-200 bg-emerald-50/40 text-emerald-900";
-                                  } else if (wasSelected) {
-                                    optBorder =
-                                      "border-[#0e8988] bg-teal-50/40 text-[#102b4c] font-bold";
-                                  }
-
-                                  return (
-                                    <div
-                                      key={opt.id}
-                                      className={`flex items-center justify-between rounded-lg border p-2.5 text-xs ${optBorder}`}
-                                    >
-                                      <div className="flex items-center gap-2">
-                                        <span
-                                          className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
-                                            wasSelected
-                                              ? "border-[#0e8988] bg-[#0e8988] text-white"
-                                              : "border-slate-300 bg-white"
-                                          }`}
-                                        >
-                                          {wasSelected && (
-                                            <span className="h-1 w-1 rounded-full bg-white" />
-                                          )}
-                                        </span>
-                                        <span>{opt.option_text}</span>
-                                      </div>
-
-                                      <div className="flex items-center gap-1.5">
-                                        {wasSelected && (
-                                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
-                                            Your Answer
-                                          </span>
-                                        )}
-                                        {isCorrect === true && (
-                                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-extrabold text-emerald-800">
-                                            ✓ Correct
-                                          </span>
-                                        )}
-                                        {wasSelected && isCorrect === false && (
-                                          <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-extrabold text-rose-800">
-                                            ✗ Incorrect
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                                  )}
-                                </>
-                              )}
-
-                              {hist.show_correct_answers && q.explanation && (
-                                <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/80 p-2.5">
-                                  <p className="text-[9px] font-extrabold uppercase tracking-wide text-indigo-700">
-                                    Explanation
-                                  </p>
-                                  <p className="mt-0.5 text-xs text-indigo-950">
-                                    {q.explanation}
-                                  </p>
-                                </div>
-                              )}
-                            </div>
+                              question={q}
+                              questionIndex={qIdx}
+                              visibility={histVis}
+                              compact
+                            />
                           ))}
                         </div>
                       )}
