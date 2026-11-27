@@ -2,6 +2,7 @@
 
 import React from "react";
 import type { QuestionType } from "@/lib/learning";
+import FillBlankRenderer from "./fill-blank-renderer";
 
 export type ResponseOptionId = number;
 export type QuestionResponseValue =
@@ -45,19 +46,12 @@ export default function QuestionResponseRenderer({
 }: QuestionResponseRendererProps) {
   if (questionType === "fill_in_the_blanks") {
     const answerByBlank = isBlankAnswer(value) ? value : {};
-    const promptParts = (prompt || "Question prompt").split(/(\[[a-zA-Z0-9_\-]+\])/g);
 
     return (
       <div id={`${idPrefix}-prompt`} className="text-sm font-semibold leading-relaxed text-[#102b4c]">
-        {promptParts.map((part, partIndex) => {
-          const match = /^\[([a-zA-Z0-9_\-]+)\]$/.exec(part);
-          if (!match) return <span key={partIndex}>{part}</span>;
-
-          const blankCounter = promptParts
-            .slice(0, partIndex + 1)
-            .filter((previousPart) => /^\[[a-zA-Z0-9_\-]+\]$/.test(previousPart)).length;
-          const blankId = match[1];
-          return (
+        <FillBlankRenderer
+          prompt={prompt || "Question prompt"}
+          renderBlank={(blankId, blankCounter, partIndex) => (
             <input
               key={`${idPrefix}-${blankId}-${partIndex}`}
               id={`${idPrefix}-blank-${blankId}`}
@@ -72,8 +66,8 @@ export default function QuestionResponseRenderer({
               onChange={(event) => onChange({ ...answerByBlank, [blankId]: event.target.value })}
               className={`mx-1.5 inline-block w-28 max-w-full rounded-lg border bg-white px-2.5 py-1 text-sm font-normal text-slate-800 shadow-inner focus:border-[#0e8988] focus:outline-none focus:ring-2 focus:ring-[#0e8988]/40 sm:w-36 ${incomplete && !(answerByBlank[blankId] ?? "").trim() ? "border-amber-400" : "border-[#0e8988]/60"}`}
             />
-          );
-        })}
+          )}
+        />
         <p id={`${idPrefix}-blank-guide`} className="mt-2 text-[11px] font-normal text-slate-500">
           {incomplete ? "Some blanks are still empty. Fill in all blanks to complete this question." : "Fill in each blank field."}
         </p>
