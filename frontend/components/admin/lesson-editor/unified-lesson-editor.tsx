@@ -16,7 +16,6 @@ import {
   addAdminTextBlock,
   addAdminMediaBlock,
   addAdminExerciseBlock,
-  createAndInsertAdminExerciseBlock,
   updateAdminBlock,
   deleteAdminBlock,
   reorderAdminBlocks,
@@ -88,7 +87,7 @@ export default function UnifiedLessonEditor({
   const [metaDuration, setMetaDuration] = useState<number | "">("");
 
   // Block creation states
-  const [composerMode, setComposerMode] = useState<"none" | "text" | "media" | "exercise" | "exercise_builder">("none");
+  const [composerMode, setComposerMode] = useState<"none" | "text" | "media" | "exercise_builder">("none");
 
   // Rich text composer
   const [editingBlockId, setEditingBlockId] = useState<number | null>(null);
@@ -118,38 +117,8 @@ export default function UnifiedLessonEditor({
   const tusUploadRef = useRef<import("tus-js-client").Upload | null>(null);
   const videoSessionKeyRef = useRef<string | null>(null);
 
-  // Exercise selection & creation
-  const [selectedExerciseId, setSelectedExerciseId] = useState<number | "">("");
-  const [isCreatingExercise, setIsCreatingExercise] = useState(false);
-  const [newExerciseTitle, setNewExerciseTitle] = useState("");
-  const [newExerciseInstructions, setNewExerciseInstructions] = useState("");
-  const [newExercisePassingScore, setNewExercisePassingScore] = useState<number>(70);
-  const [newExerciseMaxAttempts, setNewExerciseMaxAttempts] = useState<number | "">("");
-  const [newExerciseShowAnswers, setNewExerciseShowAnswers] = useState<boolean>(true);
+  // Exercise authoring dirty state
   const [isExerciseDirty, setIsExerciseDirty] = useState(false);
-  const [newExerciseQuestions, setNewExerciseQuestions] = useState<
-    Array<{
-      prompt: string;
-      points: number;
-      question_type: "single_choice" | "true_false";
-      explanation: string;
-      options: Array<{
-        option_text: string;
-        is_correct: boolean;
-      }>;
-    }>
-  >([
-    {
-      prompt: "",
-      points: 1,
-      question_type: "single_choice",
-      explanation: "",
-      options: [
-        { option_text: "", is_correct: true },
-        { option_text: "", is_correct: false },
-      ],
-    },
-  ]);
 
   const routeParams = { centerSlug, courseSlug, lessonId };
 
@@ -399,37 +368,6 @@ export default function UnifiedLessonEditor({
 
   const resetExerciseComposer = () => {
     setIsExerciseDirty(false);
-    setSelectedExerciseId("");
-    setIsCreatingExercise(false);
-    setNewExerciseTitle("");
-    setNewExerciseInstructions("");
-    setNewExercisePassingScore(70);
-    setNewExerciseMaxAttempts("");
-    setNewExerciseShowAnswers(true);
-    setNewExerciseQuestions([{
-      prompt: "",
-      points: 1,
-      question_type: "single_choice",
-      explanation: "",
-      options: [
-        { option_text: "", is_correct: true },
-        { option_text: "", is_correct: false },
-      ],
-    }]);
-  };
-
-  const switchExerciseComposerMode = (createNew: boolean) => {
-    if (createNew === isCreatingExercise) return;
-
-    if (
-      isExerciseDirty
-      && !window.confirm("Discard the current exercise selection or authoring changes?")
-    ) {
-      return;
-    }
-
-    resetExerciseComposer();
-    setIsCreatingExercise(createNew);
   };
 
   const handleCloseComposer = () => {
@@ -452,7 +390,7 @@ export default function UnifiedLessonEditor({
   };
 
   const handleSwitchComposer = (
-    nextMode: "text" | "media" | "exercise" | "exercise_builder"
+    nextMode: "text" | "media" | "exercise_builder"
   ) => {
     if (composerMode === nextMode) {
       handleCloseComposer();
@@ -472,9 +410,6 @@ export default function UnifiedLessonEditor({
     setUploadTitle("");
     setUploadAltText("");
     setSelectedAssetId("");
-    if (composerMode === "exercise" || nextMode === "exercise") {
-      resetExerciseComposer();
-    }
     setComposerMode(nextMode);
   };
 
@@ -1385,18 +1320,6 @@ export default function UnifiedLessonEditor({
 
             <button
               type="button"
-              onClick={() => handleSwitchComposer("exercise")}
-              className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
-                composerMode === "exercise"
-                  ? "bg-[#0e8988] text-white"
-                  : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-              }`}
-            >
-              + Add Exercise
-            </button>
-
-            <button
-              type="button"
               onClick={() => handleSwitchComposer("exercise_builder")}
               className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
                 composerMode === "exercise_builder"
@@ -1863,7 +1786,7 @@ export default function UnifiedLessonEditor({
                           <LessonMediaBlock block={block} params={routeParams} />
                         )}
                         {block.block_type === "exercise" && (
-                          <LessonExerciseBlock block={block} isAdminPreview={true} />
+                          <LessonExerciseBlock block={block} isAdminPreview={true} params={routeParams} />
                         )}
                       </>
                     )}
@@ -1986,7 +1909,7 @@ export default function UnifiedLessonEditor({
                       <LessonMediaBlock block={block} params={routeParams} />
                     )}
                     {block.block_type === "exercise" && (
-                      <LessonExerciseBlock block={block} isAdminPreview={true} />
+                      <LessonExerciseBlock block={block} isAdminPreview={true} params={routeParams} />
                     )}
                   </article>
                 ))}

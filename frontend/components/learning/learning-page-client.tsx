@@ -518,7 +518,7 @@ export default function LearningPageClient({
 
         {/* Main Lesson Area */}
         <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-          <div className="mx-auto max-w-5xl">
+          <div className="mx-auto max-w-5xl space-y-6">
             {/* Mobile Curriculum Toggle */}
             <button
               type="button"

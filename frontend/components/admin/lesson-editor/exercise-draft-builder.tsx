@@ -1141,6 +1141,63 @@ export default function ExerciseDraftBuilder({
                           Set a finite Maximum attempts limit above to enable releasing results after the final permitted attempt.
                         </p>
                       )}
+                      {readError("result_settings.release_timing") && (
+                        <p role="alert" className="text-xs font-medium text-rose-700">
+                          {readError("result_settings.release_timing")}
+                        </p>
+                      )}
+                      {(() => {
+                        const matchedExercise = draft.id ? exercises.find((item) => item.id === draft.id) : undefined;
+                        if (!matchedExercise?.has_incompatible_release_configuration) return null;
+                        const affected = matchedExercise.incompatible_release_affected_attempts ?? 0;
+                        return (
+                          <div role="alert" className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2">
+                            <p className="text-xs font-bold text-amber-900">
+                              Incompatible Result Release Configuration
+                            </p>
+                            <p className="text-[11px] text-amber-800">
+                              This exercise has unlimited attempts with &quot;After final attempt&quot; release timing, which keeps student results withheld indefinitely.{" "}
+                              {affected > 0
+                                ? `${affected} existing attempt(s) may be affected.`
+                                : "No existing attempts are currently affected."}
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      `Switch release timing to "Immediately after submission"? This affects ${affected} existing attempt(s) once saved.`
+                                    )
+                                  ) {
+                                    updateRs({ release_timing: "immediately" as ResultReleaseTiming });
+                                  }
+                                }}
+                                className="rounded-lg border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                              >
+                                Switch to Immediate Release
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      `Set a finite limit of 3 attempts? This affects ${affected} existing attempt(s) once saved.`
+                                    )
+                                  ) {
+                                    updateDraft((cur) => ({ ...cur, max_attempts: 3 }), ["max_attempts"]);
+                                  }
+                                }}
+                                className="rounded-lg border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                              >
+                                Set Max Attempts = 3
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div className="rounded-lg border border-teal-100 bg-teal-50/50 p-2.5 text-[11px] text-teal-950">

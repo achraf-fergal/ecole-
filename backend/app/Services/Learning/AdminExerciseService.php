@@ -3,11 +3,14 @@
 namespace App\Services\Learning;
 
 use App\Models\Exercise;
+use App\Models\ExerciseAttempt;
+use App\Models\ExerciseAttemptAnswer;
 use App\Models\Lesson;
 use App\Models\Question;
 use App\Models\QuestionOption;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class AdminExerciseService
@@ -106,7 +109,7 @@ class AdminExerciseService
         User $actor,
         ?Exercise $existing = null
     ): Exercise {
-        return DB::transaction(function () use ($lesson, $data, $existing): Exercise {
+        return DB::transaction(function () use ($lesson, $data, $actor, $existing): Exercise {
             $lockedLesson = Lesson::query()
                 ->forCenter((int) $lesson->center_id)
                 ->whereKey($lesson->id)
@@ -122,6 +125,11 @@ class AdminExerciseService
                     ->firstOrFail();
 
                 $this->revisionService->assertExerciseCanBeModified($lockedExercise);
+
+                $wasIncompatible = $this->isIncompatibleReleaseConfiguration(
+                    $lockedExercise->max_attempts,
+                    $lockedExercise->resolvedResultSettings()
+                );
 
                 $fillable = array_intersect_key($data, array_flip([
                     'title',
@@ -146,7 +154,32 @@ class AdminExerciseService
                     $fillable['result_settings'] = Exercise::normalizeResultSettings($existingSettings);
                 }
 
+                $effectiveMaxAttempts = array_key_exists('max_attempts', $fillable)
+                    ? $fillable['max_attempts']
+                    : $lockedExercise->max_attempts;
+                $effectiveResultSettings = $fillable['result_settings'] ?? $lockedExercise->resolvedResultSettings();
+
+                if (
+                    array_key_exists('max_attempts', $fillable)
+                    || array_key_exists('result_settings', $fillable)
+                    || ! $wasIncompatible
+                ) {
+                    $this->assertValidResultReleaseConfiguration($effectiveMaxAttempts, $effectiveResultSettings);
+                }
+
                 $lockedExercise->update($fillable);
+
+                if ($wasIncompatible && ! $this->isIncompatibleReleaseConfiguration($lockedExercise->max_attempts, $lockedExercise->resolvedResultSettings())) {
+                    Log::info('Resolved incompatible exercise release configuration.', [
+                        'center_id' => $lockedExercise->center_id,
+                        'lesson_id' => $lockedExercise->lesson_id,
+                        'exercise_id' => $lockedExercise->id,
+                        'actor_user_id' => $actor->id,
+                        'new_max_attempts' => $lockedExercise->max_attempts,
+                        'new_release_timing' => $lockedExercise->resolvedResultSettings()['release_timing'] ?? null,
+                    ]);
+                }
+
                 $exercise = $lockedExercise;
             } else {
                 $sortOrder = $data['sort_order'] ?? null;
@@ -162,6 +195,11 @@ class AdminExerciseService
                 $normalizedResultSettings = Exercise::normalizeResultSettings(
                     is_array($data['result_settings'] ?? null) ? $data['result_settings'] : null,
                     $legacyShowCorrect
+                );
+
+                $this->assertValidResultReleaseConfiguration(
+                    $data['max_attempts'] ?? null,
+                    $normalizedResultSettings
                 );
 
                 $exercise = Exercise::query()->create([
@@ -480,6 +518,11 @@ class AdminExerciseService
 
             $this->revisionService->assertExerciseCanBeModified($lockedExercise);
 
+            $this->assertValidResultReleaseConfiguration(
+                $lockedExercise->max_attempts,
+                $lockedExercise->resolvedResultSettings()
+            );
+
             if (trim((string) $lockedExercise->title) === '') {
                 throw ValidationException::withMessages([
                     'title' => ['An exercise title is required before publication.'],
@@ -680,5 +723,281 @@ class AdminExerciseService
         }
 
         return $prefixed;
+    }
+
+    public function isIncompatibleReleaseConfiguration(?int $maxAttempts, array $resultSettings): bool
+    {
+        return $maxAttempts === null
+            && ($resultSettings['release_timing'] ?? Exercise::RELEASE_TIMING_IMMEDIATELY) === Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT;
+    }
+
+    private function assertValidResultReleaseConfiguration(?int $maxAttempts, array $resultSettings): void
+    {
+        if ($this->isIncompatibleReleaseConfiguration($maxAttempts, $resultSettings)) {
+            throw ValidationException::withMessages([
+                'result_settings.release_timing' => [
+                    'Results cannot be held until the final attempt when maximum attempts are unlimited. Set a finite attempt limit or release results immediately.',
+                ],
+            ]);
+        }
+    }
+
+    /**
+     * Grade a simulated student attempt in memory without persisting any attempt,
+     * answer, or lesson progress records.
+     *
+     * @param  list<array<string, mixed>>  $answersInput
+     */
+    public function simulateGrade(Exercise $exercise, array $answersInput): array
+    {
+        $exercise->loadMissing(['questions.options']);
+
+        $indexedAnswers = [];
+        foreach ($answersInput as $item) {
+            if (is_array($item) && isset($item['question_id']) && is_numeric($item['question_id'])) {
+                $indexedAnswers[(int) $item['question_id']] = $item;
+            }
+        }
+
+        $settings = $exercise->resolvedResultSettings();
+        $releaseTiming = $settings['release_timing'] ?? Exercise::RELEASE_TIMING_IMMEDIATELY;
+        $resultsReleased = $releaseTiming === Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT
+            ? ($exercise->max_attempts !== null && $exercise->max_attempts <= 1)
+            : true;
+
+        $showScore = $resultsReleased && (bool) $settings['show_score'];
+        $showPercentage = $resultsReleased && (bool) $settings['show_percentage'];
+        $showPassFail = $resultsReleased && (bool) $settings['show_pass_fail'];
+        $showQuestionResults = $resultsReleased && (bool) $settings['show_question_results'];
+        $showStudentAnswers = $resultsReleased && (bool) $settings['show_student_answers'];
+        $showCorrectAnswers = $resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_correct_answers'];
+        $showExplanations = $resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_explanations'];
+        $showPointsPerQuestion = $resultsReleased && (bool) $settings['show_question_results'] && (bool) $settings['show_points_per_question'];
+
+        $totalMaxMinorUnits = 0;
+        $totalScoreMinorUnits = 0;
+        $correctCount = 0;
+        $incorrectCount = 0;
+        $unansweredCount = 0;
+        $questionPayloads = [];
+
+        foreach ($exercise->questions as $question) {
+            $input = $indexedAnswers[(int) $question->id] ?? [];
+            $optionsSnapshot = $question->options->map(static fn (QuestionOption $o): array => [
+                'id' => $o->id,
+                'option_text' => $o->option_text,
+                'sort_order' => $o->sort_order,
+            ])->values()->all();
+
+            $correctOptionIds = $question->options
+                ->filter(static fn (QuestionOption $o): bool => (bool) $o->is_correct)
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->values()
+                ->all();
+
+            $selectedOptionId = isset($input['selected_option_id']) && is_numeric($input['selected_option_id'])
+                ? (int) $input['selected_option_id']
+                : null;
+            $selectedOptionIds = isset($input['selected_option_ids']) && is_array($input['selected_option_ids'])
+                ? array_values(array_unique(array_map('intval', array_filter($input['selected_option_ids'], 'is_numeric'))))
+                : null;
+
+            $textAnswer = isset($input['text_answer']) && is_string($input['text_answer'])
+                ? $input['text_answer']
+                : null;
+
+            if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS && isset($input['blank_answers']) && is_array($input['blank_answers'])) {
+                $cleanBlanks = [];
+                foreach ($input['blank_answers'] as $blankId => $blankValue) {
+                    if (is_string($blankId) && is_string($blankValue)) {
+                        $cleanBlanks[$blankId] = $blankValue;
+                    }
+                }
+                $textAnswer = $cleanBlanks !== [] ? json_encode($cleanBlanks, JSON_UNESCAPED_UNICODE) : null;
+            }
+
+            $inMemoryAnswer = new ExerciseAttemptAnswer([
+                'question_id' => $question->id,
+                'question_type_snapshot' => $question->question_type,
+                'prompt_snapshot' => $question->prompt,
+                'explanation_snapshot' => $question->explanation,
+                'points_possible' => (float) $question->points,
+                'options_snapshot' => $optionsSnapshot,
+                'correct_option_id_snapshot' => $correctOptionIds[0] ?? null,
+                'correct_option_ids_snapshot' => $correctOptionIds,
+                'answer_config_snapshot' => $question->answer_config,
+                'selected_option_id' => $selectedOptionId,
+                'selected_option_ids' => $selectedOptionIds,
+                'text_answer' => $textAnswer,
+            ]);
+
+            $isUnanswered = $this->isSimulatedAnswerUnanswered($inMemoryAnswer);
+            $questionPossibleMinor = $this->answerGrader->decimalToMinorUnits((float) $question->points);
+            $totalMaxMinorUnits += $questionPossibleMinor;
+
+            $blanksFeedback = null;
+            if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
+                $fillResult = $this->answerGrader->gradeFillInTheBlanks($inMemoryAnswer);
+                $isCorrect = $fillResult['is_correct'];
+                $awardedMinor = $fillResult['points_awarded_minor_units'];
+                $blanksFeedback = $fillResult['blanks_feedback'];
+            } else {
+                $isCorrect = $this->answerGrader->isCorrect($inMemoryAnswer);
+                $awardedMinor = $isCorrect ? $questionPossibleMinor : 0;
+            }
+
+            $totalScoreMinorUnits += $awardedMinor;
+            $pointsAwarded = (float) $this->answerGrader->minorUnitsToDecimalString($awardedMinor);
+
+            if ($isUnanswered) {
+                $unansweredCount += 1;
+            } elseif ($isCorrect) {
+                $correctCount += 1;
+            } else {
+                $incorrectCount += 1;
+            }
+
+            $qPayload = [
+                'id' => $question->id,
+                'question_type' => $question->question_type,
+                'prompt' => $question->prompt,
+                'points_possible' => $showPointsPerQuestion ? (float) $question->points : null,
+                'options' => $optionsSnapshot,
+            ];
+
+            if ($showStudentAnswers) {
+                $qPayload['selected_option_id'] = $selectedOptionId;
+                $qPayload['selected_option_ids'] = $selectedOptionIds;
+                $qPayload['text_answer'] = $textAnswer;
+                if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $decoded = $textAnswer !== null ? json_decode($textAnswer, true) : null;
+                    $qPayload['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass();
+                }
+            } else {
+                $qPayload['selected_option_id'] = null;
+                $qPayload['selected_option_ids'] = null;
+                $qPayload['text_answer'] = null;
+                if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
+                    $qPayload['blank_answers'] = new \stdClass();
+                }
+            }
+
+            if ($showQuestionResults) {
+                $qPayload['is_correct'] = $isCorrect;
+                $qPayload['result_status'] = $isUnanswered ? 'unanswered' : ($isCorrect ? 'correct' : 'incorrect');
+
+                if ($showPointsPerQuestion) {
+                    $qPayload['points_awarded'] = $pointsAwarded;
+                }
+
+                if ($showCorrectAnswers) {
+                    $qPayload['correct_option_id'] = $correctOptionIds[0] ?? null;
+                    $qPayload['correct_option_ids'] = $correctOptionIds;
+                    if ($question->question_type === Question::TYPE_SHORT_ANSWER) {
+                        $qPayload['accepted_answers'] = $question->answer_config['accepted_answers'] ?? [];
+                    }
+                }
+
+                if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS && $blanksFeedback !== null) {
+                    $qPayload['blanks'] = array_map(
+                        static function (array $blank) use ($showStudentAnswers, $showCorrectAnswers, $showPointsPerQuestion): array {
+                            $item = [
+                                'id' => $blank['id'],
+                                'is_correct' => $blank['is_correct'],
+                            ];
+                            if ($showStudentAnswers) {
+                                $item['student_answer'] = $blank['student_answer'];
+                            }
+                            if ($showCorrectAnswers) {
+                                $item['accepted_answers'] = $blank['accepted_answers'];
+                            }
+                            if ($showPointsPerQuestion) {
+                                $item['points_awarded'] = $blank['points_awarded'];
+                                $item['points_possible'] = $blank['points_possible'];
+                            }
+
+                            return $item;
+                        },
+                        $blanksFeedback
+                    );
+                }
+            }
+
+            if ($showExplanations) {
+                $qPayload['explanation'] = $question->explanation;
+            }
+
+            $questionPayloads[] = $qPayload;
+        }
+
+        $maxScore = (float) $this->answerGrader->minorUnitsToDecimalString($totalMaxMinorUnits);
+        $score = (float) $this->answerGrader->minorUnitsToDecimalString($totalScoreMinorUnits);
+        $percentage = $totalMaxMinorUnits > 0
+            ? round(($totalScoreMinorUnits / $totalMaxMinorUnits) * 100, 2)
+            : 0.0;
+        $passed = $percentage >= (float) $exercise->passing_score;
+
+        return [
+            'id' => 0,
+            'exercise_id' => $exercise->id,
+            'attempt_number' => 1,
+            'status' => ExerciseAttempt::STATUS_GRADED,
+            'passing_score' => $showPassFail ? (float) $exercise->passing_score : null,
+            'max_score' => $showScore ? $maxScore : null,
+            'score' => $showScore ? $score : null,
+            'percentage' => $showPercentage ? $percentage : null,
+            'passed' => $showPassFail ? $passed : null,
+            'correct_count' => $showQuestionResults ? $correctCount : null,
+            'incorrect_count' => $showQuestionResults ? $incorrectCount : null,
+            'unanswered_count' => $showQuestionResults ? $unansweredCount : null,
+            'started_at' => now()->toIso8601String(),
+            'submitted_at' => now()->toIso8601String(),
+            'graded_at' => now()->toIso8601String(),
+            'show_correct_answers' => $showCorrectAnswers,
+            'result_visibility' => [
+                'results_released' => $resultsReleased,
+                'release_timing' => $settings['release_timing'],
+                'show_score' => (bool) $settings['show_score'],
+                'show_percentage' => (bool) $settings['show_percentage'],
+                'show_pass_fail' => (bool) $settings['show_pass_fail'],
+                'show_question_results' => (bool) $settings['show_question_results'],
+                'show_student_answers' => (bool) $settings['show_student_answers'],
+                'show_correct_answers' => (bool) $settings['show_correct_answers'],
+                'show_explanations' => (bool) $settings['show_explanations'],
+                'show_points_per_question' => (bool) $settings['show_points_per_question'],
+            ],
+            'questions' => $questionPayloads,
+        ];
+    }
+
+    private function isSimulatedAnswerUnanswered(ExerciseAttemptAnswer $answer): bool
+    {
+        return match ($answer->question_type_snapshot) {
+            Question::TYPE_SINGLE_CHOICE,
+            Question::TYPE_TRUE_FALSE => $answer->selected_option_id === null,
+            Question::TYPE_MULTIPLE_SELECT => ! is_array($answer->selected_option_ids) || $answer->selected_option_ids === [],
+            Question::TYPE_SHORT_ANSWER => trim((string) ($answer->text_answer ?? '')) === '',
+            Question::TYPE_FILL_IN_THE_BLANKS => $this->isSimulatedFillBlankUnanswered($answer->text_answer),
+            default => true,
+        };
+    }
+
+    private function isSimulatedFillBlankUnanswered(?string $textAnswer): bool
+    {
+        if ($textAnswer === null || trim($textAnswer) === '') {
+            return true;
+        }
+        $decoded = json_decode($textAnswer, true);
+        if (! is_array($decoded) || $decoded === []) {
+            return true;
+        }
+        foreach ($decoded as $val) {
+            if (is_string($val) && trim($val) !== '') {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

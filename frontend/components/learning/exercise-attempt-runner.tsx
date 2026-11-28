@@ -21,6 +21,8 @@ type PreviewProps = {
 
 type AttemptProps = {
   mode: "attempt";
+  isSimulation?: boolean;
+  onResetSimulation?: () => void;
   exercise: LearningExercise;
   activeAttempt: ExerciseAttemptData;
   currentQuestionIndex: number;
@@ -73,8 +75,8 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             </div>
           </div>
 
-          <span className="rounded-md bg-amber-50 px-2.5 py-1 text-[10px] font-extrabold uppercase text-amber-700">
-            {exercise.status} (Preview)
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-extrabold uppercase text-amber-800">
+            Author Preview (Instructor Only) · {exercise.status}
           </span>
         </div>
 
@@ -170,6 +172,8 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
   }
 
   const {
+    isSimulation = false,
+    onResetSimulation,
     exercise,
     activeAttempt,
     currentQuestionIndex,
@@ -193,7 +197,9 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
                 📝
               </span>
               <h4 className="text-lg font-black text-[#102b4c]">
-                {exercise.title} — Attempt #{activeAttempt.attempt_number}
+                {isSimulation
+                  ? `${exercise.title} — Student Simulation`
+                  : `${exercise.title} — Attempt #${activeAttempt.attempt_number}`}
               </h4>
             </div>
 
@@ -208,12 +214,14 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
               <span>·</span>
               <span>Passing score: {exercise.passing_score}%</span>
               <span>·</span>
-              <span className="font-semibold text-teal-700">In Progress</span>
+              <span className="font-semibold text-teal-700">
+                {isSimulation ? "Simulated Attempt (No Data Saved)" : "In Progress"}
+              </span>
             </div>
           </div>
 
           <span className="rounded-full bg-teal-50 px-3 py-1 text-[10px] font-extrabold uppercase text-[#0e8988]">
-            Assessment in Progress
+            {isSimulation ? "Student Simulation" : "Assessment in Progress"}
           </span>
         </div>
 
@@ -244,7 +252,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
           >
             <div className="h-full rounded-full bg-[#0e8988] transition-[width]" style={{ width: `${activeAttempt.questions.length ? (answeredCount / activeAttempt.questions.length) * 100 : 0}%` }} />
           </div>
-          <nav aria-label="Question navigation" className="mt-3 flex flex-wrap gap-2">
+          <nav aria-label="Question navigation" className="mt-3 flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
             {activeAttempt.questions.map((question, index) => {
               const status = getQuestionCompletionStatus(question, selectedAnswers[question.id]);
               const statusLabel = status === "answered" ? "answered" : status === "partial" ? "incomplete" : "unanswered";
@@ -256,7 +264,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
                   aria-label={`Question ${index + 1}, ${statusLabel}`}
                   aria-current={index === currentQuestionIndex ? "step" : undefined}
                   onClick={() => navigateToQuestion(index)}
-                  className={`min-w-10 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : status === "partial" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-300 bg-white text-slate-700"}`}
+                  className={`min-w-10 shrink-0 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : status === "partial" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-300 bg-white text-slate-700"}`}
                 >
                   {index + 1} · {shortLabel}
                 </button>
@@ -317,14 +325,25 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
         </div>
 
         <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-5">
-          <button
-            type="button"
-            disabled={isSaving || isSubmitting}
-            onClick={() => void handleSaveAnswers()}
-            className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
-          >
-            {isSaving ? "Saving..." : "Save Progress"}
-          </button>
+          {isSimulation ? (
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={onResetSimulation}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              Reset Simulation
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={isSaving || isSubmitting}
+              onClick={() => void handleSaveAnswers()}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              {isSaving ? "Saving..." : "Save Progress"}
+            </button>
+          )}
 
           <button
             type="button"
@@ -332,7 +351,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             onClick={handleSubmitAttempt}
             className="rounded-xl bg-[#0e8988] px-5 py-2.5 text-xs font-bold text-white shadow-xs transition hover:bg-[#0c7776] disabled:opacity-50"
           >
-            {isSubmitting ? "Submitting..." : "Submit Assessment"}
+            {isSubmitting ? "Submitting..." : isSimulation ? "Submit Simulation" : "Submit Assessment"}
           </button>
         </div>
       </article>

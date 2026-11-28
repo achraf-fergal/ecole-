@@ -1,8 +1,10 @@
 import { authFetch } from "@/lib/auth";
 import type {
+  ExerciseAttemptData,
   LessonBlock,
   TipTapDocument,
   LearningLessonAsset,
+  SaveAttemptAnswerPayload,
 } from "@/lib/learning";
 
 export interface AdminExerciseOption {
@@ -624,6 +626,8 @@ export interface AdminFullExercise {
   passing_score: number;
   show_correct_answers_after_submission: boolean;
   result_settings?: ExerciseResultSettingsPayload;
+  has_incompatible_release_configuration?: boolean;
+  incompatible_release_affected_attempts?: number;
   sort_order: number;
   status: "draft" | "published" | "archived";
   published_at: string | null;
@@ -746,5 +750,28 @@ export async function deleteAdminExercise(
 
   const response = await authFetch(endpoint, { method: "DELETE" });
   await handleResponse<null>(response, "Failed to delete exercise.");
+}
+
+/**
+ * Grade a simulated student attempt in memory without creating any database records.
+ */
+export async function simulateAdminExerciseGrade(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number | string,
+  exerciseId: number,
+  answers: SaveAttemptAnswerPayload[]
+): Promise<ExerciseAttemptData> {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  const lesson = encodeURIComponent(String(lessonId).trim());
+  const endpoint = `/api/centers/${center}/admin/courses/${course}/lessons/${lesson}/exercises/${exerciseId}/simulate-grade`;
+
+  const response = await authFetch(endpoint, {
+    method: "POST",
+    body: JSON.stringify({ answers }),
+  });
+
+  return handleResponse<ExerciseAttemptData>(response, "Failed to grade simulated attempt.");
 }
 

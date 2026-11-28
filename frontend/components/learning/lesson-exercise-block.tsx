@@ -17,6 +17,7 @@ import {
   getExerciseAttemptHistory,
   LearningApiError,
 } from "@/lib/learning";
+import { simulateAdminExerciseGrade } from "@/lib/admin-learning";
 import {
   answerSignature,
   answersFromAttempt,
@@ -26,6 +27,8 @@ import {
 } from "./exercise-attempt-utils";
 import { ExerciseAttemptRunner } from "./exercise-attempt-runner";
 import ExerciseStartCard from "./exercise-start-card";
+import { ExerciseResultSummary } from "./exercise-result-summary";
+import { ExerciseQuestionReview } from "./exercise-question-review";
 import type { QuestionResponseValue } from "./question-response-renderer";
 
 interface LessonExerciseBlockProps {
@@ -81,9 +84,18 @@ export default function LessonExerciseBlock({
   );
 
   // Administrative preview selection state
+  const [adminViewMode, setAdminViewMode] = useState<"author" | "simulation">("author");
   const [previewSelectedAnswers, setPreviewSelectedAnswers] = useState<
     Record<number, AnswerValue>
   >({});
+
+  // Isolated student simulation state (never persists to student attempt tables)
+  const [simPhase, setSimPhase] = useState<"start" | "in_progress" | "result">("start");
+  const [simQuestionIndex, setSimQuestionIndex] = useState(0);
+  const [simAnswers, setSimAnswers] = useState<Record<number, AnswerValue>>({});
+  const [simResult, setSimResult] = useState<ExerciseAttemptData | null>(null);
+  const [isSimSubmitting, setIsSimSubmitting] = useState(false);
+  const [simError, setSimError] = useState<string | null>(null);
 
   const exerciseId = exercise?.id;
 
@@ -458,16 +470,262 @@ export default function LessonExerciseBlock({
     await fetchHistoryPage(1);
   };
 
-  if (isAdminPreview || !params) {
+  const hasValidStudentParams = Boolean(
+    params && params.centerSlug && params.courseSlug && params.lessonId
+  );
+
+  if (!isAdminPreview && !hasValidStudentParams) {
     return (
-      <ExerciseAttemptRunner
-        mode="preview"
-        exercise={exercise}
-        previewSelectedAnswers={previewSelectedAnswers}
-        handleBlankAnswer={handleBlankAnswer}
-        handleSelectTextAnswer={handleSelectTextAnswer}
-        handleSelectOption={handleSelectOption}
-      />
+      <article className="rounded-2xl border border-rose-200 bg-rose-50/60 p-5 sm:p-7 shadow-xs">
+        <h4 className="text-sm font-bold text-rose-800">Assessment Unavailable</h4>
+        <p className="mt-1 text-xs text-rose-700">
+          Missing required course or lesson context. Please reopen this lesson from your course dashboard.
+        </p>
+      </article>
+    );
+  }
+
+  if (isAdminPreview) {
+    const simAttemptQuestions: AttemptQuestion[] = exercise.questions.map((q) => ({
+      id: q.id,
+      question_type: q.question_type,
+      prompt: q.prompt,
+      points_possible: Number(q.points),
+      selected_option_id: null,
+      selected_option_ids: null,
+      text_answer: null,
+      options: q.options.map((o) => ({
+        id: o.id,
+        option_text: o.option_text,
+        sort_order: o.sort_order,
+      })),
+    }));
+
+    const simulatedAttemptShell: ExerciseAttemptData = {
+      id: 0,
+      exercise_id: exercise.id,
+      attempt_number: 1,
+      status: "in_progress",
+      passing_score: Number(exercise.passing_score),
+      max_score: null,
+      score: null,
+      percentage: null,
+      passed: null,
+      correct_count: null,
+      incorrect_count: null,
+      unanswered_count: null,
+      started_at: "",
+      submitted_at: null,
+      graded_at: null,
+      show_correct_answers: false,
+      questions: simAttemptQuestions,
+    };
+
+    const simAnsweredCount = simAttemptQuestions.filter(
+      (q) => getQuestionCompletionStatus(q, simAnswers[q.id]) === "answered"
+    ).length;
+
+    const handleResetSimulation = () => {
+      setSimPhase("start");
+      setSimQuestionIndex(0);
+      setSimAnswers({});
+      setSimResult(null);
+      setSimError(null);
+    };
+
+    const handleSimResponseChange = (question: AttemptQuestion, value: QuestionResponseValue) => {
+      setSimError(null);
+      let answer: AnswerValue;
+      if (question.question_type === "fill_in_the_blanks") {
+        answer = typeof value === "object" && value !== null && !Array.isArray(value)
+          ? value
+          : {};
+      } else if (question.question_type === "short_answer") {
+        answer = typeof value === "string" ? value : "";
+      } else if (question.question_type === "multiple_select") {
+        answer = Array.isArray(value)
+          ? value.filter((optionId): optionId is number => typeof optionId === "number")
+          : [];
+      } else {
+        answer = typeof value === "number" ? value : null;
+      }
+
+      setSimAnswers((prev) => ({
+        ...prev,
+        [question.id]: answer,
+      }));
+    };
+
+    const handleSubmitSimulation = async () => {
+      if (isSimSubmitting) return;
+      if (!params?.centerSlug || !params?.courseSlug || !params?.lessonId) {
+        setSimError("Missing lesson context to run server simulation grading.");
+        return;
+      }
+
+      const incompleteCount = simAttemptQuestions.filter(
+        (q) => getQuestionCompletionStatus(q, simAnswers[q.id]) !== "answered"
+      ).length;
+
+      if (incompleteCount > 0) {
+        const proceed = window.confirm(
+          `You still have ${incompleteCount} unanswered or incomplete question(s). Submit simulation anyway?`
+        );
+        if (!proceed) return;
+      }
+
+      setIsSimSubmitting(true);
+      setSimError(null);
+      try {
+        const payload = attemptAnswerPayload(simAttemptQuestions, simAnswers);
+        const graded = await simulateAdminExerciseGrade(
+          params.centerSlug,
+          params.courseSlug,
+          params.lessonId,
+          exercise.id,
+          payload
+        );
+        setSimResult(graded);
+        setSimPhase("result");
+      } catch (err: unknown) {
+        setSimError(err instanceof Error ? err.message : "Failed to grade simulation.");
+      } finally {
+        setIsSimSubmitting(false);
+      }
+    };
+
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
+          <span className="text-xs font-bold text-slate-700">
+            Preview Mode:
+          </span>
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Exercise preview mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={adminViewMode === "author"}
+              onClick={() => setAdminViewMode("author")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+                adminViewMode === "author"
+                  ? "bg-amber-600 text-white shadow-xs"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              Author Preview
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={adminViewMode === "simulation"}
+              onClick={() => setAdminViewMode("simulation")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+                adminViewMode === "simulation"
+                  ? "bg-[#0e8988] text-white shadow-xs"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              Student Simulation
+            </button>
+          </div>
+        </div>
+
+        {adminViewMode === "author" ? (
+          <ExerciseAttemptRunner
+            mode="preview"
+            exercise={exercise}
+            previewSelectedAnswers={previewSelectedAnswers}
+            handleBlankAnswer={handleBlankAnswer}
+            handleSelectTextAnswer={handleSelectTextAnswer}
+            handleSelectOption={handleSelectOption}
+          />
+        ) : simPhase === "start" ? (
+          <article className="rounded-2xl border border-[#0e8988]/30 bg-white p-5 sm:p-7 shadow-xs">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="text-lg font-black text-[#102b4c]">{exercise.title}</h4>
+                {exercise.instructions && (
+                  <p className="mt-2 text-xs leading-6 text-slate-600">{exercise.instructions}</p>
+                )}
+                <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
+                  <span>{exercise.questions.length} questions</span>
+                  <span>·</span>
+                  <span>Passing score: {exercise.passing_score}%</span>
+                  <span>·</span>
+                  <span>{exercise.max_attempts ? `Max attempts: ${exercise.max_attempts}` : "Unlimited attempts"}</span>
+                </div>
+              </div>
+              <span className="rounded-full bg-teal-50 px-3 py-1 text-[10px] font-extrabold uppercase text-[#0e8988]">
+                Student Simulation
+              </span>
+            </div>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+              <p className="text-[11px] text-slate-500">
+                Simulates the real student experience without creating attempts or updating progress.
+              </p>
+              <button
+                type="button"
+                disabled={exercise.questions.length === 0}
+                onClick={() => {
+                  setSimQuestionIndex(0);
+                  setSimError(null);
+                  setSimPhase("in_progress");
+                }}
+                className="rounded-xl bg-[#0e8988] px-5 py-2.5 text-xs font-extrabold text-white shadow-xs transition hover:bg-[#087b83] disabled:opacity-50"
+              >
+                Start Simulation
+              </button>
+            </div>
+          </article>
+        ) : simPhase === "in_progress" ? (
+          <ExerciseAttemptRunner
+            mode="attempt"
+            isSimulation={true}
+            onResetSimulation={handleResetSimulation}
+            exercise={exercise}
+            activeAttempt={simulatedAttemptShell}
+            currentQuestionIndex={simQuestionIndex}
+            answeredCount={simAnsweredCount}
+            selectedAnswers={simAnswers}
+            isSaving={false}
+            isSubmitting={isSimSubmitting}
+            actionError={simError}
+            saveSuccessMessage={null}
+            navigateToQuestion={(idx) =>
+              setSimQuestionIndex(Math.max(0, Math.min(idx, simAttemptQuestions.length - 1)))
+            }
+            handleStudentResponseChange={handleSimResponseChange}
+            handleSaveAnswers={() => undefined}
+            handleSubmitAttempt={handleSubmitSimulation}
+          />
+        ) : (
+          <article className="space-y-5 rounded-2xl border border-[#0e8988]/30 bg-white p-5 sm:p-7 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+              <div>
+                <h4 className="text-lg font-black text-[#102b4c]">
+                  {exercise.title} — Simulation Result
+                </h4>
+                <p className="mt-1 text-xs text-slate-500">
+                  Graded via server rules with zero database persistence.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetSimulation}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >
+                Reset Simulation
+              </button>
+            </div>
+            {simResult && (
+              <>
+                <ExerciseResultSummary attempt={simResult} />
+                <ExerciseQuestionReview attempt={simResult} />
+              </>
+            )}
+          </article>
+        )}
+      </div>
     );
   }
   // =========================================================================

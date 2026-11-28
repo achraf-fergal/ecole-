@@ -407,6 +407,10 @@ Route::prefix('centers/{center}')
                         Route::post('/{exercise}/publish', [AdminExerciseController::class, 'publish'])
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.exercises.publish');
+
+                        Route::post('/{exercise}/simulate-grade', [AdminExerciseController::class, 'simulateGrade'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.exercises.simulate-grade');
                     });
             });
 

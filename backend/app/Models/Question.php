@@ -102,8 +102,9 @@ class Question extends Model
      */
     public function optionConfigurationErrors(): array
     {
-        $options = $this->options()
-            ->get(['id', 'is_correct', 'option_text']);
+        $options = $this->relationLoaded('options')
+            ? $this->options
+            : $this->options()->get(['id', 'is_correct', 'option_text']);
 
         $optionCount = $options->count();
 

@@ -243,6 +243,33 @@ class AdminExerciseController extends Controller
     }
 
     /**
+     * Grade a simulated student attempt in memory without persisting any records.
+     */
+    public function simulateGrade(Request $request): JsonResponse
+    {
+        [$center, $course, $lesson] = $this->resolveLessonContext($request);
+        $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
+
+        $validated = $request->validate([
+            'answers' => ['present', 'array'],
+            'answers.*' => ['array:question_id,selected_option_id,selected_option_ids,text_answer,blank_answers'],
+            'answers.*.question_id' => ['required', 'integer', 'min:1'],
+            'answers.*.selected_option_id' => ['nullable', 'integer'],
+            'answers.*.selected_option_ids' => ['nullable', 'array'],
+            'answers.*.selected_option_ids.*' => ['integer'],
+            'answers.*.text_answer' => ['nullable', 'string', 'max:5000'],
+            'answers.*.blank_answers' => ['nullable', 'array'],
+            'answers.*.blank_answers.*' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $result = $this->exerciseService->simulateGrade($exercise, $validated['answers']);
+
+        return response()->json([
+            'data' => $result,
+        ]);
+    }
+
+    /**
      * Resolve the authorized administrative lesson context.
      *
      * @return array{0: Center, 1: Course, 2: Lesson}
@@ -303,6 +330,13 @@ class AdminExerciseController extends Controller
     private function exercisePayload(Exercise $exercise): array
     {
         $resolvedResultSettings = $exercise->resolvedResultSettings();
+        $isIncompatible = $this->exerciseService->isIncompatibleReleaseConfiguration(
+            $exercise->max_attempts,
+            $resolvedResultSettings
+        );
+        $affectedAttempts = $isIncompatible
+            ? $exercise->attempts()->count()
+            : 0;
 
         return [
             'id' => $exercise->id,
@@ -312,6 +346,8 @@ class AdminExerciseController extends Controller
             'passing_score' => (float) $exercise->passing_score,
             'show_correct_answers_after_submission' => (bool) $resolvedResultSettings['show_correct_answers'],
             'result_settings' => $resolvedResultSettings,
+            'has_incompatible_release_configuration' => $isIncompatible,
+            'incompatible_release_affected_attempts' => $affectedAttempts,
             'sort_order' => $exercise->sort_order,
             'status' => $exercise->status,
             'published_at' => $exercise->published_at?->toIso8601String(),
