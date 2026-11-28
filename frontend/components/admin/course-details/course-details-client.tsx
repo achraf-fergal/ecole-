@@ -10,7 +10,11 @@ import {
   AdminLearningApiError,
   getAdminCourseCurriculum,
   getAdminLessonContent,
+  triggerCourseRevalidation,
+  updateAdminCourseSettings,
   type AdminLessonContent,
+  type CurriculumCourseOutcome,
+  type CurriculumCourseSummary,
   type CurriculumResponse,
 } from "@/lib/admin-learning";
 import CurriculumBuilder from "./curriculum-builder";
@@ -20,12 +24,8 @@ import {
 } from "@/lib/auth";
 import {
   apiGetPlatformCourseDetails,
-  apiUpdatePlatformCourse,
-  PlatformCourseApiError,
   type PlatformCourseDetails,
-  type PlatformCourseMetadata,
   type PlatformCourseStatus,
-  type PlatformCourseUpdatePayload,
 } from "@/lib/admin";
 import type { LessonBlock, TipTapDocument } from "@/lib/learning";
 
@@ -39,14 +39,25 @@ interface CourseForm {
   slug: string;
   short_description: string;
   description: string;
+  prerequisites: string;
+  target_audience: string;
   language_id: string;
   level_id: string;
   source_locale: string;
-  study_format: PlatformCourseMetadata["study_format"];
+  study_format: "in_person" | "online" | "hybrid";
   duration_hours: string;
   cover_image_url: string;
   cover_image_alt: string;
+  pricing_mode: "fixed" | "from" | "upon_request" | "free";
+  price: string;
+  currency: string;
+  is_curriculum_public: boolean;
+  meta_title: string;
+  meta_description: string;
+  outcomes: CurriculumCourseOutcome[];
 }
+
+type SettingsTab = "general" | "audience" | "pricing" | "seo";
 
 type LessonPreviewState =
   | { status: "loading" }
@@ -59,12 +70,26 @@ const statusStyles: Record<PlatformCourseStatus, string> = {
   archived: "border-slate-200 bg-slate-100 text-slate-700",
 };
 
-function toCourseForm(course: PlatformCourseMetadata): CourseForm {
+function toCourseForm(course: Partial<CurriculumCourseSummary> & {
+  title: string;
+  slug: string;
+  source_locale: string;
+  study_format: "in_person" | "online" | "hybrid";
+  duration_hours: number | null;
+  cover_image_url: string | null;
+  cover_image_alt: string | null;
+  short_description: string | null;
+  description: string | null;
+  language: { id: number } | null;
+  level: { id: number } | null;
+}): CourseForm {
   return {
     title: course.title,
     slug: course.slug,
     short_description: course.short_description ?? "",
     description: course.description ?? "",
+    prerequisites: course.prerequisites ?? "",
+    target_audience: course.target_audience ?? "",
     language_id: course.language ? String(course.language.id) : "",
     level_id: course.level ? String(course.level.id) : "",
     source_locale: course.source_locale,
@@ -72,6 +97,17 @@ function toCourseForm(course: PlatformCourseMetadata): CourseForm {
     duration_hours: course.duration_hours === null ? "" : String(course.duration_hours),
     cover_image_url: course.cover_image_url ?? "",
     cover_image_alt: course.cover_image_alt ?? "",
+    pricing_mode: course.pricing_mode ?? "upon_request",
+    price: course.price ?? "",
+    currency: course.currency ?? "MAD",
+    is_curriculum_public: course.is_curriculum_public ?? true,
+    meta_title: course.meta_title ?? "",
+    meta_description: course.meta_description ?? "",
+    outcomes: (course.outcomes ?? []).map((o) => ({
+      id: o.id,
+      content: o.content,
+      is_highlight: Boolean(o.is_highlight),
+    })),
   };
 }
 
@@ -242,7 +278,9 @@ export default function CourseDetailsClient({
   const [details, setDetails] = useState<PlatformCourseDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState("");
+  const [accessDeniedMessage, setAccessDeniedMessage] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [form, setForm] = useState<CourseForm | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string[]>>({});
   const [isSaving, setIsSaving] = useState(false);
@@ -251,10 +289,18 @@ export default function CourseDetailsClient({
   const [lessonPreviews, setLessonPreviews] = useState<Record<number, LessonPreviewState>>({});
   const [openPreviews, setOpenPreviews] = useState<Record<number, boolean>>({});
   const [curriculum, setCurriculum] = useState<CurriculumResponse | null>(null);
+  const [curriculumStatus, setCurriculumStatus] = useState<"loading" | "loaded" | "error">("loading");
+  const [curriculumError, setCurriculumError] = useState<string | null>(null);
+
+  const activeCourse = curriculum?.course ?? details?.course ?? null;
+  const activeCenter = curriculum?.center ?? details?.center ?? null;
+  const activeStats = curriculum?.statistics ?? details?.statistics ?? null;
+  const languageOptions = curriculum?.language_options ?? details?.language_options ?? [];
+  const levelOptions = curriculum?.level_options ?? details?.level_options ?? [];
 
   const savedForm = useMemo(
-    () => details ? toCourseForm(details.course) : null,
-    [details]
+    () => (activeCourse ? toCourseForm(activeCourse) : null),
+    [activeCourse]
   );
   const isDirty = Boolean(form && savedForm && JSON.stringify(form) !== JSON.stringify(savedForm));
 
@@ -272,44 +318,88 @@ export default function CourseDetailsClient({
   }, []);
 
   useEffect(() => {
-    if (!user?.is_platform_admin) return;
+    if (!authResolved) return;
+    if (!user) {
+      setIsLoading(false);
+      return;
+    }
+
     let active = true;
+    // Phase B 4.2: Reset all stale course-specific state on navigation
     setIsLoading(true);
     setPageError("");
+    setAccessDeniedMessage(null);
+    setSaveMessage("");
     setDetails(null);
+    setCurriculum(null);
+    setCurriculumStatus("loading");
+    setCurriculumError(null);
+    setLessonPreviews({});
+    setOpenPreviews({});
+    setIsEditing(false);
+    setFieldErrors({});
+    setForm(null);
 
-    void Promise.all([
-      apiGetPlatformCourseDetails(centerSlug, courseSlug),
-      getAdminCourseCurriculum(centerSlug, courseSlug).catch(() => null),
-    ])
-      .then(([result, curr]) => {
-        if (!active) return;
-        setDetails(result);
-        setForm(toCourseForm(result.course));
-        if (curr) setCurriculum(curr);
+    const loadPlatformDetails = user.is_platform_admin
+      ? apiGetPlatformCourseDetails(centerSlug, courseSlug).catch((err: unknown) => {
+          if (active && !curriculum) {
+            setPageError(err instanceof Error ? err.message : "Unable to load course details.");
+          }
+          return null;
+        })
+      : Promise.resolve(null);
+
+    const loadCurriculum = getAdminCourseCurriculum(centerSlug, courseSlug)
+      .then((curr) => {
+        if (!active) return null;
+        setCurriculum(curr);
+        setCurriculumStatus("loaded");
+        setCurriculumError(null);
+        return curr;
       })
-      .catch((error: unknown) => {
+      .catch((err: unknown) => {
+        if (!active) return null;
+        if (err instanceof AdminLearningApiError && (err.status === 401 || err.status === 403)) {
+          setAccessDeniedMessage(err.message || "You do not have permission to manage this course.");
+        }
+        setCurriculumStatus("error");
+        setCurriculumError(err instanceof Error ? err.message : "Could not load curriculum.");
+        return null;
+      });
+
+    void Promise.all([loadPlatformDetails, loadCurriculum])
+      .then(([platformResult, currResult]) => {
         if (!active) return;
-        setPageError(error instanceof Error ? error.message : "Unable to load this course.");
+        if (platformResult) {
+          setDetails(platformResult);
+        }
+        const sourceCourse = currResult?.course ?? platformResult?.course;
+        if (sourceCourse) {
+          setForm(toCourseForm(sourceCourse));
+        }
       })
       .finally(() => {
         if (active) setIsLoading(false);
       });
 
-    return () => { active = false; };
-  }, [centerSlug, courseSlug, user]);
+    return () => {
+      active = false;
+    };
+  }, [authResolved, centerSlug, courseSlug, user]);
 
   async function refreshCurriculum() {
-    const curr = await getAdminCourseCurriculum(centerSlug, details?.course.slug ?? courseSlug);
-    setCurriculum(curr);
-    setDetails((prev) =>
-      prev
-        ? {
-            ...prev,
-            statistics: curr.statistics,
-          }
-        : prev
-    );
+    setCurriculumError(null);
+    try {
+      const curr = await getAdminCourseCurriculum(centerSlug, activeCourse?.slug ?? courseSlug);
+      setCurriculum(curr);
+      setCurriculumStatus("loaded");
+      setForm((prev) => (isEditing ? prev : toCourseForm(curr.course)));
+      await triggerCourseRevalidation(curr.course.slug);
+    } catch (err: unknown) {
+      setCurriculumStatus("error");
+      setCurriculumError(err instanceof Error ? err.message : "Failed to refresh curriculum.");
+      throw err;
+    }
   }
 
   useEffect(() => {
@@ -329,12 +419,14 @@ export default function CourseDetailsClient({
     setSaveMessage("");
   }
 
-  function formPayload(nextForm: CourseForm): PlatformCourseUpdatePayload {
+  function formPayload(nextForm: CourseForm): Record<string, unknown> {
     return {
       title: nextForm.title.trim(),
       slug: nextForm.slug.trim(),
       short_description: nextForm.short_description.trim() || null,
       description: nextForm.description.trim() || null,
+      prerequisites: nextForm.prerequisites.trim() || null,
+      target_audience: nextForm.target_audience.trim() || null,
       language_id: Number(nextForm.language_id),
       level_id: Number(nextForm.level_id),
       source_locale: nextForm.source_locale.trim(),
@@ -342,12 +434,23 @@ export default function CourseDetailsClient({
       duration_hours: nextForm.duration_hours.trim() ? Number(nextForm.duration_hours) : null,
       cover_image_url: nextForm.cover_image_url.trim() || null,
       cover_image_alt: nextForm.cover_image_alt.trim() || null,
+      pricing_mode: nextForm.pricing_mode,
+      price: nextForm.pricing_mode === "fixed" || nextForm.pricing_mode === "from"
+        ? (nextForm.price.trim() ? Number(nextForm.price) : null)
+        : null,
+      currency: nextForm.currency.trim() || "MAD",
+      is_curriculum_public: nextForm.is_curriculum_public,
+      meta_title: nextForm.meta_title.trim() || null,
+      meta_description: nextForm.meta_description.trim() || null,
+      outcomes: nextForm.outcomes
+        .filter((o) => o.content.trim() !== "")
+        .map((o) => ({ content: o.content.trim(), is_highlight: Boolean(o.is_highlight) })),
     };
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!form || !details || isSaving) return;
+    if (!form || !activeCourse || isSaving) return;
 
     setIsSaving(true);
     setPageError("");
@@ -355,20 +458,21 @@ export default function CourseDetailsClient({
     setSaveMessage("");
 
     try {
-      const updated = await apiUpdatePlatformCourse(
+      const updated = await updateAdminCourseSettings(
         centerSlug,
-        details.course.slug,
+        activeCourse.slug,
         formPayload(form)
       );
-      setDetails((current) => current ? { ...current, course: updated } : current);
+      setCurriculum((current) => current ? { ...current, course: updated } : current);
       setForm(toCourseForm(updated));
       setIsEditing(false);
-      setSaveMessage("Course details saved.");
+      setSaveMessage("Course settings saved.");
+      await triggerCourseRevalidation(updated.slug);
       if (updated.slug !== courseSlug) {
         router.replace(`/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(updated.slug)}`);
       }
     } catch (error: unknown) {
-      if (error instanceof PlatformCourseApiError) {
+      if (error instanceof AdminLearningApiError) {
         setPageError(error.message);
         setFieldErrors(error.errors ?? {});
       } else {
@@ -380,7 +484,7 @@ export default function CourseDetailsClient({
   }
 
   async function handleStatusChange(status: PlatformCourseStatus) {
-    if (!details || isChangingStatus || isDirty) {
+    if (!activeCourse || isChangingStatus || isDirty) {
       if (isDirty) setPageError("Save or cancel the course edits before changing its status.");
       return;
     }
@@ -390,10 +494,11 @@ export default function CourseDetailsClient({
     setPageError("");
     setSaveMessage("");
     try {
-      const updated = await apiUpdatePlatformCourse(centerSlug, details.course.slug, { status });
-      setDetails((current) => current ? { ...current, course: updated } : current);
+      const updated = await updateAdminCourseSettings(centerSlug, activeCourse.slug, { status });
+      setCurriculum((current) => current ? { ...current, course: updated } : current);
       setForm(toCourseForm(updated));
       setSaveMessage(status === "published" ? "Course published." : status === "archived" ? "Course archived." : "Course moved to draft.");
+      await triggerCourseRevalidation(updated.slug);
     } catch (error: unknown) {
       setPageError(error instanceof Error ? error.message : "Unable to change course status.");
     } finally {
@@ -428,15 +533,15 @@ export default function CourseDetailsClient({
     );
   }
 
-  if (!user?.is_platform_admin) {
+  if (!user || accessDeniedMessage) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="max-w-md rounded-2xl border border-red-200 bg-white p-8 text-center">
           <h1 className="text-xl font-black text-slate-900">Access Restricted</h1>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            {user
-              ? "Platform administrator access is required to manage this course."
-              : "Sign in with a platform administrator account to manage this course."}
+            {accessDeniedMessage
+              ? accessDeniedMessage
+              : "Sign in with a center administrator or platform administrator account to manage this course."}
           </p>
           {!user && (
             <Link
@@ -452,7 +557,7 @@ export default function CourseDetailsClient({
     );
   }
 
-  const course = details?.course;
+  const course = activeCourse;
   const courseListHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses`;
 
   return (
@@ -460,9 +565,9 @@ export default function CourseDetailsClient({
       <div className="mx-auto max-w-7xl space-y-6 pb-12">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Link href={courseListHref} className="inline-flex min-h-10 items-center gap-2 text-xs font-bold text-[#0e8988] hover:underline">
-            <span aria-hidden="true">←</span> {details?.center.name ?? "Courses"}
+            <span aria-hidden="true">←</span> {activeCenter?.name ?? "Courses"}
           </Link>
-          <span className="text-xs text-slate-500">{details?.center.slug}</span>
+          <span className="text-xs text-slate-500">{activeCenter?.slug ?? centerSlug}</span>
         </div>
 
         {pageError && (
@@ -515,10 +620,16 @@ export default function CourseDetailsClient({
                     <a href="#course-edit" className="inline-flex min-h-10 items-center rounded-xl bg-[#092443] px-4 text-xs font-extrabold text-white">Editing Course</a>
                   )}
                   <a href="#course-content" className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-4 text-xs font-extrabold text-[#102b4c] hover:border-teal-300 hover:text-teal-800">Manage Content</a>
+                  <Link
+                    href={`/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(course.slug)}/preview`}
+                    className="inline-flex min-h-10 items-center rounded-xl border border-indigo-200 bg-indigo-50 px-4 text-xs font-extrabold text-indigo-800 hover:bg-indigo-100"
+                  >
+                    Draft Preview
+                  </Link>
                   {course.status === "published" ? (
-                    <Link href={`/courses/${encodeURIComponent(course.slug)}`} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-4 text-xs font-extrabold text-[#102b4c] hover:border-teal-300 hover:text-teal-800">Preview Course</Link>
+                    <Link href={`/courses/${encodeURIComponent(course.slug)}`} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-4 text-xs font-extrabold text-[#102b4c] hover:border-teal-300 hover:text-teal-800">Public Page</Link>
                   ) : (
-                    <button type="button" disabled title="Publish the course to open its public preview." className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-4 text-xs font-bold text-slate-400">Preview unavailable</button>
+                    <button type="button" disabled title="Publish the course to open its public page." className="inline-flex min-h-10 items-center rounded-xl border border-slate-200 px-4 text-xs font-bold text-slate-400">Public page unavailable</button>
                   )}
                   {course.status === "draft" && <button type="button" disabled={isChangingStatus} onClick={() => void handleStatusChange("published")} className="inline-flex min-h-10 items-center rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-xs font-extrabold text-emerald-800 disabled:opacity-50">Publish</button>}
                   {course.status === "published" && <button type="button" disabled={isChangingStatus} onClick={() => void handleStatusChange("draft")} className="inline-flex min-h-10 items-center rounded-xl border border-amber-200 bg-amber-50 px-4 text-xs font-extrabold text-amber-800 disabled:opacity-50">Unpublish</button>}
@@ -531,19 +642,47 @@ export default function CourseDetailsClient({
               </div>
             </section>
 
-            {isEditing && form && details && (
+            {isEditing && form && (
               <section id="course-edit" className="scroll-mt-6 rounded-2xl border border-teal-200 bg-white p-5 shadow-sm sm:p-6">
-                <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-lg font-black text-[#102b4c]">General information</h2>
-                    <p className="mt-1 text-xs leading-5 text-slate-500">Update the course record. Cover images are public HTTPS URLs; private lesson files are managed from their lesson.</p>
+                    <h2 className="text-lg font-black text-[#102b4c]">Course Settings</h2>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">Configure general details, learning objectives, pricing, visibility, and SEO metadata.</p>
                   </div>
                   <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${isDirty ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>
                     {isDirty ? "Unsaved changes" : "All changes saved"}
                   </span>
                 </div>
 
+                {/* Settings Tabs */}
+                <div role="tablist" aria-label="Course settings sections" className="mb-5 flex flex-wrap gap-2 border-b border-slate-100 pb-3">
+                  {(
+                    [
+                      ["general", "General Info"],
+                      ["audience", "Objectives & Audience"],
+                      ["pricing", "Pricing & Visibility"],
+                      ["seo", "SEO Metadata"],
+                    ] as [SettingsTab, string][]
+                  ).map(([tabKey, tabLabel]) => (
+                    <button
+                      key={tabKey}
+                      type="button"
+                      role="tab"
+                      aria-selected={settingsTab === tabKey}
+                      onClick={() => setSettingsTab(tabKey)}
+                      className={`rounded-xl px-3.5 py-2 text-xs font-bold transition ${
+                        settingsTab === tabKey
+                          ? "bg-[#092443] text-white"
+                          : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      {tabLabel}
+                    </button>
+                  ))}
+                </div>
+
                 <form onSubmit={(event) => void handleSave(event)} className="space-y-5">
+                  {settingsTab === "general" && (
                   <div className="grid gap-4 md:grid-cols-2">
                     <div>
                       <label htmlFor="course-title" className="text-xs font-bold text-slate-700">Course title</label>
@@ -558,14 +697,14 @@ export default function CourseDetailsClient({
                     <div>
                       <label htmlFor="course-language" className="text-xs font-bold text-slate-700">Language</label>
                       <select id="course-language" value={form.language_id} onChange={(event) => updateField("language_id", event.target.value)} required aria-invalid={Boolean(fieldErrors.language_id?.length)} aria-describedby={fieldErrors.language_id?.length ? "course-language-error" : undefined} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-teal-500 aria-[invalid=true]:border-red-400">
-                        {details.language_options.map((language) => <option key={language.id} value={language.id}>{language.name} ({language.code})</option>)}
+                        {languageOptions.map((language) => <option key={language.id} value={language.id}>{language.name} ({language.code})</option>)}
                       </select>
                       <FieldError id="course-language-error" message={fieldErrors.language_id?.[0]} />
                     </div>
                     <div>
                       <label htmlFor="course-level" className="text-xs font-bold text-slate-700">Level</label>
                       <select id="course-level" value={form.level_id} onChange={(event) => updateField("level_id", event.target.value)} required aria-invalid={Boolean(fieldErrors.level_id?.length)} aria-describedby={fieldErrors.level_id?.length ? "course-level-error" : undefined} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-teal-500 aria-[invalid=true]:border-red-400">
-                        {details.level_options.map((level) => <option key={level.id} value={level.id}>{level.name} ({level.code})</option>)}
+                        {levelOptions.map((level) => <option key={level.id} value={level.id}>{level.name} ({level.code})</option>)}
                       </select>
                       <FieldError id="course-level-error" message={fieldErrors.level_id?.[0]} />
                     </div>
@@ -609,6 +748,123 @@ export default function CourseDetailsClient({
                       <FieldError id="course-cover-alt-error" message={fieldErrors.cover_image_alt?.[0]} />
                     </div>
                   </div>
+                  )}
+
+                  {settingsTab === "audience" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label htmlFor="course-target-audience" className="text-xs font-bold text-slate-700">Target audience</label>
+                      <textarea id="course-target-audience" rows={3} maxLength={10000} value={form.target_audience} onChange={(e) => updateField("target_audience", e.target.value)} placeholder="Who is this course designed for?" className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-teal-500" />
+                    </div>
+                    <div>
+                      <label htmlFor="course-prerequisites" className="text-xs font-bold text-slate-700">Prerequisites</label>
+                      <textarea id="course-prerequisites" rows={3} maxLength={10000} value={form.prerequisites} onChange={(e) => updateField("prerequisites", e.target.value)} placeholder="Required prior level or placement test..." className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-teal-500" />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-700">Learning Objectives / Outcomes</span>
+                        <button
+                          type="button"
+                          onClick={() => updateField("outcomes", [...form.outcomes, { content: "", is_highlight: false }])}
+                          className="rounded-lg border border-teal-300 px-2.5 py-1 text-xs font-bold text-teal-800 hover:bg-teal-50"
+                        >
+                          + Add Objective
+                        </button>
+                      </div>
+                      {form.outcomes.length === 0 ? (
+                        <p className="rounded-xl border border-dashed border-slate-200 p-4 text-xs text-slate-500">No learning objectives added yet.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {form.outcomes.map((outcome, idx) => (
+                            <div key={idx} className="flex flex-wrap items-center gap-2">
+                              <input
+                                type="text"
+                                maxLength={500}
+                                value={outcome.content}
+                                onChange={(e) => {
+                                  const next = [...form.outcomes];
+                                  next[idx] = { ...next[idx], content: e.target.value };
+                                  updateField("outcomes", next);
+                                }}
+                                placeholder={`Objective ${idx + 1}`}
+                                className="min-w-[200px] flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs outline-none focus:border-teal-500"
+                              />
+                              <label className="flex items-center gap-1.5 text-xs text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(outcome.is_highlight)}
+                                  onChange={(e) => {
+                                    const next = [...form.outcomes];
+                                    next[idx] = { ...next[idx], is_highlight: e.target.checked };
+                                    updateField("outcomes", next);
+                                  }}
+                                />
+                                Highlight
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => updateField("outcomes", form.outcomes.filter((_, i) => i !== idx))}
+                                className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-50"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  )}
+
+                  {settingsTab === "pricing" && (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <label htmlFor="course-pricing-mode" className="text-xs font-bold text-slate-700">Pricing mode</label>
+                      <select id="course-pricing-mode" value={form.pricing_mode} onChange={(e) => updateField("pricing_mode", e.target.value as CourseForm["pricing_mode"])} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-teal-500">
+                        <option value="upon_request">Upon request</option>
+                        <option value="fixed">Fixed price</option>
+                        <option value="from">Starting from</option>
+                        <option value="free">Free</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="course-currency" className="text-xs font-bold text-slate-700">Currency</label>
+                      <input id="course-currency" maxLength={10} value={form.currency} onChange={(e) => updateField("currency", e.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-teal-500" />
+                    </div>
+                    {(form.pricing_mode === "fixed" || form.pricing_mode === "from") && (
+                      <div>
+                        <label htmlFor="course-price" className="text-xs font-bold text-slate-700">Price</label>
+                        <input id="course-price" type="number" step="0.01" min="0" value={form.price} onChange={(e) => updateField("price", e.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-teal-500" />
+                      </div>
+                    )}
+                    <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <label className="flex items-center gap-2.5 text-xs font-bold text-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={form.is_curriculum_public}
+                          onChange={(e) => updateField("is_curriculum_public", e.target.checked)}
+                        />
+                        Show published curriculum outline on the public course page
+                      </label>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Only published modules and published lessons are visible publicly; private files and draft content are never exposed.
+                      </p>
+                    </div>
+                  </div>
+                  )}
+
+                  {settingsTab === "seo" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label htmlFor="course-meta-title" className="text-xs font-bold text-slate-700">SEO Meta Title</label>
+                      <input id="course-meta-title" maxLength={255} value={form.meta_title} onChange={(e) => updateField("meta_title", e.target.value)} placeholder={form.title} className="mt-1 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-teal-500" />
+                    </div>
+                    <div>
+                      <label htmlFor="course-meta-description" className="text-xs font-bold text-slate-700">SEO Meta Description</label>
+                      <textarea id="course-meta-description" rows={3} maxLength={500} value={form.meta_description} onChange={(e) => updateField("meta_description", e.target.value)} placeholder={form.short_description} className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-teal-500" />
+                    </div>
+                  </div>
+                  )}
 
                   <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-4">
                     <button type="button" disabled={isSaving} onClick={() => { setForm(toCourseForm(course)); setIsEditing(false); setFieldErrors({}); setPageError(""); }} className="min-h-10 rounded-xl border border-slate-200 px-4 text-xs font-bold text-slate-700 disabled:opacity-50">Cancel</button>
@@ -618,23 +874,45 @@ export default function CourseDetailsClient({
               </section>
             )}
 
-            <section aria-label="Course statistics" className="grid gap-3 grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
-              {[
-                ["Modules", details.statistics.modules],
-                ["Lessons", details.statistics.lessons],
-                ["Published", details.statistics.published_lessons],
-                ["Draft", details.statistics.draft_lessons],
-                ["Archived", details.statistics.archived_lessons],
-                ["Exercises", details.statistics.exercises],
-                ["Assets", details.statistics.assets],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded-xl border border-slate-200 bg-white p-4">
-                  <p className="text-xl font-black tabular-nums text-[#092443]">{value}</p>
-                  <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
-                </div>
-              ))}
-            </section>
+            {activeStats && (
+              <section aria-label="Course statistics" className="grid gap-3 grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
+                {[
+                  ["Modules", activeStats.modules],
+                  ["Lessons", activeStats.lessons],
+                  ["Published", activeStats.published_lessons],
+                  ["Draft", activeStats.draft_lessons],
+                  ["Archived", activeStats.archived_lessons],
+                  ["Exercises", activeStats.exercises],
+                  ["Assets", activeStats.assets],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-xl font-black tabular-nums text-[#092443]">{value}</p>
+                    <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
+                  </div>
+                ))}
+              </section>
+            )}
 
+            {curriculumStatus === "loading" ? (
+              <section className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
+                <p role="status" className="text-sm font-bold text-slate-500">Loading curriculum…</p>
+              </section>
+            ) : curriculumStatus === "error" ? (
+              <section role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-center space-y-3">
+                <h2 className="text-base font-black text-rose-900">Unable to load curriculum</h2>
+                <p className="text-xs text-rose-800">{curriculumError || "An error occurred while loading modules and lessons."}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurriculumStatus("loading");
+                    void refreshCurriculum().catch(() => undefined);
+                  }}
+                  className="inline-flex min-h-10 items-center rounded-xl bg-rose-700 px-4 text-xs font-bold text-white hover:bg-rose-800"
+                >
+                  Retry Curriculum Load
+                </button>
+              </section>
+            ) : (
             <CurriculumBuilder
               centerSlug={centerSlug}
               courseSlug={course.slug}
@@ -692,6 +970,7 @@ export default function CourseDetailsClient({
                 );
               }}
             />
+            )}
           </>
         )}
       </div>

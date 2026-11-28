@@ -6,11 +6,18 @@ use App\Models\Center;
 use App\Models\CenterUser;
 use App\Models\Course;
 use App\Models\CourseModule;
+use App\Models\Exercise;
+use App\Models\ExerciseAttempt;
 use App\Models\Language;
 use App\Models\Lesson;
+use App\Models\LessonAsset;
+use App\Models\LessonBlock;
 use App\Models\LessonRevision;
 use App\Models\Level;
+use App\Models\Question;
+use App\Models\QuestionOption;
 use App\Models\Role;
+use App\Models\StudentProfile;
 use App\Models\User;
 use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -74,12 +81,22 @@ class CurriculumManagementTest extends TestCase
         $m1Id = $m1->json('data.id');
         $m2Id = $m2->json('data.id');
 
-        // Rename & reorder modules
+        // Rename & publish module via dedicated publish endpoint (PATCH cannot bypass publication)
         $this->withHeader('Authorization', "Bearer {$token}")
             ->patchJson("{$base}/modules/{$m1Id}", ['title' => 'Module 1 Updated', 'status' => 'published'])
             ->assertOk()
             ->assertJsonPath('data.title', 'Module 1 Updated')
+            ->assertJsonPath('data.status', 'draft');
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$m1Id}/publish")
+            ->assertOk()
             ->assertJsonPath('data.status', 'published');
+
+        // Reorder modules: partial array rejected, complete array succeeds
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->putJson("{$base}/modules/order", ['module_ids' => [$m1Id]])
+            ->assertStatus(422);
 
         $this->withHeader('Authorization', "Bearer {$token}")
             ->putJson("{$base}/modules/order", ['module_ids' => [$m2Id, $m1Id]])
@@ -88,7 +105,7 @@ class CurriculumManagementTest extends TestCase
         $this->assertSame(0, CourseModule::find($m2Id)->sort_order);
         $this->assertSame(1, CourseModule::find($m1Id)->sort_order);
 
-        // Create lessons in Module 1 (video + reading)
+        // Create lessons in Module 1 (video + reading + exercise)
         $l1 = $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson("{$base}/modules/{$m1Id}/lessons", [
                 'title' => 'Intro Video',
@@ -97,41 +114,164 @@ class CurriculumManagementTest extends TestCase
             ])
             ->assertStatus(201);
         $l1Id = $l1->json('data.id');
-        $this->assertNotNull($l1->json('data.draft_revision_id'));
-        $this->assertDatabaseHas('lesson_revisions', [
+        $l1RevId = $l1->json('data.draft_revision_id');
+        $this->assertNotNull($l1RevId);
+
+        // Attach a video asset + block to l1
+        $videoAsset = LessonAsset::query()->create([
+            'center_id' => $center->id,
             'lesson_id' => $l1Id,
-            'status' => LessonRevision::STATUS_DRAFT,
-            'version_number' => 1,
+            'title' => 'Welcome Clip',
+            'asset_type' => LessonAsset::TYPE_VIDEO,
+            'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'external_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            'status' => LessonAsset::STATUS_ACTIVE,
+        ]);
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $l1Id,
+            'lesson_revision_id' => $l1RevId,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 0,
+            'lesson_asset_id' => $videoAsset->id,
         ]);
 
-        // Duplicate lesson
+        // Duplicate video lesson -> preserves media reference on new lesson
         $dup = $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson("{$base}/lessons/{$l1Id}/duplicate")
             ->assertStatus(201)
-            ->assertJsonPath('data.title', 'Intro Video (Copy)');
+            ->assertJsonPath('data.title', 'Intro Video (Copy)')
+            ->assertJsonPath('data.summary.has_video', true);
         $dupId = $dup->json('data.id');
+        $this->assertDatabaseHas('lesson_assets', [
+            'lesson_id' => $dupId,
+            'title' => 'Welcome Clip',
+            'external_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        ]);
 
-        // Reorder lessons in Module 1
+        // Create exercise lesson with question + option + student attempt, then duplicate
+        $lEx = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$m1Id}/lessons", [
+                'title' => 'Grammar Quiz',
+                'content_type' => 'exercise',
+            ])
+            ->assertStatus(201);
+        $lExId = $lEx->json('data.id');
+        $lExRevId = $lEx->json('data.draft_revision_id');
+
+        $exercise = Exercise::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lExId,
+            'title' => 'Quiz 1',
+            'passing_score' => 70,
+            'status' => Exercise::STATUS_PUBLISHED,
+            'published_at' => now(),
+        ]);
+        $question = Question::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_TRUE_FALSE,
+            'prompt' => 'Is 2+2=4?',
+            'points' => 2,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $question->id,
+            'option_text' => 'True',
+            'is_correct' => true,
+            'sort_order' => 0,
+        ]);
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lExId,
+            'lesson_revision_id' => $lExRevId,
+            'block_type' => LessonBlock::TYPE_EXERCISE,
+            'sort_order' => 0,
+            'exercise_id' => $exercise->id,
+        ]);
+        $studentUser = User::factory()->create();
+        CenterUser::query()->create([
+            'center_id' => $center->id,
+            'user_id' => $studentUser->id,
+            'status' => 'active',
+        ]);
+        $studentProfile = StudentProfile::query()->create([
+            'center_id' => $center->id,
+            'user_id' => $studentUser->id,
+            'student_code' => 'STU-99',
+            'status' => 'active',
+        ]);
+        ExerciseAttempt::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'student_profile_id' => $studentProfile->id,
+            'attempt_number' => 1,
+            'passing_score_snapshot' => 70,
+            'started_at' => now(),
+            'status' => ExerciseAttempt::STATUS_GRADED,
+        ]);
+
+        $dupEx = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/lessons/{$lExId}/duplicate")
+            ->assertStatus(201)
+            ->assertJsonPath('data.summary.question_count', 1);
+        $dupExId = $dupEx->json('data.id');
+        $clonedExercise = Exercise::query()->where('lesson_id', $dupExId)->firstOrFail();
+        $this->assertSame(Exercise::STATUS_DRAFT, $clonedExercise->status);
+        $this->assertSame(1, $clonedExercise->questions()->count());
+        $this->assertSame(0, ExerciseAttempt::query()->where('exercise_id', $clonedExercise->id)->count());
+
+        // Reorder lessons in Module 1 (partial rejected, full succeeds)
         $this->withHeader('Authorization', "Bearer {$token}")
             ->putJson("{$base}/modules/{$m1Id}/lessons/order", ['lesson_ids' => [$dupId, $l1Id]])
+            ->assertStatus(422);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->putJson("{$base}/modules/{$m1Id}/lessons/order", ['lesson_ids' => [$dupId, $lExId, $dupExId, $l1Id]])
             ->assertOk();
         $this->assertSame(0, Lesson::find($dupId)->sort_order);
-        $this->assertSame(1, Lesson::find($l1Id)->sort_order);
 
-        // Move lesson to Module 2
+        // Move lesson to Module 2 with placement = first
         $this->withHeader('Authorization', "Bearer {$token}")
-            ->postJson("{$base}/lessons/{$l1Id}/move", ['target_module_id' => $m2Id])
+            ->postJson("{$base}/lessons/{$l1Id}/move", [
+                'target_module_id' => $m2Id,
+                'placement' => 'first',
+            ])
             ->assertOk()
-            ->assertJsonPath('data.course_module_id', $m2Id);
+            ->assertJsonPath('data.course_module_id', $m2Id)
+            ->assertJsonPath('data.sort_order', 0);
 
-        // Archive Module 2 -> archives its lessons without deleting revisions
+        // Archive Module 2 -> archives its lessons; Restore Module 2 -> restores to draft (never published)
         $this->withHeader('Authorization', "Bearer {$token}")
             ->patchJson("{$base}/modules/{$m2Id}/archive")
             ->assertOk()
             ->assertJsonPath('data.status', 'archived');
-
         $this->assertSame(Lesson::STATUS_ARCHIVED, Lesson::find($l1Id)->status);
-        $this->assertDatabaseHas('lesson_revisions', ['lesson_id' => $l1Id]);
+
+        // Cannot publish archived module directly or move lesson into archived module
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$m2Id}/publish")
+            ->assertStatus(422);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/lessons/{$dupId}/move", ['target_module_id' => $m2Id])
+            ->assertStatus(422);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$m2Id}/restore")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'draft');
+        $this->assertSame(Lesson::STATUS_DRAFT, Lesson::find($l1Id)->status);
+
+        // Archive and restore single lesson
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/lessons/{$l1Id}/archive")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'archived');
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/lessons/{$l1Id}/restore")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'draft');
     }
 
     public function test_rejects_cross_center_access_to_curriculum_endpoints(): void

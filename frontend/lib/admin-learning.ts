@@ -788,6 +788,7 @@ export interface CurriculumLessonSummary {
   video_duration_seconds: number | null;
   has_reading_content: boolean;
   resources_count: number;
+  broken_media_count?: number;
   question_count: number;
   total_points: number;
 }
@@ -806,6 +807,7 @@ export interface CurriculumLesson {
   updated_at: string | null;
   draft_revision_id: number | null;
   published_revision_id: number | null;
+  has_draft_changes?: boolean;
   assets_count: number;
   exercises_count: number;
   summary: CurriculumLessonSummary;
@@ -823,26 +825,47 @@ export interface CurriculumModule {
   lessons: CurriculumLesson[];
 }
 
+export interface CurriculumCourseOutcome {
+  id?: number;
+  locale?: string;
+  content: string;
+  is_highlight: boolean;
+  sort_order?: number;
+  status?: string;
+}
+
 export interface CurriculumCourseSummary {
   id: number;
   title: string;
   slug: string;
   short_description: string | null;
   description: string | null;
+  prerequisites: string | null;
+  target_audience: string | null;
   cover_image_url: string | null;
   cover_image_alt: string | null;
   source_locale: string;
   study_format: "in_person" | "online" | "hybrid";
   duration_hours: number | null;
+  price: string | null;
+  currency: string | null;
+  pricing_mode: "fixed" | "from" | "upon_request" | "free";
+  is_curriculum_public: boolean;
+  meta_title: string | null;
+  meta_description: string | null;
   status: "draft" | "published" | "archived";
   published_at: string | null;
+  updated_at: string | null;
   language: { id: number; code: string; name: string; native_name: string | null } | null;
   level: { id: number; code: string; name: string } | null;
+  outcomes?: CurriculumCourseOutcome[];
 }
 
 export interface CurriculumResponse {
   center: { id: number; name: string; slug: string };
   course: CurriculumCourseSummary;
+  language_options?: { id: number; code: string; name: string; native_name: string | null }[];
+  level_options?: { id: number; code: string; name: string }[];
   statistics: {
     modules: number;
     lessons: number;
@@ -885,13 +908,35 @@ export async function updateAdminModule(
   centerSlug: string,
   courseSlug: string,
   moduleId: number,
-  payload: { title?: string; description?: string | null; status?: "draft" | "published" | "archived" }
+  payload: { title?: string; description?: string | null }
 ): Promise<CurriculumModule> {
   const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
   return handleResponse<CurriculumModule>(response, "Failed to update module.");
+}
+
+export async function publishAdminModule(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number
+): Promise<void> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}/publish`, {
+    method: "POST",
+  });
+  await handleResponse<unknown>(response, "Failed to publish module.");
+}
+
+export async function restoreAdminModule(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number
+): Promise<void> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}/restore`, {
+    method: "POST",
+  });
+  await handleResponse<unknown>(response, "Failed to restore module.");
 }
 
 export async function reorderAdminModules(
@@ -947,7 +992,6 @@ export async function updateAdminLesson(
     description?: string | null;
     content_type?: EffectiveLessonKind;
     duration_minutes?: number | null;
-    status?: "draft" | "published" | "archived";
   }
 ): Promise<CurriculumLesson> {
   const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}`, {
@@ -961,11 +1005,16 @@ export async function moveAdminLesson(
   centerSlug: string,
   courseSlug: string,
   lessonId: number,
-  targetModuleId: number
+  targetModuleId: number,
+  options?: { placement?: "first" | "last" | "before" | "after"; anchorLessonId?: number | null }
 ): Promise<CurriculumLesson> {
   const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}/move`, {
     method: "POST",
-    body: JSON.stringify({ target_module_id: targetModuleId }),
+    body: JSON.stringify({
+      target_module_id: targetModuleId,
+      placement: options?.placement ?? "last",
+      anchor_lesson_id: options?.anchorLessonId ?? null,
+    }),
   });
   return handleResponse<CurriculumLesson>(response, "Failed to move lesson.");
 }
@@ -1006,5 +1055,71 @@ export async function archiveAdminLesson(
     method: "PATCH",
   });
   await handleResponse<unknown>(response, "Failed to archive lesson.");
+}
+
+export async function restoreAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number
+): Promise<CurriculumLesson> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}/restore`, {
+    method: "POST",
+  });
+  return handleResponse<CurriculumLesson>(response, "Failed to restore lesson.");
+}
+
+export interface AdminCoursePreviewData {
+  preview_version: "draft" | "published";
+  has_draft_changes: boolean;
+  course: CurriculumCourseSummary;
+  modules: {
+    id: number;
+    title: string;
+    description: string | null;
+    status: string;
+    lessons: {
+      id: number;
+      title: string;
+      content_type: string;
+      duration_minutes: number | null;
+      status: string;
+      has_draft: boolean;
+    }[];
+  }[];
+}
+
+export async function getAdminCoursePreview(
+  centerSlug: string,
+  courseSlug: string,
+  version: "draft" | "published" = "draft"
+): Promise<AdminCoursePreviewData> {
+  const response = await authFetch(
+    `${curriculumBase(centerSlug, courseSlug)}/preview?version=${encodeURIComponent(version)}`
+  );
+  return handleResponse<AdminCoursePreviewData>(response, "Failed to load course preview.");
+}
+
+export async function updateAdminCourseSettings(
+  centerSlug: string,
+  courseSlug: string,
+  payload: Record<string, unknown>
+): Promise<CurriculumCourseSummary> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<CurriculumCourseSummary>(response, "Failed to update course settings.");
+}
+
+export async function triggerCourseRevalidation(courseSlug: string): Promise<void> {
+  try {
+    await fetch("/api/revalidate/courses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: courseSlug }),
+    });
+  } catch {
+    // Non-blocking best-effort cache invalidation
+  }
 }
 

@@ -14,8 +14,9 @@ const translations = {
     lessons: "lessons",
     video: "Video",
     text: "Reading",
-    resource: "Resource",
-    quiz: "Quiz",
+    resource: "Resources",
+    quiz: "Exercise",
+    mixed: "Mixed Content",
     minutes: "min",
   },
 
@@ -23,8 +24,9 @@ const translations = {
     lessons: "leçons",
     video: "Vidéo",
     text: "Lecture",
-    resource: "Ressource",
-    quiz: "Quiz",
+    resource: "Ressources",
+    quiz: "Exercice",
+    mixed: "Contenu mixte",
     minutes: "min",
   },
 };
@@ -180,7 +182,9 @@ export default function CourseCurriculum({
                       ? t.quiz
                       : lesson.contentType === "resource"
                         ? t.resource
-                        : t.text;
+                        : lesson.contentType === "mixed"
+                          ? t.mixed
+                          : t.text;
 
                 return (
                   <div

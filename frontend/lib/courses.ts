@@ -1,6 +1,6 @@
 
 import "server-only";
-import { cacheLife } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 
 export type Locale = "en" | "fr";
 
@@ -675,7 +675,8 @@ export type LessonContentType =
   | "video"
   | "text"
   | "resource"
-  | "quiz";
+  | "quiz"
+  | "mixed";
 
 export interface CourseOutcome {
   content: string;
@@ -792,16 +793,23 @@ function normalizeLessonType(
     case "video":
       return "video";
 
+    case "reading":
     case "text":
       return "text";
 
+    case "resources":
     case "resource":
     case "file":
+    case "image":
       return "resource";
 
     case "quiz":
     case "exercise":
       return "quiz";
+
+    case "legacy_mixed":
+    case "mixed":
+      return "mixed";
 
     default:
       return "text";
@@ -1116,6 +1124,7 @@ async function getCachedCourseDetails(
   "use cache";
 
   cacheLife({ revalidate: 60 });
+  cacheTag("courses", `course:${centerSlug}:${slug}`);
 
   const baseUrl = getValidatedLaravelApiBaseUrl(apiBase);
 

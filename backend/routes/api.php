@@ -199,6 +199,13 @@ Route::prefix('centers/{center}')
                         Route::get('/curriculum', [AdminCurriculumController::class, 'curriculum'])
                             ->name('api.centers.admin.learning.curriculum.show');
 
+                        Route::patch('/settings', [AdminCurriculumController::class, 'updateCourseSettings'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.course.settings');
+
+                        Route::get('/preview', [AdminCurriculumController::class, 'previewCourse'])
+                            ->name('api.centers.admin.learning.course.preview');
+
                         Route::post('/modules', [AdminCurriculumController::class, 'storeModule'])
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.modules.store');
@@ -211,9 +218,17 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.modules.update');
 
+                        Route::post('/modules/{module}/publish', [AdminCurriculumController::class, 'publishModule'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.publish');
+
                         Route::patch('/modules/{module}/archive', [AdminCurriculumController::class, 'archiveModule'])
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.modules.archive');
+
+                        Route::post('/modules/{module}/restore', [AdminCurriculumController::class, 'restoreModule'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.restore');
 
                         Route::post('/modules/{module}/lessons', [AdminCurriculumController::class, 'storeLesson'])
                             ->middleware('csrf.api')
@@ -238,6 +253,10 @@ Route::prefix('centers/{center}')
                         Route::patch('/lessons/{lesson}/archive', [AdminCurriculumController::class, 'archiveLesson'])
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.lessons.archive');
+
+                        Route::post('/lessons/{lesson}/restore', [AdminCurriculumController::class, 'restoreLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.restore');
                     });
 
                 /*
