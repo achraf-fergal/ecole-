@@ -525,6 +525,7 @@ class AdminCurriculumController extends Controller
                                         'id' => $exercise->id,
                                         'title' => $exercise->title,
                                         'instructions' => $exercise->instructions,
+                                        'total_points' => (float) $exercise->total_points,
                                         'max_attempts' => $exercise->max_attempts,
                                         'passing_score' => (float) $exercise->passing_score,
                                         'show_correct_answers_after_submission' => (bool) $exercise->show_correct_answers_after_submission,

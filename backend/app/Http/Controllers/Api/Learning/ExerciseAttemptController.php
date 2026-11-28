@@ -66,6 +66,7 @@ class ExerciseAttemptController extends Controller
                     'id' => $exercise->id,
                     'title' => $exercise->title,
                     'instructions' => $exercise->instructions,
+                    'total_points' => (float) $exercise->total_points,
                     'passing_score' => (float) $exercise->passing_score,
                     'max_attempts' => $exercise->max_attempts,
                     'attempts_count' => $completedCount,

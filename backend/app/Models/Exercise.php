@@ -34,6 +34,7 @@ class Exercise extends Model
         'instructions',
         'max_attempts',
         'passing_score',
+        'total_points',
         'show_correct_answers_after_submission',
         'result_settings',
         'sort_order',
@@ -46,6 +47,7 @@ class Exercise extends Model
         return [
             'max_attempts' => 'integer',
             'passing_score' => 'decimal:2',
+            'total_points' => 'decimal:2',
             'show_correct_answers_after_submission' => 'boolean',
             'result_settings' => 'array',
             'sort_order' => 'integer',

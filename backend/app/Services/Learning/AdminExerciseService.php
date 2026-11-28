@@ -52,6 +52,7 @@ class AdminExerciseService
                 'instructions' => $data['instructions'] ?? null,
                 'max_attempts' => $data['max_attempts'] ?? null,
                 'passing_score' => $data['passing_score'] ?? 70.00,
+                'total_points' => $data['total_points'] ?? 1.00,
                 'show_correct_answers_after_submission' => (bool) ($data['show_correct_answers_after_submission'] ?? false),
                 'sort_order' => $sortOrder,
                 'status' => Exercise::STATUS_DRAFT,
@@ -89,6 +90,7 @@ class AdminExerciseService
                 'instructions',
                 'max_attempts',
                 'passing_score',
+                'total_points',
                 'show_correct_answers_after_submission',
                 'sort_order',
             ]));
@@ -136,6 +138,7 @@ class AdminExerciseService
                     'instructions',
                     'max_attempts',
                     'passing_score',
+                    'total_points',
                     'show_correct_answers_after_submission',
                     'sort_order',
                 ]));
@@ -158,6 +161,20 @@ class AdminExerciseService
                     ? $fillable['max_attempts']
                     : $lockedExercise->max_attempts;
                 $effectiveResultSettings = $fillable['result_settings'] ?? $lockedExercise->resolvedResultSettings();
+
+                $effectiveTotalPoints = array_key_exists('total_points', $fillable)
+                    ? $fillable['total_points']
+                    : (isset($data['questions']) && is_array($data['questions'])
+                        ? $this->answerGrader->minorUnitsToDecimalString($this->questionPayloadTotalMinorUnits($data['questions']))
+                        : $lockedExercise->total_points);
+                $questionTotalMinorUnits = isset($data['questions']) && is_array($data['questions'])
+                    ? $this->questionPayloadTotalMinorUnits($data['questions'])
+                    : $this->storedQuestionTotalMinorUnits($lockedExercise);
+                $this->assertQuestionTotalDoesNotExceedExerciseTotal(
+                    $questionTotalMinorUnits,
+                    $effectiveTotalPoints
+                );
+                $fillable['total_points'] = $effectiveTotalPoints;
 
                 if (
                     array_key_exists('max_attempts', $fillable)
@@ -209,12 +226,24 @@ class AdminExerciseService
                     'instructions' => $data['instructions'] ?? null,
                     'max_attempts' => $data['max_attempts'] ?? null,
                     'passing_score' => $data['passing_score'] ?? 70.00,
+                    'total_points' => $data['total_points']
+                        ?? (isset($data['questions']) && is_array($data['questions']) && $data['questions'] !== []
+                            ? $this->answerGrader->minorUnitsToDecimalString($this->questionPayloadTotalMinorUnits($data['questions']))
+                            : 1.00),
                     'show_correct_answers_after_submission' => (bool) $normalizedResultSettings['show_correct_answers'],
                     'result_settings' => $normalizedResultSettings,
                     'sort_order' => $sortOrder,
                     'status' => Exercise::STATUS_DRAFT,
                     'published_at' => null,
                 ]);
+
+                $questionTotalMinorUnits = isset($data['questions']) && is_array($data['questions'])
+                    ? $this->questionPayloadTotalMinorUnits($data['questions'])
+                    : 0;
+                $this->assertQuestionTotalDoesNotExceedExerciseTotal(
+                    $questionTotalMinorUnits,
+                    $exercise->total_points
+                );
             }
 
             if (isset($data['questions']) && is_array($data['questions'])) {
@@ -534,6 +563,22 @@ class AdminExerciseService
             if ($questions->isEmpty()) {
                 throw ValidationException::withMessages([
                     'questions' => ['An exercise must contain at least one question before publication.'],
+                ]);
+            }
+
+            $questionTotalMinorUnits = $questions->reduce(
+                fn (int $total, Question $question): int => $total
+                    + $this->answerGrader->decimalToMinorUnits($question->points),
+                0
+            );
+            $exerciseTotalMinorUnits = $this->answerGrader->decimalToMinorUnits($lockedExercise->total_points);
+            if ($questionTotalMinorUnits !== $exerciseTotalMinorUnits) {
+                throw ValidationException::withMessages([
+                    'total_points' => [sprintf(
+                        'Question points total (%s) must equal the exercise total (%s).',
+                        $this->answerGrader->minorUnitsToDecimalString($questionTotalMinorUnits),
+                        $this->answerGrader->minorUnitsToDecimalString($exerciseTotalMinorUnits)
+                    )],
                 ]);
             }
 
@@ -875,14 +920,14 @@ class AdminExerciseService
                 $qPayload['text_answer'] = $textAnswer;
                 if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
                     $decoded = $textAnswer !== null ? json_decode($textAnswer, true) : null;
-                    $qPayload['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass();
+                    $qPayload['blank_answers'] = is_array($decoded) ? $decoded : new \stdClass;
                 }
             } else {
                 $qPayload['selected_option_id'] = null;
                 $qPayload['selected_option_ids'] = null;
                 $qPayload['text_answer'] = null;
                 if ($question->question_type === Question::TYPE_FILL_IN_THE_BLANKS) {
-                    $qPayload['blank_answers'] = new \stdClass();
+                    $qPayload['blank_answers'] = new \stdClass;
                 }
             }
 
@@ -985,6 +1030,62 @@ class AdminExerciseService
             Question::TYPE_FILL_IN_THE_BLANKS => $this->isSimulatedFillBlankUnanswered($answer->text_answer),
             default => true,
         };
+    }
+
+    /** @param array<int, array<string, mixed>> $questions */
+    private function questionPayloadTotalMinorUnits(array $questions): int
+    {
+        $total = 0;
+        foreach ($questions as $question) {
+            if (($question['question_type'] ?? null) === Question::TYPE_FILL_IN_THE_BLANKS) {
+                $configuration = $this->answerGrader->normalizeBlankConfiguration(
+                    is_array($question['answer_config'] ?? null) ? $question['answer_config'] : []
+                );
+                $total += $this->answerGrader->sumBlankPointsMinorUnits($configuration);
+
+                continue;
+            }
+
+            $points = $question['points'] ?? 1;
+            if (is_numeric($points)) {
+                $total += $this->answerGrader->decimalToMinorUnits((string) $points);
+            }
+        }
+
+        return $total;
+    }
+
+    private function storedQuestionTotalMinorUnits(Exercise $exercise): int
+    {
+        return $exercise->questions()
+            ->get(['points'])
+            ->reduce(
+                fn (int $total, Question $question): int => $total
+                    + $this->answerGrader->decimalToMinorUnits($question->points),
+                0
+            );
+    }
+
+    private function assertQuestionTotalDoesNotExceedExerciseTotal(
+        int $questionTotalMinorUnits,
+        int|float|string $exerciseTotal
+    ): void {
+        $exerciseTotalMinorUnits = $this->answerGrader->decimalToMinorUnits($exerciseTotal);
+        if ($exerciseTotalMinorUnits <= 0) {
+            throw ValidationException::withMessages([
+                'total_points' => ['Exercise total points must be greater than zero.'],
+            ]);
+        }
+
+        if ($questionTotalMinorUnits > $exerciseTotalMinorUnits) {
+            throw ValidationException::withMessages([
+                'total_points' => [sprintf(
+                    'Question points total (%s) exceeds the exercise total (%s).',
+                    $this->answerGrader->minorUnitsToDecimalString($questionTotalMinorUnits),
+                    $this->answerGrader->minorUnitsToDecimalString($exerciseTotalMinorUnits)
+                )],
+            ]);
+        }
     }
 
     private function isSimulatedFillBlankUnanswered(?string $textAnswer): bool

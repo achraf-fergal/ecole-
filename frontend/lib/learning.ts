@@ -245,6 +245,7 @@ export interface LearningExercise {
   id: number;
   title: string;
   instructions: string | null;
+  total_points: number | string;
   max_attempts: number | null;
   passing_score: number | string;
   sort_order: number;
@@ -936,6 +937,7 @@ export interface ExerciseCurrentAttemptState {
     id: number;
     title: string;
     instructions: string | null;
+    total_points: number | string;
     passing_score: number;
     max_attempts: number | null;
     attempts_count: number;

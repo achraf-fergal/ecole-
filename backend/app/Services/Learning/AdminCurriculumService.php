@@ -634,6 +634,7 @@ class AdminCurriculumService
                                 'lesson_id' => $copy->id,
                                 'title' => $sourceExercise->title,
                                 'instructions' => $sourceExercise->instructions,
+                                'total_points' => $sourceExercise->total_points,
                                 'max_attempts' => $sourceExercise->max_attempts,
                                 'passing_score' => $sourceExercise->passing_score,
                                 'show_correct_answers_after_submission' => $sourceExercise->show_correct_answers_after_submission,

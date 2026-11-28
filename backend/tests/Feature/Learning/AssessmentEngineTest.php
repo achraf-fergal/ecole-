@@ -262,6 +262,62 @@ class AssessmentEngineTest extends TestCase
         $pubRes->assertJsonValidationErrors(['questions']);
     }
 
+    public function test_question_points_cannot_exceed_final_total_and_must_match_to_publish(): void
+    {
+        $context = $this->createAdminContext();
+        $token = $this->tokenFor($context['user']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+        ];
+        $createRoute = route('api.centers.admin.learning.exercises.store', $routeParameters);
+        $question = [
+            'prompt' => 'How many points is this question worth?',
+            'question_type' => 'single_choice',
+            'points' => 4,
+            'options' => [
+                ['option_text' => 'Four', 'is_correct' => true],
+                ['option_text' => 'Five', 'is_correct' => false],
+            ],
+        ];
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
+            'title' => 'Over total points',
+            'total_points' => 3,
+            'questions' => [$question],
+        ])->assertUnprocessable()->assertJsonValidationErrors(['total_points']);
+        $this->assertDatabaseMissing('exercises', ['title' => 'Over total points']);
+
+        $created = $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
+            'title' => 'Final points validation',
+            'total_points' => 5,
+            'questions' => [$question],
+        ])->assertCreated()
+            ->assertJsonPath('data.total_points', 5);
+        $exerciseId = (int) $created->json('data.id');
+        $publishRoute = route('api.centers.admin.learning.exercises.publish', [
+            ...$routeParameters,
+            'exercise' => $exerciseId,
+        ]);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson($publishRoute)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['total_points']);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [
+                ...$routeParameters,
+                'exercise' => $exerciseId,
+            ]),
+            ['total_points' => 4]
+        )->assertOk()->assertJsonPath('data.total_points', 4);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson($publishRoute)
+            ->assertOk()
+            ->assertJsonPath('data.status', Exercise::STATUS_PUBLISHED);
+    }
+
     public function test_complete_assessment_workflow_end_to_end(): void
     {
         $ctx = $this->createAdminContext();

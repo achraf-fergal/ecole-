@@ -166,6 +166,7 @@ class LearningLessonResource extends JsonResource
             'id' => $exercise->id,
             'title' => $exercise->title,
             'instructions' => $exercise->instructions,
+            'total_points' => $exercise->total_points,
             'max_attempts' => $exercise->max_attempts,
             'passing_score' => $exercise->passing_score,
             'sort_order' => $exercise->sort_order,

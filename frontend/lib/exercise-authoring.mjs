@@ -252,6 +252,26 @@ export function sumBlankPoints(blanks) {
 }
 
 /**
+ * Sum question points using hundredths so the authoring total matches backend grading.
+ * Fill-in-the-blanks questions use the sum of their individual blanks.
+ * @param {Array<any>} questions
+ * @returns {number}
+ */
+export function sumExercisePoints(questions) {
+  if (!Array.isArray(questions)) return 0;
+  let totalMinorUnits = 0;
+  for (const question of questions) {
+    const points = question?.question_type === "fill_in_the_blanks"
+      ? sumBlankPoints(question?.answer_config?.blanks)
+      : Number(question?.points);
+    if (Number.isFinite(points) && points > 0) {
+      totalMinorUnits += Math.round(points * 100);
+    }
+  }
+  return totalMinorUnits / 100;
+}
+
+/**
  * Check whether every blank ID has a non-whitespace student answer.
  * @param {string[]} blankIds
  * @param {Record<string, string>|number|string|number[]|null|undefined} studentAnswers
@@ -521,6 +541,10 @@ export function validateExerciseDraft(draft) {
   if (!Number.isFinite(passingScore) || passingScore < 0 || passingScore > 100) {
     errors.passing_score = "Passing score must be between 0 and 100.";
   }
+  const totalPoints = Number(draft?.total_points);
+  if (!Number.isFinite(totalPoints) || totalPoints <= 0) {
+    errors.total_points = "The exercise total points must be greater than zero.";
+  }
   if (draft?.max_attempts !== null && draft?.max_attempts !== undefined && draft?.max_attempts !== "") {
     const maxAttempts = Number(draft.max_attempts);
     if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
@@ -531,6 +555,13 @@ export function validateExerciseDraft(draft) {
   const questions = Array.isArray(draft?.questions) ? draft.questions : [];
   if (questions.length === 0) {
     errors.questions = "Add at least one question before publishing.";
+  } else if (Number.isFinite(totalPoints) && totalPoints > 0) {
+    const assignedPoints = sumExercisePoints(questions);
+    if (assignedPoints > totalPoints) {
+      errors.total_points = `Question points total (${assignedPoints}) exceeds the exercise total (${totalPoints}).`;
+    } else if (assignedPoints < totalPoints) {
+      errors.total_points = `Question points total (${assignedPoints}) must equal the exercise total (${totalPoints}).`;
+    }
   }
 
   /** @type {number | null} */

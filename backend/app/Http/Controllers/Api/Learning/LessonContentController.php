@@ -445,6 +445,7 @@ class LessonContentController extends Controller
         $validated = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'instructions' => ['nullable', 'string'],
+            'total_points' => ['sometimes', 'numeric', 'min:0.01', 'max:99999999.99'],
             'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'max_attempts' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
@@ -792,6 +793,7 @@ class LessonContentController extends Controller
                 'title' => $exercise->title,
                 'instructions' => $exercise->instructions,
                 'max_attempts' => $exercise->max_attempts,
+                'total_points' => $exercise->total_points,
                 'passing_score' => $exercise->passing_score,
                 'status' => $exercise->status,
 

@@ -22,6 +22,7 @@ import {
   extractPromptPlaceholders,
   extractFirstErrorQuestionIndex,
   sumBlankPoints,
+  sumExercisePoints,
   validateExerciseDraft,
 } from "@/lib/exercise-authoring.mjs";
 import type { QuestionType } from "@/lib/learning";
@@ -286,6 +287,7 @@ export default function ExerciseDraftBuilder({
     try {
       const created = await createAdminExercise(centerSlug, courseSlug, lessonId, {
         title: "Untitled Exercise",
+        total_points: 1,
         passing_score: 70,
       });
       const nextDraft = toDraftExercise(created);
@@ -311,6 +313,7 @@ export default function ExerciseDraftBuilder({
     return {
       title: value.title,
       instructions: value.instructions,
+      total_points: value.total_points,
       passing_score: value.passing_score,
       max_attempts: value.max_attempts,
       show_correct_answers_after_submission: resolvedSettings.show_correct_answers,
@@ -693,6 +696,7 @@ export default function ExerciseDraftBuilder({
   };
 
   const readError = (path: string) => fieldErrors[path];
+  const totalPointsError = readError("total_points") ?? liveValidation?.errors.total_points;
   const editable = draft?.status === "draft";
 
   const selectedQuestionIndex = draft
@@ -909,6 +913,35 @@ export default function ExerciseDraftBuilder({
                       rows={2}
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2"
                     />
+                  </label>
+
+                  <label className="text-xs font-semibold text-slate-700">
+                    Exercise total points
+                    <input
+                      type="number"
+                      min={0.01}
+                      max={99999999.99}
+                      step={0.01}
+                      value={draft.total_points}
+                      onChange={(event) =>
+                        updateDraft(
+                          (current) => ({ ...current, total_points: Number(event.target.value) }),
+                          ["total_points"]
+                        )
+                      }
+                      aria-invalid={Boolean(totalPointsError)}
+                      aria-describedby={totalPointsError ? "field-error-total-points" : undefined}
+                      data-field-path="total_points"
+                      className={`mt-1 w-full rounded-lg border bg-white p-2 ${totalPointsError ? "border-rose-400" : "border-slate-300"}`}
+                    />
+                    <span className="mt-1 block text-[11px] font-normal text-slate-500">
+                      Questions assigned: {sumExercisePoints(draft.questions)} / {draft.total_points} points
+                    </span>
+                    {totalPointsError && (
+                      <span id="field-error-total-points" className="mt-1 block text-rose-700" role="alert">
+                        {totalPointsError}
+                      </span>
+                    )}
                   </label>
 
                   <label className="text-xs font-semibold text-slate-700">
@@ -1366,7 +1399,7 @@ export default function ExerciseDraftBuilder({
                           <input
                             type="number"
                             min={0.01}
-                            step={0.25}
+                            step={0.01}
                             readOnly={selectedQuestion.question_type === "fill_in_the_blanks"}
                             aria-readonly={
                               selectedQuestion.question_type === "fill_in_the_blanks" ? "true" : undefined

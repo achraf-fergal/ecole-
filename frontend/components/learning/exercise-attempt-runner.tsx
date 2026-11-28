@@ -65,6 +65,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
               <span>{exercise.questions.length} questions</span>
               <span>·</span>
+              <span>Total: {exercise.total_points} points</span>
               <span>Passing score: {exercise.passing_score}%</span>
               {exercise.max_attempts && (
                 <>
@@ -212,6 +213,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
               <span>{activeAttempt.questions.length} questions</span>
               <span>·</span>
+              <span>Total: {exercise.total_points} points</span>
               <span>Passing score: {exercise.passing_score}%</span>
               <span>·</span>
               <span className="font-semibold text-teal-700">

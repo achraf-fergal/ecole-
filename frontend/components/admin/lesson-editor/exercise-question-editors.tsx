@@ -796,7 +796,7 @@ export function FillInTheBlanksEditor({
                 <input
                   type="number"
                   min={0.01}
-                  step={0.25}
+                  step={0.01}
                   value={blank.points ?? 1}
                   aria-label={`Blank ${blankIndex + 1} points`}
                   aria-invalid={Boolean(ptsErr || readError(`${prefix}.answer_config.blanks`))}

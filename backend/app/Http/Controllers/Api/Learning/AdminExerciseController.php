@@ -68,6 +68,7 @@ class AdminExerciseController extends Controller
         $validated = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'instructions' => ['nullable', 'string'],
+            'total_points' => ['sometimes', 'numeric', 'min:0.01', 'max:99999999.99'],
             'max_attempts' => ['nullable', 'integer', 'min:1'],
             'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
@@ -143,6 +144,7 @@ class AdminExerciseController extends Controller
         $validated = $request->validate([
             'title' => ['sometimes', 'required', 'string', 'max:255'],
             'instructions' => ['sometimes', 'nullable', 'string'],
+            'total_points' => ['sometimes', 'numeric', 'min:0.01', 'max:99999999.99'],
             'max_attempts' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'passing_score' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'show_correct_answers_after_submission' => ['sometimes', 'boolean'],
@@ -347,6 +349,7 @@ class AdminExerciseController extends Controller
             'id' => $exercise->id,
             'title' => $exercise->title,
             'instructions' => $exercise->instructions,
+            'total_points' => (float) $exercise->total_points,
             'max_attempts' => $exercise->max_attempts,
             'passing_score' => (float) $exercise->passing_score,
             'show_correct_answers_after_submission' => (bool) $resolvedResultSettings['show_correct_answers'],

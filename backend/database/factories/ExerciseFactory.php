@@ -30,6 +30,9 @@ class ExerciseFactory extends Factory
             // Default passing percentage.
             'passing_score' => 70.00,
 
+            // Default final score matches the default single question value.
+            'total_points' => 1.00,
+
             // Answer key is hidden by default.
             'show_correct_answers_after_submission' => false,
 

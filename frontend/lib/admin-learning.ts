@@ -610,6 +610,7 @@ export interface ExerciseResultSettingsPayload {
 export interface CreateExercisePayload {
   title: string;
   instructions?: string | null;
+  total_points?: number;
   max_attempts?: number | null;
   passing_score?: number;
   show_correct_answers_after_submission?: boolean;
@@ -622,6 +623,7 @@ export interface AdminFullExercise {
   id: number;
   title: string;
   instructions: string | null;
+  total_points: number;
   max_attempts: number | null;
   passing_score: number;
   show_correct_answers_after_submission: boolean;

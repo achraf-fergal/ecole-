@@ -15,6 +15,7 @@ import {
   normalizeShortAnswer,
   removeBlankFromPrompt,
   sumBlankPoints,
+  sumExercisePoints,
   syncBlankIdRenameInPrompt,
   toAttemptAnswerPayload,
   validateExerciseDraft,
@@ -107,6 +108,10 @@ test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, 
 
   // Sum blank points
   assert.equal(sumBlankPoints([{ points: 0.5 }, { points: 1 }, { points: 1.5 }]), 3);
+  assert.equal(sumExercisePoints([
+    { question_type: "single_choice", points: 1.25 },
+    { question_type: "fill_in_the_blanks", answer_config: { blanks: [{ points: 0.5 }, { points: 1.25 }] } },
+  ]), 3);
 
   // Prompt placeholder validation
   assert.equal(
@@ -125,6 +130,25 @@ test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, 
     validateFitbPromptPlaceholders("[blank_1] and [blank_1].", [{ id: "blank_1" }]).valid,
     false
   );
+});
+
+test("exercise question points must match the configured final total", () => {
+  const question = createQuestionDraft("true_false");
+  question.prompt = "The statement is true.";
+  question.points = 3;
+  const draft = {
+    title: "Points total",
+    total_points: 2,
+    passing_score: 70,
+    max_attempts: null,
+    questions: [question],
+  };
+
+  assert.match(validateExerciseDraft(draft).errors.total_points, /exceeds the exercise total/);
+  draft.total_points = 4;
+  assert.match(validateExerciseDraft(draft).errors.total_points, /must equal the exercise total/);
+  draft.total_points = 3;
+  assert.equal(validateExerciseDraft(draft).errors.total_points, undefined);
 });
 
 test("FITB inline blank conversion, rename sync, delete sync, and centralized draft validation", () => {
