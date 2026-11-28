@@ -808,6 +808,9 @@ export interface CurriculumLesson {
   draft_revision_id: number | null;
   published_revision_id: number | null;
   has_draft_changes?: boolean;
+  thumbnail_url?: string | null;
+  thumbnail_asset_id?: number | null;
+  thumbnail_alt?: string | null;
   assets_count: number;
   exercises_count: number;
   summary: CurriculumLessonSummary;
@@ -1070,6 +1073,7 @@ export async function restoreAdminLesson(
 
 export interface AdminCoursePreviewData {
   preview_version: "draft" | "published";
+  is_never_published: boolean;
   has_draft_changes: boolean;
   course: CurriculumCourseSummary;
   modules: {
@@ -1080,10 +1084,14 @@ export interface AdminCoursePreviewData {
     lessons: {
       id: number;
       title: string;
+      description: string | null;
       content_type: string;
+      effective_kind: EffectiveLessonKind;
       duration_minutes: number | null;
       status: string;
       has_draft: boolean;
+      revision: { id: number; version_number: number; status: string } | null;
+      blocks: import("@/lib/learning").LessonBlock[];
     }[];
   }[];
 }
@@ -1111,12 +1119,61 @@ export async function updateAdminCourseSettings(
   return handleResponse<CurriculumCourseSummary>(response, "Failed to update course settings.");
 }
 
-export async function triggerCourseRevalidation(courseSlug: string): Promise<void> {
+export async function publishAdminCourse(
+  centerSlug: string,
+  courseSlug: string
+): Promise<CurriculumCourseSummary> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/publish`, {
+    method: "POST",
+  });
+  return handleResponse<CurriculumCourseSummary>(response, "Failed to publish course.");
+}
+
+export async function unpublishAdminCourse(
+  centerSlug: string,
+  courseSlug: string
+): Promise<CurriculumCourseSummary> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/unpublish`, {
+    method: "POST",
+  });
+  return handleResponse<CurriculumCourseSummary>(response, "Failed to unpublish course.");
+}
+
+export async function archiveAdminCourse(
+  centerSlug: string,
+  courseSlug: string
+): Promise<CurriculumCourseSummary> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/archive`, {
+    method: "PATCH",
+  });
+  return handleResponse<CurriculumCourseSummary>(response, "Failed to archive course.");
+}
+
+export async function restoreAdminCourse(
+  centerSlug: string,
+  courseSlug: string
+): Promise<CurriculumCourseSummary> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/restore`, {
+    method: "POST",
+  });
+  return handleResponse<CurriculumCourseSummary>(response, "Failed to restore course.");
+}
+
+export async function triggerCourseRevalidation(
+  centerSlug: string,
+  courseSlug: string,
+  options?: { oldSlug?: string; invalidateListing?: boolean }
+): Promise<void> {
   try {
     await fetch("/api/revalidate/courses", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: courseSlug }),
+      body: JSON.stringify({
+        centerSlug,
+        slug: courseSlug,
+        oldSlug: options?.oldSlug,
+        invalidateListing: Boolean(options?.invalidateListing),
+      }),
     });
   } catch {
     // Non-blocking best-effort cache invalidation

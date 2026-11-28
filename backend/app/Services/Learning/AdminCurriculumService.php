@@ -112,13 +112,15 @@ class AdminCurriculumService
                 'published_at' => null,
             ]);
 
-            // Restore archived child lessons safely to Draft (never silently republish).
+            // Restore archived child lessons only if they were archived by this module operation.
             Lesson::query()
                 ->forCenter((int) $locked->center_id)
                 ->where('course_module_id', $locked->id)
                 ->where('status', Lesson::STATUS_ARCHIVED)
+                ->where('archive_origin', 'module')
                 ->update([
                     'status' => Lesson::STATUS_DRAFT,
+                    'archive_origin' => null,
                     'published_at' => null,
                 ]);
 
@@ -187,7 +189,10 @@ class AdminCurriculumService
                 ->forCenter((int) $locked->center_id)
                 ->where('course_module_id', $locked->id)
                 ->where('status', '!=', Lesson::STATUS_ARCHIVED)
-                ->update(['status' => Lesson::STATUS_ARCHIVED]);
+                ->update([
+                    'status' => Lesson::STATUS_ARCHIVED,
+                    'archive_origin' => 'module',
+                ]);
 
             return $locked->fresh();
         });
@@ -270,7 +275,22 @@ class AdminCurriculumService
             if (array_key_exists('description', $data)) {
                 $updates['description'] = $data['description'] !== null ? (trim((string) $data['description']) ?: null) : null;
             }
-            if (array_key_exists('content_type', $data)) {
+            if (array_key_exists('content_type', $data) && $data['content_type'] !== $locked->content_type) {
+                $requestedKind = $this->mapLegacyTypeToKind((string) $data['content_type']);
+                $activeRevision = $locked->draftRevision()->with('blocks.asset')->first()
+                    ?? $locked->publishedRevision()->with('blocks.asset')->first();
+
+                if ($activeRevision && $activeRevision->blocks->isNotEmpty()) {
+                    $actualKind = $this->classifyRevisionKind($activeRevision, $locked);
+                    if ($actualKind !== $requestedKind) {
+                        throw ValidationException::withMessages([
+                            'content_type' => [
+                                "Cannot change lesson type from '{$actualKind}' to '{$requestedKind}' while the lesson contains incompatible content blocks.",
+                            ],
+                        ]);
+                    }
+                }
+
                 $updates['content_type'] = $data['content_type'];
             }
             if (array_key_exists('duration_minutes', $data)) {
@@ -665,6 +685,7 @@ class AdminCurriculumService
 
             $locked->update([
                 'status' => Lesson::STATUS_ARCHIVED,
+                'archive_origin' => 'self',
             ]);
 
             return $locked->fresh();
@@ -700,6 +721,7 @@ class AdminCurriculumService
 
             $locked->update([
                 'status' => Lesson::STATUS_DRAFT,
+                'archive_origin' => null,
                 'published_at' => null,
             ]);
 

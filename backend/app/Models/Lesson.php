@@ -75,6 +75,7 @@ class Lesson extends Model
         'sort_order',
 
         'status',
+        'archive_origin',
         'published_at',
     ];
 

@@ -6,6 +6,7 @@ use App\Models\Center;
 use App\Models\CenterUser;
 use App\Models\Course;
 use App\Models\CourseModule;
+use App\Models\CourseOutcome;
 use App\Models\Exercise;
 use App\Models\ExerciseAttempt;
 use App\Models\Language;
@@ -287,5 +288,144 @@ class CurriculumManagementTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$tokenB}")
             ->postJson("/api/centers/{$centerA->slug}/admin/courses/{$courseA->slug}/modules", ['title' => 'Hack'])
             ->assertStatus(403);
+    }
+
+    public function test_locale_aware_outcomes_preserve_other_language_and_existing_ids(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+
+        // Seed French outcome
+        $frOutcome = CourseOutcome::query()->create([
+            'center_id' => $center->id,
+            'course_id' => $course->id,
+            'locale' => 'fr',
+            'content' => 'Comprendre la grammaire',
+            'sort_order' => 0,
+            'is_highlight' => true,
+            'status' => 'published',
+            'published_at' => now(),
+        ]);
+
+        // Save English outcomes -> French outcome untouched
+        $enSave = $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", [
+                'outcomes_locale' => 'en',
+                'outcomes' => [
+                    ['content' => 'Understand grammar', 'is_highlight' => false],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertDatabaseHas('course_outcomes', ['id' => $frOutcome->id, 'locale' => 'fr', 'content' => 'Comprendre la grammaire']);
+        $enOutcomeId = collect($enSave->json('data.outcomes'))->firstWhere('locale', 'en')['id'];
+
+        // Re-save English outcome with its ID -> preserves same ID, no duplicates
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", [
+                'outcomes_locale' => 'en',
+                'outcomes' => [
+                    ['id' => $enOutcomeId, 'locale' => 'en', 'content' => 'Understand basic grammar', 'is_highlight' => true],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertSame(1, CourseOutcome::query()->where('course_id', $course->id)->where('locale', 'en')->count());
+        $this->assertDatabaseHas('course_outcomes', ['id' => $enOutcomeId, 'content' => 'Understand basic grammar']);
+        $this->assertDatabaseHas('course_outcomes', ['id' => $frOutcome->id, 'locale' => 'fr']);
+
+        // Invalid locale rejected
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", [
+                'outcomes_locale' => 'xx',
+                'outcomes' => [['content' => 'Bad']],
+            ])
+            ->assertStatus(422);
+    }
+
+    public function test_module_restore_does_not_restore_independently_archived_lesson(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+
+        $mod = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules", ['title' => 'Module X'])
+            ->assertStatus(201);
+        $modId = $mod->json('data.id');
+
+        $lessonA = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$modId}/lessons", ['title' => 'Lesson A', 'content_type' => 'reading'])
+            ->assertStatus(201)->json('data.id');
+        $lessonB = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$modId}/lessons", ['title' => 'Lesson B', 'content_type' => 'reading'])
+            ->assertStatus(201)->json('data.id');
+
+        // Archive Lesson A independently first
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/lessons/{$lessonA}/archive")
+            ->assertOk();
+
+        // Archive Module X (cascades to Lesson B only)
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/modules/{$modId}/archive")
+            ->assertOk();
+
+        // Restore Module X -> Lesson B becomes draft, Lesson A stays archived!
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$modId}/restore")
+            ->assertOk();
+
+        $this->assertSame(Lesson::STATUS_ARCHIVED, Lesson::find($lessonA)->status);
+        $this->assertSame(Lesson::STATUS_DRAFT, Lesson::find($lessonB)->status);
+    }
+
+    public function test_preview_has_draft_changes_and_type_guard_and_pricing_validation(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+
+        // Published module + published lesson + new draft module
+        $pubMod = CourseModule::factory()->forCourse($course)->published()->create();
+        $draftMod = CourseModule::factory()->forCourse($course)->create(['status' => CourseModule::STATUS_DRAFT]);
+
+        $readingLesson = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$pubMod->id}/lessons", ['title' => 'Reading 1', 'content_type' => 'reading'])
+            ->assertStatus(201);
+        $readingId = $readingLesson->json('data.id');
+        $revId = $readingLesson->json('data.draft_revision_id');
+
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $readingId,
+            'lesson_revision_id' => $revId,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => ['type' => 'doc', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Hello']]]]],
+        ]);
+
+        // Incompatible lesson type change rejected
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/lessons/{$readingId}", ['content_type' => 'exercise'])
+            ->assertStatus(422);
+
+        // Published preview still detects pending draft changes from draftMod / draft lesson
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->getJson("{$base}/preview?version=published")
+            ->assertOk()
+            ->assertJsonPath('data.has_draft_changes', true)
+            ->assertJsonCount(0, 'data.modules.0.lessons');
+
+        // Fixed pricing with 0 price rejected
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'fixed', 'price' => 0, 'currency' => 'MAD'])
+            ->assertStatus(422);
+
+        // Free pricing with non-zero price rejected
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'free', 'price' => 100])
+            ->assertStatus(422);
     }
 }

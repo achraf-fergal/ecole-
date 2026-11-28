@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class AdminCurriculumController extends Controller
 {
@@ -401,28 +402,64 @@ class AdminCurriculumController extends Controller
 
         $version = $request->query('version', 'draft') === 'published' ? 'published' : 'draft';
 
-        $modules = $course->modules()
+        // Load all active modules and lessons independently of the selected preview version
+        // so `has_draft_changes` is accurate even when viewing Published Preview.
+        $allActiveModules = $course->modules()
             ->where('center_id', $center->id)
-            ->when($version === 'published', fn ($q) => $q->published())
             ->where('status', '!=', CourseModule::STATUS_ARCHIVED)
             ->with([
-                'lessons' => function ($query) use ($center, $version): void {
+                'lessons' => function ($query) use ($center): void {
                     $query->forCenter($center->id)
                         ->where('status', '!=', Lesson::STATUS_ARCHIVED)
-                        ->when($version === 'published', fn ($q) => $q->published());
+                        ->with([
+                            'draftRevision.blocks.asset',
+                            'draftRevision.blocks.exercise.questions.options',
+                            'publishedRevision.blocks.asset',
+                            'publishedRevision.blocks.exercise.questions.options',
+                        ]);
                 },
             ])
             ->orderBy('sort_order')
             ->orderBy('id')
             ->get();
 
+        $isNeverPublished = $course->published_at === null && $course->status !== 'published';
+
+        $hasAnyPublishedContent = $course->status === 'published'
+            || $allActiveModules->contains(static fn (CourseModule $m): bool => $m->status === CourseModule::STATUS_PUBLISHED);
+
+        $hasDraftChanges = false;
+        if (! $isNeverPublished || $hasAnyPublishedContent) {
+            $hasDraftChanges = $allActiveModules->contains(function (CourseModule $m): bool {
+                if ($m->status === CourseModule::STATUS_DRAFT) {
+                    return true;
+                }
+
+                return $m->lessons->contains(
+                    static fn (Lesson $l): bool => $l->status === Lesson::STATUS_DRAFT || $l->draft_revision_id !== null
+                );
+            });
+        }
+
+        $visibleModules = $version === 'published'
+            ? $allActiveModules
+                ->filter(static fn (CourseModule $m): bool => $m->isPublished())
+                ->map(function (CourseModule $m): CourseModule {
+                    $publishedLessons = $m->lessons->filter(
+                        static fn (Lesson $l): bool => $l->isPublished() && $l->publishedRevision !== null
+                    )->values();
+                    $m->setRelation('lessons', $publishedLessons);
+
+                    return $m;
+                })
+                ->values()
+            : $allActiveModules->values();
+
         return response()->json([
             'data' => [
                 'preview_version' => $version,
-                'has_draft_changes' => $course->status !== 'published' || $modules->contains(
-                    fn (CourseModule $m): bool => $m->status !== CourseModule::STATUS_PUBLISHED
-                        || $m->lessons->contains(fn (Lesson $l): bool => $l->status !== Lesson::STATUS_PUBLISHED || $l->draft_revision_id !== null)
-                ),
+                'is_never_published' => $isNeverPublished,
+                'has_draft_changes' => $hasDraftChanges,
                 'course' => [
                     'id' => $course->id,
                     'title' => $course->title,
@@ -442,22 +479,91 @@ class AdminCurriculumController extends Controller
                     'status' => $course->status,
                     'language' => $course->language?->only(['id', 'code', 'name', 'native_name']),
                     'level' => $course->level?->only(['id', 'code', 'name']),
-                    'outcomes' => $course->outcomes->map->only(['id', 'content', 'is_highlight'])->values(),
+                    'outcomes' => $course->outcomes->map->only(['id', 'locale', 'content', 'is_highlight'])->values(),
                 ],
-                'modules' => $modules->map(fn (CourseModule $m): array => [
-                    'id' => $m->id,
-                    'title' => $m->title,
-                    'description' => $m->description,
-                    'status' => $m->status,
-                    'lessons' => $m->lessons->map(fn (Lesson $l): array => [
-                        'id' => $l->id,
-                        'title' => $l->title,
-                        'content_type' => $l->content_type,
-                        'duration_minutes' => $l->duration_minutes,
-                        'status' => $l->status,
-                        'has_draft' => $l->draft_revision_id !== null,
-                    ])->values(),
-                ])->values(),
+                'modules' => $visibleModules->map(function (CourseModule $m) use ($version): array {
+                    return [
+                        'id' => $m->id,
+                        'title' => $m->title,
+                        'description' => $m->description,
+                        'status' => $m->status,
+                        'lessons' => $m->lessons->map(function (Lesson $l) use ($version): array {
+                            $revision = $version === 'published'
+                                ? $l->publishedRevision
+                                : ($l->draftRevision ?? $l->publishedRevision);
+
+                            $blocks = $revision ? $revision->blocks->map(function (LessonBlock $b): array {
+                                $asset = $b->asset;
+                                $exercise = $b->exercise;
+
+                                return [
+                                    'id' => $b->id,
+                                    'block_type' => $b->block_type,
+                                    'sort_order' => $b->sort_order,
+                                    'content_json' => $b->content_json,
+                                    'asset' => $asset ? [
+                                        'id' => $asset->id,
+                                        'title' => $asset->title,
+                                        'asset_type' => $asset->asset_type,
+                                        'video_provider' => $asset->video_provider,
+                                        'provider_asset_id' => $asset->provider_asset_id,
+                                        'external_url' => $asset->external_url,
+                                        'original_filename' => $asset->original_filename,
+                                        'mime_type' => $asset->mime_type,
+                                        'size_bytes' => $asset->size_bytes,
+                                        'duration_seconds' => $asset->duration_seconds,
+                                        'alt_text' => $asset->alt_text,
+                                        'caption' => $asset->caption,
+                                        'is_downloadable' => (bool) $asset->is_downloadable,
+                                        'status' => $asset->status,
+                                    ] : null,
+                                    'exercise' => $exercise ? [
+                                        'id' => $exercise->id,
+                                        'title' => $exercise->title,
+                                        'instructions' => $exercise->instructions,
+                                        'max_attempts' => $exercise->max_attempts,
+                                        'passing_score' => (float) $exercise->passing_score,
+                                        'show_correct_answers_after_submission' => (bool) $exercise->show_correct_answers_after_submission,
+                                        'result_settings' => $exercise->resolvedResultSettings(),
+                                        'status' => $exercise->status,
+                                        'questions' => $exercise->questions->map(static fn ($q): array => [
+                                            'id' => $q->id,
+                                            'question_type' => $q->question_type,
+                                            'prompt' => $q->prompt,
+                                            'explanation' => $q->explanation,
+                                            'answer_config' => $q->answer_config,
+                                            'points' => (float) $q->points,
+                                            'sort_order' => (int) $q->sort_order,
+                                            'options' => $q->options->map(static fn ($o): array => [
+                                                'id' => $o->id,
+                                                'option_text' => $o->option_text,
+                                                'is_correct' => (bool) $o->is_correct,
+                                                'sort_order' => (int) $o->sort_order,
+                                            ])->values(),
+                                        ])->values(),
+                                    ] : null,
+                                ];
+                            })->values() : collect();
+
+                            return [
+                                'id' => $l->id,
+                                'title' => $l->title,
+                                'description' => $l->description,
+                                'content_type' => $l->content_type,
+                                'effective_kind' => $this->curriculumService->classifyRevisionKind($revision, $l),
+                                'duration_minutes' => $l->duration_minutes,
+                                'status' => $l->status,
+                                'has_draft' => $l->draft_revision_id !== null,
+                                'revision' => $revision ? [
+                                    'id' => $revision->id,
+                                    'version_number' => $revision->version_number,
+                                    'status' => $revision->status,
+                                ] : null,
+                                'blocks' => $blocks,
+                            ];
+                        })->values(),
+                    ];
+                })->values(),
             ],
         ])->header('Cache-Control', 'no-store, private');
     }
@@ -465,6 +571,8 @@ class AdminCurriculumController extends Controller
     public function updateCourseSettings(Request $request): JsonResponse
     {
         [$center, $course] = $this->resolveCourseContext($request);
+
+        $supportedLocales = ['en', 'fr'];
 
         $validated = $request->validate([
             'title' => ['sometimes', 'required', 'string', 'max:255'],
@@ -509,89 +617,243 @@ class AdminCurriculumController extends Controller
             'is_curriculum_public' => ['sometimes', 'boolean'],
             'meta_title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'meta_description' => ['sometimes', 'nullable', 'string', 'max:500'],
-            'status' => ['sometimes', 'required', Rule::in(['draft', 'published', 'archived'])],
+            'outcomes_locale' => ['required_with:outcomes', 'string', Rule::in($supportedLocales)],
             'outcomes' => ['sometimes', 'array', 'max:30'],
+            'outcomes.*.id' => ['nullable', 'integer', 'min:1'],
+            'outcomes.*.locale' => ['sometimes', 'string', Rule::in($supportedLocales)],
             'outcomes.*.content' => ['required_with:outcomes', 'string', 'max:500'],
             'outcomes.*.is_highlight' => ['sometimes', 'boolean'],
         ]);
 
-        DB::transaction(function () use ($center, $course, $validated): void {
-            $courseData = $validated;
-            unset($courseData['outcomes']);
+        // Enforce pricing consistency
+        $effectivePricingMode = $validated['pricing_mode'] ?? $course->pricing_mode ?? Course::PRICING_UPON_REQUEST;
+        $effectivePrice = array_key_exists('price', $validated) ? $validated['price'] : $course->price;
+        $effectiveCurrency = array_key_exists('currency', $validated) ? $validated['currency'] : $course->currency;
 
-            if (array_key_exists('status', $courseData)) {
-                if ($courseData['status'] === 'published') {
-                    $courseData['published_at'] = $course->status === 'published'
-                        ? ($course->published_at ?? now())
-                        : now();
-                } else {
-                    $courseData['published_at'] = null;
+        if (in_array($effectivePricingMode, [Course::PRICING_FIXED, Course::PRICING_FROM], true)) {
+            if ($effectivePrice === null || (float) $effectivePrice <= 0) {
+                throw ValidationException::withMessages([
+                    'price' => ['A positive price is required when pricing mode is fixed or starting from.'],
+                ]);
+            }
+            if (! is_string($effectiveCurrency) || trim($effectiveCurrency) === '') {
+                throw ValidationException::withMessages([
+                    'currency' => ['Currency is required when pricing mode is fixed or starting from.'],
+                ]);
+            }
+        } elseif ($effectivePricingMode === Course::PRICING_FREE) {
+            if (array_key_exists('price', $validated) && $validated['price'] !== null && (float) $validated['price'] > 0) {
+                throw ValidationException::withMessages([
+                    'price' => ['A free course cannot have a non-zero price.'],
+                ]);
+            }
+            $validated['price'] = null;
+        } elseif ($effectivePricingMode === Course::PRICING_UPON_REQUEST) {
+            $validated['price'] = null;
+        }
+
+        // Validate outcomes locale & duplicates
+        if (array_key_exists('outcomes', $validated)) {
+            $targetLocale = (string) $validated['outcomes_locale'];
+            $seenNormalized = [];
+            foreach ($validated['outcomes'] as $index => $item) {
+                if (isset($item['locale']) && $item['locale'] !== $targetLocale) {
+                    throw ValidationException::withMessages([
+                        "outcomes.{$index}.locale" => ["Outcome locale must match the selected editing locale '{$targetLocale}'."],
+                    ]);
+                }
+                $normalizedText = mb_strtolower(trim((string) ($item['content'] ?? '')));
+                if ($normalizedText !== '') {
+                    if (in_array($normalizedText, $seenNormalized, true)) {
+                        throw ValidationException::withMessages([
+                            "outcomes.{$index}.content" => ['Duplicate learning outcomes are not allowed in the same language.'],
+                        ]);
+                    }
+                    $seenNormalized[] = $normalizedText;
                 }
             }
+        }
+
+        DB::transaction(function () use ($center, $course, $validated): void {
+            $courseData = $validated;
+            unset($courseData['outcomes'], $courseData['outcomes_locale']);
 
             $course->fill($courseData)->save();
 
             if (array_key_exists('outcomes', $validated)) {
-                $locale = $course->source_locale ?: 'en';
-                CourseOutcome::query()
+                $targetLocale = (string) $validated['outcomes_locale'];
+                $existingForLocale = CourseOutcome::query()
                     ->where('center_id', $center->id)
                     ->where('course_id', $course->id)
-                    ->where('locale', $locale)
-                    ->delete();
+                    ->where('locale', $targetLocale)
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
 
-                foreach ($validated['outcomes'] as $index => $item) {
+                $keptIds = [];
+                $sortOrder = 0;
+
+                foreach ($validated['outcomes'] as $item) {
                     $text = trim((string) ($item['content'] ?? ''));
                     if ($text === '') {
                         continue;
                     }
-                    CourseOutcome::query()->create([
-                        'center_id' => $center->id,
-                        'course_id' => $course->id,
-                        'locale' => $locale,
-                        'content' => $text,
-                        'is_highlight' => (bool) ($item['is_highlight'] ?? false),
-                        'sort_order' => $index,
-                        'status' => 'published',
-                        'published_at' => now(),
-                    ]);
+                    $isHighlight = (bool) ($item['is_highlight'] ?? false);
+                    $outcomeId = isset($item['id']) ? (int) $item['id'] : null;
+
+                    if ($outcomeId !== null && $existingForLocale->has($outcomeId)) {
+                        $existing = $existingForLocale->get($outcomeId);
+                        $existing->update([
+                            'content' => $text,
+                            'is_highlight' => $isHighlight,
+                            'sort_order' => $sortOrder,
+                        ]);
+                        $keptIds[] = $outcomeId;
+                    } else {
+                        $created = CourseOutcome::query()->create([
+                            'center_id' => $center->id,
+                            'course_id' => $course->id,
+                            'locale' => $targetLocale,
+                            'content' => $text,
+                            'is_highlight' => $isHighlight,
+                            'sort_order' => $sortOrder,
+                            'status' => 'published',
+                            'published_at' => now(),
+                        ]);
+                        $keptIds[] = $created->id;
+                    }
+                    $sortOrder++;
                 }
+
+                // Delete only outcomes removed by the user in this exact locale
+                CourseOutcome::query()
+                    ->where('center_id', $center->id)
+                    ->where('course_id', $course->id)
+                    ->where('locale', $targetLocale)
+                    ->whereNotIn('id', $keptIds)
+                    ->delete();
             }
         });
 
+        return response()->json([
+            'data' => $this->courseSettingsPayload($center, $course),
+        ]);
+    }
+
+    public function publishCourse(Request $request): JsonResponse
+    {
+        [$center, $course] = $this->resolveCourseContext($request);
+
+        if ($course->status === 'archived') {
+            throw ValidationException::withMessages([
+                'status' => ['Archived courses must be restored to draft before publishing.'],
+            ]);
+        }
+
+        if (trim((string) $course->title) === '' || trim((string) $course->slug) === '' || ! $course->language_id || ! $course->level_id) {
+            throw ValidationException::withMessages([
+                'course' => ['Course title, slug, language, and level are required before publishing.'],
+            ]);
+        }
+
+        if (in_array($course->pricing_mode, [Course::PRICING_FIXED, Course::PRICING_FROM], true)
+            && ($course->price === null || (float) $course->price <= 0)) {
+            throw ValidationException::withMessages([
+                'price' => ['A valid positive price is required before publishing this course.'],
+            ]);
+        }
+
+        $course->update([
+            'status' => 'published',
+            'published_at' => now(),
+        ]);
+
+        return response()->json([
+            'data' => $this->courseSettingsPayload($center, $course),
+        ]);
+    }
+
+    public function unpublishCourse(Request $request): JsonResponse
+    {
+        [$center, $course] = $this->resolveCourseContext($request);
+
+        $course->update([
+            'status' => 'draft',
+            'published_at' => null,
+        ]);
+
+        return response()->json([
+            'data' => $this->courseSettingsPayload($center, $course),
+        ]);
+    }
+
+    public function archiveCourse(Request $request): JsonResponse
+    {
+        [$center, $course] = $this->resolveCourseContext($request);
+
+        $course->update([
+            'status' => 'archived',
+        ]);
+
+        return response()->json([
+            'data' => $this->courseSettingsPayload($center, $course),
+        ]);
+    }
+
+    public function restoreCourse(Request $request): JsonResponse
+    {
+        [$center, $course] = $this->resolveCourseContext($request);
+
+        if ($course->status !== 'archived') {
+            throw ValidationException::withMessages([
+                'status' => ['Only archived courses can be restored.'],
+            ]);
+        }
+
+        $course->update([
+            'status' => 'draft',
+            'published_at' => null,
+        ]);
+
+        return response()->json([
+            'data' => $this->courseSettingsPayload($center, $course),
+        ]);
+    }
+
+    private function courseSettingsPayload(Center $center, Course $course): array
+    {
         $fresh = $course->fresh([
             'language:id,center_id,code,name,native_name',
             'level:id,center_id,code,name',
             'outcomes' => fn ($q) => $q->where('center_id', $center->id)->orderBy('sort_order')->orderBy('id'),
         ]);
 
-        return response()->json([
-            'data' => [
-                'id' => $fresh->id,
-                'title' => $fresh->title,
-                'slug' => $fresh->slug,
-                'short_description' => $fresh->short_description,
-                'description' => $fresh->description,
-                'prerequisites' => $fresh->prerequisites,
-                'target_audience' => $fresh->target_audience,
-                'cover_image_url' => $fresh->cover_image_url,
-                'cover_image_alt' => $fresh->cover_image_alt,
-                'source_locale' => $fresh->source_locale,
-                'study_format' => $fresh->study_format,
-                'duration_hours' => $fresh->duration_hours,
-                'price' => $fresh->price !== null ? (string) $fresh->price : null,
-                'currency' => $fresh->currency,
-                'pricing_mode' => $fresh->pricing_mode,
-                'is_curriculum_public' => (bool) $fresh->is_curriculum_public,
-                'meta_title' => $fresh->meta_title,
-                'meta_description' => $fresh->meta_description,
-                'status' => $fresh->status,
-                'published_at' => $fresh->published_at?->toIso8601String(),
-                'updated_at' => $fresh->updated_at?->toIso8601String(),
-                'language' => $fresh->language?->only(['id', 'code', 'name', 'native_name']),
-                'level' => $fresh->level?->only(['id', 'code', 'name']),
-                'outcomes' => $fresh->outcomes->map->only(['id', 'locale', 'content', 'is_highlight', 'sort_order', 'status'])->values(),
-            ],
-        ]);
+        return [
+            'id' => $fresh->id,
+            'title' => $fresh->title,
+            'slug' => $fresh->slug,
+            'short_description' => $fresh->short_description,
+            'description' => $fresh->description,
+            'prerequisites' => $fresh->prerequisites,
+            'target_audience' => $fresh->target_audience,
+            'cover_image_url' => $fresh->cover_image_url,
+            'cover_image_alt' => $fresh->cover_image_alt,
+            'source_locale' => $fresh->source_locale,
+            'study_format' => $fresh->study_format,
+            'duration_hours' => $fresh->duration_hours,
+            'price' => $fresh->price !== null ? (string) $fresh->price : null,
+            'currency' => $fresh->currency,
+            'pricing_mode' => $fresh->pricing_mode,
+            'is_curriculum_public' => (bool) $fresh->is_curriculum_public,
+            'meta_title' => $fresh->meta_title,
+            'meta_description' => $fresh->meta_description,
+            'status' => $fresh->status,
+            'published_at' => $fresh->published_at?->toIso8601String(),
+            'updated_at' => $fresh->updated_at?->toIso8601String(),
+            'language' => $fresh->language?->only(['id', 'code', 'name', 'native_name']),
+            'level' => $fresh->level?->only(['id', 'code', 'name']),
+            'outcomes' => $fresh->outcomes->map->only(['id', 'locale', 'content', 'is_highlight', 'sort_order', 'status'])->values(),
+        ];
     }
 
     private function lessonPayload(Lesson $lesson): array
@@ -630,6 +892,25 @@ class AdminCurriculumController extends Controller
             ? (float) $primaryExercise->questions->sum(static fn ($q): float => (float) $q->points)
             : 0.0;
 
+        $imageBlock = $blocks->first(
+            static fn (LessonBlock $b): bool => $b->block_type === LessonBlock::TYPE_MEDIA
+                && $b->asset !== null
+                && $b->asset->status !== LessonAsset::STATUS_ARCHIVED
+                && $b->asset->asset_type === LessonAsset::TYPE_IMAGE
+        );
+
+        $thumbnailUrl = null;
+        $thumbnailAssetId = null;
+        $thumbnailAlt = null;
+
+        if ($videoBlock && $videoBlock->asset?->video_provider === LessonAsset::VIDEO_PROVIDER_YOUTUBE && $videoBlock->asset->provider_asset_id) {
+            $thumbnailUrl = 'https://i.ytimg.com/vi/' . rawurlencode($videoBlock->asset->provider_asset_id) . '/hqdefault.jpg';
+            $thumbnailAlt = $videoBlock->asset->title ?: $lesson->title;
+        } elseif ($imageBlock && $imageBlock->asset) {
+            $thumbnailAssetId = $imageBlock->asset->id;
+            $thumbnailAlt = $imageBlock->asset->alt_text ?: $imageBlock->asset->title ?: $lesson->title;
+        }
+
         return [
             'id' => $lesson->id,
             'course_module_id' => $lesson->course_module_id,
@@ -645,6 +926,9 @@ class AdminCurriculumController extends Controller
             'draft_revision_id' => $lesson->draft_revision_id,
             'published_revision_id' => $lesson->published_revision_id,
             'has_draft_changes' => $lesson->draft_revision_id !== null,
+            'thumbnail_url' => $thumbnailUrl,
+            'thumbnail_asset_id' => $thumbnailAssetId,
+            'thumbnail_alt' => $thumbnailAlt,
             'assets_count' => (int) ($lesson->assets_count ?? 0),
             'exercises_count' => (int) ($lesson->exercises_count ?? 0),
             'summary' => [

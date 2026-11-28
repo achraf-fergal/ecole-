@@ -203,6 +203,22 @@ Route::prefix('centers/{center}')
                             ->middleware('csrf.api')
                             ->name('api.centers.admin.learning.course.settings');
 
+                        Route::post('/publish', [AdminCurriculumController::class, 'publishCourse'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.course.publish');
+
+                        Route::post('/unpublish', [AdminCurriculumController::class, 'unpublishCourse'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.course.unpublish');
+
+                        Route::patch('/archive', [AdminCurriculumController::class, 'archiveCourse'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.course.archive');
+
+                        Route::post('/restore', [AdminCurriculumController::class, 'restoreCourse'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.course.restore');
+
                         Route::get('/preview', [AdminCurriculumController::class, 'previewCourse'])
                             ->name('api.centers.admin.learning.course.preview');
 
