@@ -53,6 +53,7 @@ class Course extends Model
         'status',
         'sort_order',
         'published_at',
+        'first_published_at',
     ];
 
     protected function casts(): array
@@ -63,13 +64,24 @@ class Course extends Model
             'sort_order' => 'integer',
             'is_curriculum_public' => 'boolean',
             'published_at' => 'datetime',
+            'first_published_at' => 'datetime',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        static::saving(function (Course $course): void {
+            if ($course->status === 'published' && $course->first_published_at === null) {
+                $course->first_published_at = $course->published_at ?? now();
+            }
+        });
     }
 
     public function center(): BelongsTo
     {
         return $this->belongsTo(Center::class);
     }
+
     /**
      * Educational modules belonging to this course.
      */
@@ -79,6 +91,7 @@ class Course extends Model
             ->orderBy('sort_order')
             ->orderBy('id');
     }
+
     public function language(): BelongsTo
     {
         return $this->belongsTo(Language::class);
@@ -113,6 +126,7 @@ class Course extends Model
             ->whereNotNull('published_at')
             ->where('published_at', '<=', now());
     }
+
     /**
      * Actual teaching groups for this course.
      */
@@ -122,6 +136,7 @@ class Course extends Model
             ->orderBy('starts_at')
             ->orderBy('id');
     }
+
     public function isPublished(): bool
     {
         return $this->status === 'published'

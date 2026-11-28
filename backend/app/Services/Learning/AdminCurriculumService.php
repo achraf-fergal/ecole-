@@ -2,7 +2,6 @@
 
 namespace App\Services\Learning;
 
-use App\Models\Center;
 use App\Models\Course;
 use App\Models\CourseModule;
 use App\Models\Exercise;
@@ -113,16 +112,21 @@ class AdminCurriculumService
             ]);
 
             // Restore archived child lessons only if they were archived by this module operation.
-            Lesson::query()
+            $moduleArchivedLessons = Lesson::query()
                 ->forCenter((int) $locked->center_id)
                 ->where('course_module_id', $locked->id)
                 ->where('status', Lesson::STATUS_ARCHIVED)
                 ->where('archive_origin', 'module')
-                ->update([
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($moduleArchivedLessons as $lesson) {
+                $lesson->update([
                     'status' => Lesson::STATUS_DRAFT,
                     'archive_origin' => null,
                     'published_at' => null,
                 ]);
+            }
 
             return $locked->fresh();
         });
@@ -185,14 +189,19 @@ class AdminCurriculumService
                 'status' => CourseModule::STATUS_ARCHIVED,
             ]);
 
-            Lesson::query()
+            $lessonsToArchive = Lesson::query()
                 ->forCenter((int) $locked->center_id)
                 ->where('course_module_id', $locked->id)
                 ->where('status', '!=', Lesson::STATUS_ARCHIVED)
-                ->update([
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($lessonsToArchive as $lesson) {
+                $lesson->update([
                     'status' => Lesson::STATUS_ARCHIVED,
                     'archive_origin' => 'module',
                 ]);
+            }
 
             return $locked->fresh();
         });
@@ -277,11 +286,17 @@ class AdminCurriculumService
             }
             if (array_key_exists('content_type', $data) && $data['content_type'] !== $locked->content_type) {
                 $requestedKind = $this->mapLegacyTypeToKind((string) $data['content_type']);
-                $activeRevision = $locked->draftRevision()->with('blocks.asset')->first()
-                    ?? $locked->publishedRevision()->with('blocks.asset')->first();
+                $revisions = collect([
+                    $locked->draftRevision()->with('blocks.asset')->first(),
+                    $locked->publishedRevision()->with('blocks.asset')->first(),
+                ])->filter();
 
-                if ($activeRevision && $activeRevision->blocks->isNotEmpty()) {
-                    $actualKind = $this->classifyRevisionKind($activeRevision, $locked);
+                foreach ($revisions as $revision) {
+                    if ($revision->blocks->isEmpty()) {
+                        continue;
+                    }
+
+                    $actualKind = $this->classifyRevisionKind($revision, $locked);
                     if ($actualKind !== $requestedKind) {
                         throw ValidationException::withMessages([
                             'content_type' => [
@@ -513,7 +528,7 @@ class AdminCurriculumService
             $copy = Lesson::query()->create([
                 'center_id' => $locked->center_id,
                 'course_module_id' => $locked->course_module_id,
-                'title' => $locked->title . ' (Copy)',
+                'title' => $locked->title.' (Copy)',
                 'description' => $locked->description,
                 'content_type' => $locked->content_type,
                 'content_locale' => $locked->content_locale,
@@ -556,6 +571,7 @@ class AdminCurriculumService
                             'content_json' => $block->content_json,
                             'settings' => $block->settings,
                         ]);
+
                         continue;
                     }
 
@@ -600,6 +616,7 @@ class AdminCurriculumService
                             'lesson_asset_id' => $clonedAssetMap[$sourceAsset->id],
                             'settings' => $block->settings,
                         ]);
+
                         continue;
                     }
 
@@ -677,11 +694,27 @@ class AdminCurriculumService
     public function archiveLesson(Lesson $lesson): Lesson
     {
         return DB::transaction(function () use ($lesson): Lesson {
+            $parentModule = CourseModule::query()
+                ->forCenter((int) $lesson->center_id)
+                ->whereKey($lesson->course_module_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $locked = Lesson::query()
                 ->forCenter((int) $lesson->center_id)
                 ->whereKey($lesson->id)
                 ->lockForUpdate()
                 ->firstOrFail();
+
+            if ($locked->status === Lesson::STATUS_ARCHIVED) {
+                return $locked->fresh();
+            }
+
+            if ($parentModule->isArchived()) {
+                throw ValidationException::withMessages([
+                    'module' => ['Restore the parent module before archiving this lesson independently.'],
+                ]);
+            }
 
             $locked->update([
                 'status' => Lesson::STATUS_ARCHIVED,
@@ -695,6 +728,12 @@ class AdminCurriculumService
     public function restoreLesson(Lesson $lesson): Lesson
     {
         return DB::transaction(function () use ($lesson): Lesson {
+            $parentModule = CourseModule::query()
+                ->forCenter((int) $lesson->center_id)
+                ->whereKey($lesson->course_module_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $locked = Lesson::query()
                 ->forCenter((int) $lesson->center_id)
                 ->whereKey($lesson->id)
@@ -706,12 +745,6 @@ class AdminCurriculumService
                     'status' => ['Only archived lessons can be restored.'],
                 ]);
             }
-
-            $parentModule = CourseModule::query()
-                ->forCenter((int) $locked->center_id)
-                ->whereKey($locked->course_module_id)
-                ->lockForUpdate()
-                ->firstOrFail();
 
             if ($parentModule->isArchived()) {
                 throw ValidationException::withMessages([

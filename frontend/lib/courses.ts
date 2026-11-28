@@ -577,6 +577,7 @@ export async function getCourses(
 ): Promise<CourseResult> {
   "use cache";
   cacheLife({ revalidate: 60 });
+  cacheTag("courses");
 
   const apiBase = process.env.LARAVEL_API_URL;
   const centerSlug = process.env.CENTER_SLUG;

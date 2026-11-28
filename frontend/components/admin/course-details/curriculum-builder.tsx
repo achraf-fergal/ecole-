@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   archiveAdminLesson,
@@ -21,10 +21,12 @@ import {
   type CurriculumModule,
   type EffectiveLessonKind,
 } from "@/lib/admin-learning";
+import { getLessonAssetAccess } from "@/lib/learning";
 
 interface CurriculumBuilderProps {
   centerSlug: string;
   courseSlug: string;
+  locale: "en" | "fr";
   modules: CurriculumModule[];
   onRefresh: () => Promise<void>;
   renderLessonPreview: (lessonId: number) => React.ReactNode;
@@ -81,6 +83,56 @@ const STATUS_BADGES: Record<string, string> = {
   archived: "border-slate-200 bg-slate-100 text-slate-600",
 };
 
+const BUILDER_FR: Record<string, string> = {
+  "Video": "Vidéo", "Reading": "Lecture", "Resources": "Ressources", "Exercise": "Exercice",
+  "Mixed Content": "Contenu mixte", "Primary video with optional notes": "Vidéo principale avec notes facultatives",
+  "Rich text & inline images": "Texte enrichi et images intégrées", "Downloadable files & handouts": "Fichiers et documents téléchargeables",
+  "Graded assessment & feedback": "Évaluation notée et commentaires", "Legacy mixed lesson blocks": "Anciens blocs de leçon mixtes",
+  "Upload a video or link YouTube / Google Drive.": "Importez une vidéo ou ajoutez un lien YouTube / Google Drive.",
+  "Structured article with headings and inline images.": "Article structuré avec titres et images intégrées.",
+  "PDFs, worksheets, audio, or downloadable files.": "PDF, fiches, audio ou fichiers à télécharger.",
+  "Interactive quiz with auto-grading and review.": "Quiz interactif avec correction automatique et révision.",
+  "Operation failed. Please try again.": "L'opération a échoué. Veuillez réessayer.",
+  "Changes were saved, but the curriculum list could not be refreshed:": "Les modifications sont enregistrées, mais le programme n'a pas pu être actualisé :",
+  "Changes were saved, but the curriculum list could not be refreshed.": "Les modifications sont enregistrées, mais le programme n'a pas pu être actualisé.",
+  "Archive module ": "Archiver le module ", " and its lessons? Historical revisions and student attempts will be preserved.": " et ses leçons ? Les révisions et les tentatives des élèves seront conservées.",
+  "Archive lesson ": "Archiver la leçon ", "? Published history and student attempts will remain intact.": " ? L'historique publié et les tentatives des élèves seront conservés.",
+  "Curriculum Builder": "Gestion du programme", "Organize modules and lessons. Open any lesson to edit its specialized content, revisions, or exercises.": "Organisez les modules et les leçons. Ouvrez une leçon pour modifier son contenu, ses révisions ou ses exercices.",
+  "Expand All": "Tout développer", "Collapse All": "Tout réduire", Cancel: "Annuler", "Add Module": "Ajouter un module",
+  "Refresh Now": "Actualiser", "Lesson ": "Leçon ", " created as Draft.": " créée comme brouillon.",
+  "Open Lesson Editor →": "Ouvrir l'éditeur de leçon →", Dismiss: "Fermer", "New Module": "Nouveau module",
+  "Module title": "Titre du module", "e.g. Module 1: Everyday Greetings": "ex. Module 1 : salutations courantes",
+  "Description (optional)": "Description (facultatif)", "Brief summary of this module": "Bref résumé du module",
+  "Create Module": "Créer le module", "Creating…": "Création…", "Search modules and lessons": "Rechercher des modules et des leçons",
+  "Search modules or lessons...": "Rechercher des modules ou des leçons…", "Filter by lesson type": "Filtrer par type de leçon",
+  "All lesson types": "Tous les types de leçon", "Filter by lesson status": "Filtrer par statut de leçon", "All statuses": "Tous les statuts",
+  "Filter by module": "Filtrer par module", "All modules": "Tous les modules", "Showing ": "Affichage de ",
+  " of ": " sur ", " total lessons across ": " leçons au total dans ", " module(s). Reordering is disabled while filtered.": " module(s). Le réordonnancement est désactivé avec les filtres.",
+  "No modules in this course yet": "Aucun module dans ce cours", "No modules or lessons match your current filters.": "Aucun module ou leçon ne correspond aux filtres actuels.",
+  "Course outline": "Plan du cours", "Module description": "Description du module", Save: "Enregistrer", "Module ": "Module ",
+  " published": " publié(s)", "Move module up": "Monter le module", "Move module down": "Descendre le module", Rename: "Renommer",
+  "Move module ": "Déplacer le module ", "Move lesson ": "Déplacer la leçon ", " up": " vers le haut", " down": " vers le bas",
+  Publish: "Publier", "Restore to Draft": "Restaurer en brouillon", Archive: "Archiver", "Add Lesson": "Ajouter une leçon",
+  "Add Lesson to ": "Ajouter une leçon à ", "Lesson type": "Type de leçon", "Lesson title": "Titre de la leçon",
+  "e.g. Present Simple Practice": "ex. Exercices sur le présent simple", "Duration (min, optional)": "Durée (min, facultatif)",
+  "Short description (optional)": "Description courte (facultatif)", "Create Lesson": "Créer la leçon", "No lessons match in this module.": "Aucune leçon ne correspond dans ce module.",
+  "Add your first lesson": "Ajouter votre première leçon", "This lesson contains saved content. Its type is locked to protect existing blocks.": "Cette leçon contient du contenu enregistré. Son type est verrouillé pour protéger les blocs existants.",
+  "Short description": "Description courte", "Duration (min)": "Durée (min)", "Draft changes": "Modifications en brouillon",
+  "Video ready": "Vidéo prête", "No video uploaded yet": "Aucune vidéo importée", "Reading content ready": "Contenu de lecture prêt",
+  "Empty reading draft": "Brouillon de lecture vide", "valid resource(s)": "ressource(s) valide(s)", "question(s)": "question(s)",
+  "missing/archived asset(s)": "ressource(s) manquante(s) ou archivée(s)", "Move lesson up": "Monter la leçon", "Move lesson down": "Descendre la leçon",
+  Hide: "Masquer", Preview: "Aperçu", Edit: "Modifier", "Open Editor": "Ouvrir l'éditeur", "More actions for ": "Autres actions pour ",
+  "Move To…": "Déplacer vers…", Duplicate: "Dupliquer", "Move to:": "Déplacer vers :", "Destination module": "Module de destination",
+  Placement: "Emplacement", "First in module": "Première dans le module", "Last in module": "Dernière dans le module",
+  "Before lesson…": "Avant la leçon…", "After lesson…": "Après la leçon…", "Anchor lesson": "Leçon de référence",
+  "Select lesson…": "Sélectionner une leçon…", "Confirm Move": "Confirmer le déplacement",
+  archived: "archivé", published: "publié", draft: "brouillon", min: "min",
+};
+
+function builderText(locale: "en" | "fr", text: string): string {
+  return locale === "fr" ? BUILDER_FR[text] ?? text : text;
+}
+
 function formatVideoDuration(seconds: number | null): string | null {
   if (!seconds || seconds <= 0) return null;
   const mins = Math.floor(seconds / 60);
@@ -88,7 +140,7 @@ function formatVideoDuration(seconds: number | null): string | null {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-function LessonKindThumbnail({ kind }: { kind: EffectiveLessonKind }) {
+function LessonKindThumbnail({ kind, locale }: { kind: EffectiveLessonKind; locale: "en" | "fr" }) {
   const meta = KIND_META[kind] ?? KIND_META.reading;
   const common = {
     viewBox: "0 0 24 24",
@@ -104,7 +156,7 @@ function LessonKindThumbnail({ kind }: { kind: EffectiveLessonKind }) {
   return (
     <div
       className={`flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-xl border ${meta.thumbClass}`}
-      title={meta.label}
+      title={builderText(locale, meta.label)}
     >
       {kind === "video" ? (
         <svg {...common}>
@@ -131,15 +183,120 @@ function LessonKindThumbnail({ kind }: { kind: EffectiveLessonKind }) {
   );
 }
 
+function LessonThumbnail({
+  kind,
+  url,
+  assetId,
+  alt,
+  centerSlug,
+  courseSlug,
+  lessonId,
+  locale,
+}: {
+  kind: EffectiveLessonKind;
+  url?: string | null;
+  assetId?: number | null;
+  alt?: string | null;
+  centerSlug: string;
+  courseSlug: string;
+  lessonId: number;
+  locale: "en" | "fr";
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isNearViewport, setIsNearViewport] = useState(false);
+  const [protectedUrl, setProtectedUrl] = useState<string | null>(null);
+  const [accessFailed, setAccessFailed] = useState(false);
+  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+
+  const directUrl = useMemo(() => {
+    if (!url) return null;
+    try {
+      const candidate = new URL(url);
+      if (
+        candidate.protocol === "https:" &&
+        candidate.hostname === "i.ytimg.com" &&
+        candidate.pathname.startsWith("/vi/")
+      ) {
+        return candidate.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }, [url]);
+
+  useEffect(() => {
+    if (directUrl || !assetId) return;
+    const element = containerRef.current;
+    if (!element || !("IntersectionObserver" in window)) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "160px" }
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [assetId, directUrl]);
+
+  useEffect(() => {
+    if (!assetId || !isNearViewport || directUrl || protectedUrl || accessFailed) return;
+
+    let cancelled = false;
+    getLessonAssetAccess({ centerSlug, courseSlug, lessonId }, assetId)
+      .then((access) => {
+        if (cancelled) return;
+        if (access.type === "stored_asset" && access.asset_type === "image") {
+          setProtectedUrl(access.url);
+        } else {
+          setAccessFailed(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAccessFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accessFailed, assetId, centerSlug, courseSlug, directUrl, isNearViewport, lessonId, protectedUrl]);
+
+  const imageUrl = directUrl ?? protectedUrl;
+
+  return (
+    <div ref={containerRef} className="flex h-16 w-28 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 sm:h-[4.5rem] sm:w-32">
+      {imageUrl && failedImageUrl !== imageUrl ? (
+        // Protected assets are resolved through the authenticated, short-lived asset access endpoint.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={imageUrl}
+          alt={alt || builderText(locale, KIND_META[kind].label)}
+          loading="lazy"
+          onError={() => setFailedImageUrl(imageUrl)}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <LessonKindThumbnail kind={kind} locale={locale} />
+      )}
+    </div>
+  );
+}
+
 export default function CurriculumBuilder({
   centerSlug,
   courseSlug,
+  locale,
   modules,
   onRefresh,
   renderLessonPreview,
   openPreviews,
   onTogglePreview,
 }: CurriculumBuilderProps) {
+  const t = (text: string) => builderText(locale, text);
   const [searchQuery, setSearchQuery] = useState("");
   const [kindFilter, setKindFilter] = useState<"all" | EffectiveLessonKind>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "published" | "archived">("all");
@@ -239,7 +396,7 @@ export default function CurriculumBuilder({
     try {
       await fn();
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Operation failed. Please try again.");
+      setErrorMessage(err instanceof Error ? err.message : t("Operation failed. Please try again."));
       setBusyKey(null);
       return;
     }
@@ -247,11 +404,7 @@ export default function CurriculumBuilder({
     try {
       await onRefresh();
     } catch (err: unknown) {
-      setRefreshWarning(
-        err instanceof Error
-          ? `Changes were saved, but the curriculum list could not be refreshed: ${err.message}`
-          : "Changes were saved, but the curriculum list could not be refreshed."
-      );
+      setRefreshWarning(err instanceof Error ? err.message : "");
     } finally {
       setBusyKey(null);
     }
@@ -305,7 +458,7 @@ export default function CurriculumBuilder({
   };
 
   const handleArchiveModule = async (mod: CurriculumModule) => {
-    if (!window.confirm(`Archive module "${mod.title}" and its lessons? Historical revisions and student attempts will be preserved.`)) {
+    if (!window.confirm(`${t("Archive module ")}"${mod.title}"${t(" and its lessons? Historical revisions and student attempts will be preserved.")}`)) {
       return;
     }
     await runAction(`archive-mod-${mod.id}`, async () => {
@@ -382,7 +535,7 @@ export default function CurriculumBuilder({
 
   const handleArchiveLesson = async (lesson: CurriculumLesson) => {
     setOpenMenuLessonId(null);
-    if (!window.confirm(`Archive lesson "${lesson.title}"? Published history and student attempts will remain intact.`)) {
+    if (!window.confirm(`${t("Archive lesson ")}"${lesson.title}"${t("? Published history and student attempts will remain intact.")}`)) {
       return;
     }
     await runAction(`archive-lesson-${lesson.id}`, async () => {
@@ -404,9 +557,9 @@ export default function CurriculumBuilder({
       {/* Header + Collapse/Expand + Add Module CTA */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-xl font-black text-[#092443]">Curriculum Builder</h2>
+          <h2 className="text-xl font-black text-[#092443]">{t("Curriculum Builder")}</h2>
           <p className="mt-1 text-xs text-slate-500">
-            Organize modules and lessons. Open any lesson to edit its specialized content, revisions, or exercises.
+            {t("Organize modules and lessons. Open any lesson to edit its specialized content, revisions, or exercises.")}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -417,14 +570,14 @@ export default function CurriculumBuilder({
                 onClick={expandAllModules}
                 className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
               >
-                Expand All
+                {t("Expand All")}
               </button>
               <button
                 type="button"
                 onClick={collapseAllModules}
                 className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
               >
-                Collapse All
+                {t("Collapse All")}
               </button>
             </>
           )}
@@ -434,26 +587,30 @@ export default function CurriculumBuilder({
             onClick={() => setShowAddModule((v) => !v)}
             className="inline-flex min-h-10 items-center rounded-xl bg-[#0e8988] px-4 text-xs font-extrabold text-white shadow-xs transition hover:bg-[#0b7170] disabled:opacity-50"
           >
-            {showAddModule ? "Cancel" : "+ Add Module"}
+            {showAddModule ? t("Cancel") : `+ ${t("Add Module")}`}
           </button>
         </div>
       </div>
 
       {errorMessage && (
         <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-800">
-          {errorMessage}
+          {errorMessage ? t(errorMessage) : null}
         </div>
       )}
 
       {refreshWarning && (
         <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900">
-          <span>{refreshWarning}</span>
+          <span>
+            {refreshWarning
+              ? <>{t("Changes were saved, but the curriculum list could not be refreshed:")} {t(refreshWarning)}</>
+              : t("Changes were saved, but the curriculum list could not be refreshed.")}
+          </span>
           <button
             type="button"
             onClick={() => void runAction("manual-refresh", async () => undefined)}
             className="rounded-lg border border-amber-400 bg-white px-3 py-1 font-bold text-amber-900 hover:bg-amber-100"
           >
-            Refresh Now
+            {t("Refresh Now")}
           </button>
         </div>
       )}
@@ -461,21 +618,21 @@ export default function CurriculumBuilder({
       {createdLessonNotice && (
         <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
           <span>
-            Lesson <strong>{createdLessonNotice.title}</strong> created as Draft.
+            {t("Lesson ")}<strong>{createdLessonNotice.title}</strong>{t(" created as Draft.")}
           </span>
           <div className="flex items-center gap-2">
             <Link
               href={`/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/lessons/${createdLessonNotice.id}`}
               className="rounded-lg bg-[#0e8988] px-3 py-1.5 font-extrabold text-white"
             >
-              Open Lesson Editor →
+              {t("Open Lesson Editor →")}
             </Link>
             <button
               type="button"
               onClick={() => setCreatedLessonNotice(null)}
               className="text-xs font-bold text-emerald-800 hover:underline"
             >
-              Dismiss
+              {t("Dismiss")}
             </button>
           </div>
         </div>
@@ -487,28 +644,28 @@ export default function CurriculumBuilder({
           onSubmit={(e) => void handleCreateModule(e)}
           className="rounded-2xl border border-teal-200 bg-white p-4 shadow-xs space-y-3"
         >
-          <h3 className="text-sm font-black text-[#102b4c]">New Module</h3>
+          <h3 className="text-sm font-black text-[#102b4c]">{t("New Module")}</h3>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="text-xs font-semibold text-slate-700">
-              Module title
+              {t("Module title")}
               <input
                 type="text"
                 required
                 maxLength={255}
                 value={newModuleTitle}
                 onChange={(e) => setNewModuleTitle(e.target.value)}
-                placeholder="e.g. Module 1: Everyday Greetings"
+                placeholder={t("e.g. Module 1: Everyday Greetings")}
                 className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-500"
               />
             </label>
             <label className="text-xs font-semibold text-slate-700">
-              Description (optional)
+              {t("Description (optional)")}
               <input
                 type="text"
                 maxLength={2000}
                 value={newModuleDescription}
                 onChange={(e) => setNewModuleDescription(e.target.value)}
-                placeholder="Brief summary of this module"
+                placeholder={t("Brief summary of this module")}
                 className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-500"
               />
             </label>
@@ -519,14 +676,14 @@ export default function CurriculumBuilder({
               onClick={() => setShowAddModule(false)}
               className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600"
             >
-              Cancel
+              {t("Cancel")}
             </button>
             <button
               type="submit"
               disabled={Boolean(busyKey) || !newModuleTitle.trim()}
               className="rounded-xl bg-[#0e8988] px-4 py-2 text-xs font-extrabold text-white disabled:opacity-50"
             >
-              {busyKey === "create-module" ? "Creating…" : "Create Module"}
+              {busyKey === "create-module" ? t("Creating…") : t("Create Module")}
             </button>
           </div>
         </form>
@@ -538,43 +695,43 @@ export default function CurriculumBuilder({
           <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
             <input
               type="search"
-              aria-label="Search modules and lessons"
-              placeholder="Search modules or lessons..."
+              aria-label={t("Search modules and lessons")}
+              placeholder={t("Search modules or lessons...")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="min-h-10 rounded-xl border border-slate-200 px-3 text-xs outline-none focus:border-teal-500"
             />
             <select
-              aria-label="Filter by lesson type"
+              aria-label={t("Filter by lesson type")}
               value={kindFilter}
               onChange={(e) => setKindFilter(e.target.value as "all" | EffectiveLessonKind)}
               className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs outline-none focus:border-teal-500"
             >
-              <option value="all">All lesson types</option>
-              <option value="video">Video</option>
-              <option value="reading">Reading</option>
-              <option value="resources">Resources</option>
-              <option value="exercise">Exercise</option>
-              <option value="legacy_mixed">Mixed Content</option>
+              <option value="all">{t("All lesson types")}</option>
+              <option value="video">{t("Video")}</option>
+              <option value="reading">{t("Reading")}</option>
+              <option value="resources">{t("Resources")}</option>
+              <option value="exercise">{t("Exercise")}</option>
+              <option value="legacy_mixed">{t("Mixed Content")}</option>
             </select>
             <select
-              aria-label="Filter by lesson status"
+              aria-label={t("Filter by lesson status")}
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as "all" | "draft" | "published" | "archived")}
               className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs outline-none focus:border-teal-500"
             >
-              <option value="all">All statuses</option>
-              <option value="published">Published</option>
-              <option value="draft">Draft</option>
-              <option value="archived">Archived</option>
+              <option value="all">{t("All statuses")}</option>
+              <option value="published">{t("published")}</option>
+              <option value="draft">{t("draft")}</option>
+              <option value="archived">{t("archived")}</option>
             </select>
             <select
-              aria-label="Filter by module"
+              aria-label={t("Filter by module")}
               value={moduleFilter}
               onChange={(e) => setModuleFilter(e.target.value)}
               className="min-h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs outline-none focus:border-teal-500"
             >
-              <option value="all">All modules</option>
+              <option value="all">{t("All modules")}</option>
               {modules.map((m) => (
                 <option key={m.id} value={String(m.id)}>
                   {m.title}
@@ -585,7 +742,7 @@ export default function CurriculumBuilder({
           {hasActiveFilters && (
             <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-600">
               <span>
-                Showing <strong>{filteredLessonCount}</strong> of <strong>{totalLessonCount}</strong> total lessons across {filteredModules.length} module(s). Reordering is disabled while filtered.
+                {t("Showing ")}<strong>{filteredLessonCount}</strong>{t(" of ")}<strong>{totalLessonCount}</strong>{t(" total lessons across ")} {filteredModules.length}{t(" module(s). Reordering is disabled while filtered.")}
               </span>
               <button
                 type="button"
@@ -607,7 +764,7 @@ export default function CurriculumBuilder({
       {/* Empty States */}
       {modules.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
-          <h3 className="text-base font-black text-[#102b4c]">No modules in this course yet</h3>
+          <h3 className="text-base font-black text-[#102b4c]">{t("No modules in this course yet")}</h3>
           <p className="mt-1 text-xs text-slate-500">
             Start structuring your curriculum by creating the first module.
           </p>
@@ -621,7 +778,7 @@ export default function CurriculumBuilder({
         </div>
       ) : filteredModules.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
-          <p className="text-sm font-bold text-slate-700">No modules or lessons match your current filters.</p>
+          <p className="text-sm font-bold text-slate-700">{t("No modules or lessons match your current filters.")}</p>
           <button
             type="button"
             onClick={() => {
@@ -639,7 +796,7 @@ export default function CurriculumBuilder({
         <div className={`grid gap-6 ${modules.length >= 3 ? "xl:grid-cols-[220px_minmax(0,1fr)]" : ""}`}>
           {/* Desktop Course Index for large courses */}
           {modules.length >= 3 && (
-            <aside aria-label="Course outline" className="hidden xl:block">
+            <aside aria-label={t("Course outline")} className="hidden xl:block">
               <div className="sticky top-6 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xs">
                 <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
                   Course Index ({modules.length})
@@ -704,7 +861,7 @@ export default function CurriculumBuilder({
                               type="text"
                               value={editModuleDescription}
                               onChange={(e) => setEditModuleDescription(e.target.value)}
-                              placeholder="Module description"
+                                placeholder={t("Module description")}
                               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
                             />
                             <div className="flex gap-2">
@@ -714,14 +871,14 @@ export default function CurriculumBuilder({
                                 onClick={() => void handleSaveModule(mod.id)}
                                 className="rounded-lg bg-[#0e8988] px-3 py-1 text-xs font-bold text-white"
                               >
-                                Save
+                                {t("Save")}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setEditingModuleId(null)}
                                 className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-bold text-slate-600"
                               >
-                                Cancel
+                                {t("Cancel")}
                               </button>
                             </div>
                           </div>
@@ -729,13 +886,13 @@ export default function CurriculumBuilder({
                           <>
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="text-[11px] font-extrabold uppercase tracking-wide text-slate-400">
-                                Module {realModIndex + 1}
+                                {t("Module ")}{realModIndex + 1}
                               </span>
                               <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-[10px] font-extrabold uppercase ${STATUS_BADGES[mod.status] ?? STATUS_BADGES.draft}`}>
-                                {mod.status}
+                                {t(mod.status)}
                               </span>
                               <span className="text-[11px] text-slate-500">
-                                {mod.published_lesson_count}/{mod.lesson_count} published
+                                {mod.published_lesson_count}/{mod.lesson_count}{t(" published")}
                               </span>
                             </div>
                             <h3 className="mt-1 text-base font-black text-[#102b4c]">{mod.title}</h3>
@@ -755,8 +912,8 @@ export default function CurriculumBuilder({
                             type="button"
                             disabled={Boolean(busyKey) || activeModIndex <= 0}
                             onClick={() => void handleReorderModule(activeModIndex, -1)}
-                            title="Move module up"
-                            aria-label={`Move ${mod.title} up`}
+                            title={t("Move module up")}
+                            aria-label={`${t("Move module ")}${mod.title}${t(" up")}`}
                             className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                           >
                             ↑
@@ -765,8 +922,8 @@ export default function CurriculumBuilder({
                             type="button"
                             disabled={Boolean(busyKey) || activeModIndex >= activeModules.length - 1}
                             onClick={() => void handleReorderModule(activeModIndex, 1)}
-                            title="Move module down"
-                            aria-label={`Move ${mod.title} down`}
+                            title={t("Move module down")}
+                            aria-label={`${t("Move module ")}${mod.title}${t(" down")}`}
                             className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                           >
                             ↓
@@ -782,7 +939,7 @@ export default function CurriculumBuilder({
                         }}
                         className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
                       >
-                        Rename
+                        {t("Rename")}
                       </button>
                       {mod.status === "draft" && (
                         <button
@@ -791,7 +948,7 @@ export default function CurriculumBuilder({
                           onClick={() => void runAction(`pub-mod-${mod.id}`, () => publishAdminModule(centerSlug, courseSlug, mod.id))}
                           className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-bold text-emerald-800"
                         >
-                          Publish
+                          {t("Publish")}
                         </button>
                       )}
                       {isModuleArchived ? (
@@ -801,7 +958,7 @@ export default function CurriculumBuilder({
                           onClick={() => void runAction(`res-mod-${mod.id}`, () => restoreAdminModule(centerSlug, courseSlug, mod.id))}
                           className="rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1.5 text-xs font-bold text-teal-800"
                         >
-                          Restore to Draft
+                          {t("Restore to Draft")}
                         </button>
                       ) : (
                         <>
@@ -811,7 +968,7 @@ export default function CurriculumBuilder({
                             onClick={() => void handleArchiveModule(mod)}
                             className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:border-rose-200 hover:text-rose-700"
                           >
-                            Archive
+                            {t("Archive")}
                           </button>
                           <button
                             type="button"
@@ -825,7 +982,7 @@ export default function CurriculumBuilder({
                             }}
                             className="rounded-lg bg-[#092443] px-3 py-1.5 text-xs font-extrabold text-white hover:bg-[#123b64]"
                           >
-                            + Add Lesson
+                            + {t("Add Lesson")}
                           </button>
                         </>
                       )}
@@ -841,10 +998,10 @@ export default function CurriculumBuilder({
                           className="border-b border-teal-100 bg-teal-50/40 p-4 space-y-4"
                         >
                           <h4 className="text-xs font-black uppercase tracking-wide text-teal-900">
-                            Add Lesson to {mod.title}
+                            {t("Add Lesson to ")}{mod.title}
                           </h4>
 
-                          <div role="radiogroup" aria-label="Lesson type" className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                          <div role="radiogroup" aria-label={t("Lesson type")} className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                             {CREATE_KIND_CARDS.map((card) => {
                               const active = newLessonKind === card.value;
                               return (
@@ -860,8 +1017,8 @@ export default function CurriculumBuilder({
                                       : "border-slate-200 bg-white/80 hover:border-slate-300"
                                   }`}
                                 >
-                                  <p className="text-xs font-extrabold text-[#102b4c]">{card.label}</p>
-                                  <p className="mt-1 text-[11px] text-slate-500">{card.description}</p>
+                                  <p className="text-xs font-extrabold text-[#102b4c]">{t(card.label)}</p>
+                                  <p className="mt-1 text-[11px] text-slate-500">{t(card.description)}</p>
                                 </button>
                               );
                             })}
@@ -869,19 +1026,19 @@ export default function CurriculumBuilder({
 
                           <div className="grid gap-3 sm:grid-cols-3">
                             <label className="text-xs font-semibold text-slate-700 sm:col-span-2">
-                              Lesson title
+                              {t("Lesson title")}
                               <input
                                 type="text"
                                 required
                                 maxLength={255}
                                 value={newLessonTitle}
                                 onChange={(e) => setNewLessonTitle(e.target.value)}
-                                placeholder="e.g. Present Simple Practice"
+                                placeholder={t("e.g. Present Simple Practice")}
                                 className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
                               />
                             </label>
                             <label className="text-xs font-semibold text-slate-700">
-                              Duration (min, optional)
+                              {t("Duration (min, optional)")}
                               <input
                                 type="number"
                                 min={1}
@@ -892,7 +1049,7 @@ export default function CurriculumBuilder({
                               />
                             </label>
                             <label className="text-xs font-semibold text-slate-700 sm:col-span-3">
-                              Short description (optional)
+                              {t("Short description (optional)")}
                               <input
                                 type="text"
                                 maxLength={2000}
@@ -908,14 +1065,14 @@ export default function CurriculumBuilder({
                               onClick={() => setAddingLessonModuleId(null)}
                               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-600"
                             >
-                              Cancel
+                              {t("Cancel")}
                             </button>
                             <button
                               type="submit"
                               disabled={Boolean(busyKey) || !newLessonTitle.trim()}
                               className="rounded-lg bg-[#0e8988] px-4 py-1.5 text-xs font-extrabold text-white disabled:opacity-50"
                             >
-                              {busyKey === `create-lesson-${mod.id}` ? "Creating…" : "Create Lesson"}
+                              {busyKey === `create-lesson-${mod.id}` ? t("Creating…") : t("Create Lesson")}
                             </button>
                           </div>
                         </form>
@@ -924,14 +1081,14 @@ export default function CurriculumBuilder({
                       {/* Lessons List */}
                       {mod.lessons.length === 0 ? (
                         <div className="p-6 text-center text-xs text-slate-500">
-                          No lessons match in this module.{" "}
+                          {t("No lessons match in this module.")}{" "}
                           {!isModuleArchived && !hasActiveFilters && (
                             <button
                               type="button"
                               onClick={() => setAddingLessonModuleId(mod.id)}
                               className="font-bold text-[#0e8988] hover:underline"
                             >
-                              Add your first lesson
+                              {t("Add your first lesson")}
                             </button>
                           )}
                         </div>
@@ -942,6 +1099,7 @@ export default function CurriculumBuilder({
                             const activeLessonIndex = activeLessons.findIndex((l) => l.id === lesson.id);
                             const kind = lesson.effective_kind ?? "reading";
                             const kindMeta = KIND_META[kind] ?? KIND_META.reading;
+                            const canChangeLessonKind = lesson.can_change_content_type;
                             const isEditingLesson = editingLessonId === lesson.id;
                             const isMovingLesson = movingLessonId === lesson.id;
                             const isPreviewOpen = Boolean(openPreviews[lesson.id]);
@@ -959,7 +1117,16 @@ export default function CurriculumBuilder({
                               <div key={lesson.id} className="p-4 sm:px-5">
                                 <div className="flex flex-wrap items-start justify-between gap-3">
                                   <div className="flex min-w-0 flex-1 items-start gap-3.5">
-                                    <LessonKindThumbnail kind={kind} />
+                                    <LessonThumbnail
+                                      kind={kind}
+                                      url={lesson.thumbnail_url}
+                                      assetId={lesson.thumbnail_asset_id}
+                                      alt={lesson.thumbnail_alt}
+                                      centerSlug={centerSlug}
+                                      courseSlug={courseSlug}
+                                      lessonId={lesson.id}
+                                      locale={locale}
+                                    />
 
                                     <div className="min-w-0 flex-1">
                                       {isEditingLesson ? (
@@ -974,23 +1141,29 @@ export default function CurriculumBuilder({
                                             <select
                                               value={editLessonKind}
                                               onChange={(e) => setEditLessonKind(e.target.value as EffectiveLessonKind)}
+                                              disabled={!canChangeLessonKind}
                                               className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs"
                                             >
-                                              <option value="video">Video</option>
-                                              <option value="reading">Reading</option>
-                                              <option value="resources">Resources</option>
-                                              <option value="exercise">Exercise</option>
+                                              <option value="video">{t("Video")}</option>
+                                              <option value="reading">{t("Reading")}</option>
+                                              <option value="resources">{t("Resources")}</option>
+                                              <option value="exercise">{t("Exercise")}</option>
                                               {lesson.effective_kind === "legacy_mixed" && (
-                                                <option value="legacy_mixed">Mixed Content</option>
+                                                <option value="legacy_mixed">{t("Mixed Content")}</option>
                                               )}
                                             </select>
                                           </div>
+                                          {!canChangeLessonKind && (
+                                            <p className="text-[11px] text-amber-800">
+                                              {t("This lesson contains saved content. Its type is locked to protect existing blocks.")}
+                                            </p>
+                                          )}
                                           <div className="grid gap-2 sm:grid-cols-3">
                                             <input
                                               type="text"
                                               value={editLessonDescription}
                                               onChange={(e) => setEditLessonDescription(e.target.value)}
-                                              placeholder="Short description"
+                                              placeholder={t("Short description")}
                                               className="sm:col-span-2 rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
                                             />
                                             <input
@@ -999,7 +1172,7 @@ export default function CurriculumBuilder({
                                               max={1440}
                                               value={editLessonDuration}
                                               onChange={(e) => setEditLessonDuration(e.target.value)}
-                                              placeholder="Duration (min)"
+                                              placeholder={t("Duration (min)")}
                                               className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
                                             />
                                           </div>
@@ -1010,14 +1183,14 @@ export default function CurriculumBuilder({
                                               onClick={() => void handleSaveLesson(lesson.id)}
                                               className="rounded-lg bg-[#0e8988] px-3 py-1 text-xs font-bold text-white"
                                             >
-                                              Save
+                                              {t("Save")}
                                             </button>
                                             <button
                                               type="button"
                                               onClick={() => setEditingLessonId(null)}
                                               className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-bold text-slate-600"
                                             >
-                                              Cancel
+                                              {t("Cancel")}
                                             </button>
                                           </div>
                                         </div>
@@ -1025,19 +1198,19 @@ export default function CurriculumBuilder({
                                         <>
                                           <div className="flex flex-wrap items-center gap-2">
                                             <span className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-extrabold uppercase ${kindMeta.badgeClass}`}>
-                                              {kindMeta.label}
+                                              {t(kindMeta.label)}
                                             </span>
                                             <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${STATUS_BADGES[lesson.status] ?? STATUS_BADGES.draft}`}>
-                                              {lesson.status}
+                                              {t(lesson.status)}
                                             </span>
                                             {lesson.has_draft_changes && lesson.status === "published" && (
                                               <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-800">
-                                                Draft changes
+                                                {t("Draft changes")}
                                               </span>
                                             )}
                                             {lesson.duration_minutes ? (
                                               <span className="text-[11px] font-semibold text-slate-500">
-                                                {lesson.duration_minutes} min
+                                                {lesson.duration_minutes} {t("min")}
                                               </span>
                                             ) : null}
                                           </div>
@@ -1051,33 +1224,33 @@ export default function CurriculumBuilder({
                                             {kind === "video" && (
                                               <span className="rounded-md bg-indigo-50/70 px-2 py-0.5 font-medium text-indigo-800">
                                                 {lesson.summary?.has_video
-                                                  ? `Video ready${videoDur ? ` (${videoDur})` : ""}`
-                                                  : "No video uploaded yet"}
+                                                  ? `${t("Video ready")}${videoDur ? ` (${videoDur})` : ""}`
+                                                  : t("No video uploaded yet")}
                                               </span>
                                             )}
                                             {kind === "reading" && (
                                               <span className="rounded-md bg-teal-50/70 px-2 py-0.5 font-medium text-teal-800">
-                                                {lesson.summary?.has_reading_content ? "Reading content ready" : "Empty reading draft"}
+                                                {lesson.summary?.has_reading_content ? t("Reading content ready") : t("Empty reading draft")}
                                               </span>
                                             )}
                                             {kind === "resources" && (
                                               <span className="rounded-md bg-amber-50/70 px-2 py-0.5 font-medium text-amber-800">
-                                                {lesson.summary?.resources_count ?? 0} valid resource(s)
+                                                {lesson.summary?.resources_count ?? 0} {t("valid resource(s)")}
                                               </span>
                                             )}
                                             {kind === "exercise" && (
                                               <span className="rounded-md bg-emerald-50/70 px-2 py-0.5 font-medium text-emerald-800">
-                                                {lesson.summary?.question_count ?? 0} question(s) · {lesson.summary?.total_points ?? 0} pts
+                                                {lesson.summary?.question_count ?? 0} {t("question(s)")} · {lesson.summary?.total_points ?? 0} pts
                                               </span>
                                             )}
                                             {kind === "legacy_mixed" && (
                                               <span className="rounded-md bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
-                                                {lesson.exercises_count} exercise(s) · {lesson.assets_count} asset(s)
+                                                {lesson.exercises_count} {t("Exercise")} · {lesson.assets_count} {t("Resources")}
                                               </span>
                                             )}
                                             {(lesson.summary?.broken_media_count ?? 0) > 0 && (
                                               <span className="rounded-md bg-rose-50 px-2 py-0.5 font-semibold text-rose-700">
-                                                {lesson.summary.broken_media_count} missing/archived asset(s)
+                                                {lesson.summary.broken_media_count} {t("missing/archived asset(s)")}
                                               </span>
                                             )}
                                           </div>
@@ -1094,8 +1267,8 @@ export default function CurriculumBuilder({
                                           type="button"
                                           disabled={Boolean(busyKey) || activeLessonIndex <= 0}
                                           onClick={() => void handleReorderLesson(mod, activeLessonIndex, -1)}
-                                          title="Move lesson up"
-                                          aria-label={`Move ${lesson.title} up`}
+                                          title={t("Move lesson up")}
+                                          aria-label={`${t("Move lesson ")}${lesson.title}${t(" up")}`}
                                           className="min-h-9 rounded-lg border border-slate-200 px-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                                         >
                                           ↑
@@ -1104,8 +1277,8 @@ export default function CurriculumBuilder({
                                           type="button"
                                           disabled={Boolean(busyKey) || activeLessonIndex >= activeLessons.length - 1}
                                           onClick={() => void handleReorderLesson(mod, activeLessonIndex, 1)}
-                                          title="Move lesson down"
-                                          aria-label={`Move ${lesson.title} down`}
+                                          title={t("Move lesson down")}
+                                          aria-label={`${t("Move lesson ")}${lesson.title}${t(" down")}`}
                                           className="min-h-9 rounded-lg border border-slate-200 px-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                                         >
                                           ↓
@@ -1117,7 +1290,7 @@ export default function CurriculumBuilder({
                                       onClick={() => onTogglePreview(lesson.id)}
                                       className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
                                     >
-                                      {isPreviewOpen ? "Hide" : "Preview"}
+                                      {isPreviewOpen ? t("Hide") : t("Preview")}
                                     </button>
                                     <button
                                       type="button"
@@ -1130,19 +1303,19 @@ export default function CurriculumBuilder({
                                       }}
                                       className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
                                     >
-                                      Edit
+                                      {t("Edit")}
                                     </button>
                                     <Link
                                       href={editorHref}
                                       className="inline-flex min-h-9 items-center rounded-lg bg-[#0e8988] px-3.5 text-xs font-extrabold text-white hover:bg-[#0b7170]"
                                     >
-                                      Open Editor
+                                      {t("Open Editor")}
                                     </Link>
 
                                     <button
                                       type="button"
                                       aria-expanded={isMenuOpen}
-                                      aria-label={`More actions for ${lesson.title}`}
+                                      aria-label={`${t("More actions for ")}${lesson.title}`}
                                       onClick={() => setOpenMenuLessonId(isMenuOpen ? null : lesson.id)}
                                       className="min-h-9 rounded-lg border border-slate-200 px-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
                                     >
@@ -1166,7 +1339,7 @@ export default function CurriculumBuilder({
                                             }}
                                             className="block w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50"
                                           >
-                                            Move To…
+                                            {t("Move To…")}
                                           </button>
                                         )}
                                         {!isModuleArchived && (
@@ -1176,7 +1349,7 @@ export default function CurriculumBuilder({
                                             onClick={() => void handleDuplicateLesson(lesson.id)}
                                             className="block w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                                           >
-                                            Duplicate
+                                            {t("Duplicate")}
                                           </button>
                                         )}
                                         {isLessonArchived ? (
@@ -1187,7 +1360,7 @@ export default function CurriculumBuilder({
                                               onClick={() => void handleRestoreLesson(lesson)}
                                               className="block w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-teal-700 hover:bg-teal-50 disabled:opacity-40"
                                             >
-                                              Restore to Draft
+                                              {t("Restore to Draft")}
                                             </button>
                                           )
                                         ) : (
@@ -1197,7 +1370,7 @@ export default function CurriculumBuilder({
                                             onClick={() => void handleArchiveLesson(lesson)}
                                             className="block w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-40"
                                           >
-                                            Archive
+                                            {t("Archive")}
                                           </button>
                                         )}
                                       </div>
@@ -1208,9 +1381,9 @@ export default function CurriculumBuilder({
                                 {/* Move Lesson Inline Bar with Exact Placement (Phase C 5.5) */}
                                 {isMovingLesson && (
                                   <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                    <span className="text-xs font-bold text-slate-700">Move to:</span>
+                                    <span className="text-xs font-bold text-slate-700">{t("Move to:")}</span>
                                     <select
-                                      aria-label="Destination module"
+                                      aria-label={t("Destination module")}
                                       value={moveTargetModuleId}
                                       onChange={(e) => {
                                         setMoveTargetModuleId(e.target.value);
@@ -1225,30 +1398,30 @@ export default function CurriculumBuilder({
                                       ))}
                                     </select>
                                     <select
-                                      aria-label="Placement"
+                                      aria-label={t("Placement")}
                                       value={movePlacement}
                                       onChange={(e) =>
                                         setMovePlacement(e.target.value as "first" | "last" | "before" | "after")
                                       }
                                       className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs"
                                     >
-                                      <option value="first">First in module</option>
-                                      <option value="last">Last in module</option>
+                                      <option value="first">{t("First in module")}</option>
+                                      <option value="last">{t("Last in module")}</option>
                                       {moveDestinationLessons.length > 0 && (
                                         <>
-                                          <option value="before">Before lesson…</option>
-                                          <option value="after">After lesson…</option>
+                                          <option value="before">{t("Before lesson…")}</option>
+                                          <option value="after">{t("After lesson…")}</option>
                                         </>
                                       )}
                                     </select>
                                     {(movePlacement === "before" || movePlacement === "after") && (
                                       <select
-                                        aria-label="Anchor lesson"
+                                        aria-label={t("Anchor lesson")}
                                         value={moveAnchorLessonId}
                                         onChange={(e) => setMoveAnchorLessonId(e.target.value)}
                                         className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs"
                                       >
-                                        <option value="">Select lesson…</option>
+                                        <option value="">{t("Select lesson…")}</option>
                                         {moveDestinationLessons.map((l) => (
                                           <option key={l.id} value={String(l.id)}>
                                             {l.title}
@@ -1266,14 +1439,14 @@ export default function CurriculumBuilder({
                                       onClick={() => void handleMoveLesson(lesson.id)}
                                       className="rounded-lg bg-[#092443] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40"
                                     >
-                                      Confirm Move
+                                      {t("Confirm Move")}
                                     </button>
                                     <button
                                       type="button"
                                       onClick={() => setMovingLessonId(null)}
                                       className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600"
                                     >
-                                      Cancel
+                                      {t("Cancel")}
                                     </button>
                                   </div>
                                 )}

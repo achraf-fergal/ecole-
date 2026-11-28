@@ -36,6 +36,33 @@ function isExternalVideo(access: LessonAssetAccess): access is ExternalVideoAcce
 interface LessonAssetViewerProps {
   asset: LearningLessonAsset;
   params: LearningRouteParams;
+  autoPreviewImages?: boolean;
+  locale?: "en" | "fr";
+}
+
+const ASSET_VIEWER_FR: Record<string, string> = {
+  "Your session has expired. Sign in again.": "Votre session a expiré. Reconnectez-vous.",
+  "Unable to open this resource.": "Impossible d'ouvrir cette ressource.",
+  "Download failed.": "Le téléchargement a échoué.",
+  "Learning resource": "Ressource pédagogique",
+  "Archived — restore to preview": "Archivé — restaurez pour afficher l'aperçu",
+  "Loading...": "Chargement…",
+  "Load video": "Charger la vidéo",
+  "View image": "Afficher l'image",
+  "Open resource": "Ouvrir la ressource",
+  "Downloading...": "Téléchargement…",
+  Download: "Télécharger",
+  Retry: "Réessayer",
+  "The image could not be loaded.": "L'image n'a pas pu être chargée.",
+  "Retry image": "Réessayer de charger l'image",
+  "File name": "Nom du fichier",
+  "File type": "Type de fichier",
+  "File size": "Taille du fichier",
+  "PDF Preview": "Aperçu PDF",
+};
+
+function assetViewerText(locale: "en" | "fr", text: string): string {
+  return locale === "fr" ? ASSET_VIEWER_FR[text] ?? text : text;
 }
 
 function AssetIcon({ type }: { type: string }) {
@@ -65,7 +92,10 @@ function AssetIcon({ type }: { type: string }) {
 export default function LessonAssetViewer({
   asset,
   params,
+  autoPreviewImages = true,
+  locale = "en",
 }: LessonAssetViewerProps) {
+  const t = (text: string) => assetViewerText(locale, text);
   const { centerSlug, courseSlug, lessonId } = params;
   const [access, setAccess] = useState<LessonAssetAccess | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -79,7 +109,7 @@ export default function LessonAssetViewer({
   const isArchived = asset.status === "archived";
 
   useEffect(() => {
-    if (!isImage || isArchived || access || error) return;
+    if (!autoPreviewImages || !isImage || isArchived || access || error) return;
 
     let cancelled = false;
     getLessonAssetAccess({ centerSlug, courseSlug, lessonId }, asset.id)
@@ -92,12 +122,12 @@ export default function LessonAssetViewer({
       .catch((err: unknown) => {
         if (cancelled) return;
         if (err instanceof LearningApiError && err.status === 401) {
-          setError("Your session has expired. Sign in again.");
+          setError(assetViewerText(locale, "Your session has expired. Sign in again."));
         } else {
           setError(
             err instanceof Error
               ? err.message
-              : "Unable to open this resource."
+              : assetViewerText(locale, "Unable to open this resource.")
           );
         }
       });
@@ -105,7 +135,7 @@ export default function LessonAssetViewer({
     return () => {
       cancelled = true;
     };
-  }, [access, asset.id, centerSlug, courseSlug, error, isArchived, isImage, lessonId]);
+  }, [access, asset.id, autoPreviewImages, centerSlug, courseSlug, error, isArchived, isImage, lessonId, locale]);
 
   async function handleOpen() {
     if (isArchived || isLoading || access) return;
@@ -126,12 +156,12 @@ export default function LessonAssetViewer({
         err instanceof LearningApiError &&
         err.status === 401
       ) {
-        setError("Your session has expired. Sign in again.");
+        setError(t("Your session has expired. Sign in again."));
       } else {
         setError(
           err instanceof Error
             ? err.message
-            : "Unable to open this resource."
+            : t("Unable to open this resource.")
         );
       }
     } finally {
@@ -168,7 +198,7 @@ export default function LessonAssetViewer({
       setError(
         err instanceof Error
           ? err.message
-          : "Download failed."
+          : t("Download failed.")
       );
     } finally {
       setIsDownloading(false);
@@ -178,7 +208,7 @@ export default function LessonAssetViewer({
   const title =
     asset.title ||
     asset.original_filename ||
-    "Learning resource";
+    t("Learning resource");
 
   const fileSize = asset.size_bytes === null
     ? null
@@ -220,7 +250,7 @@ export default function LessonAssetViewer({
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {isArchived ? (
             <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
-              Archived — restore to preview
+              {t("Archived — restore to preview")}
             </span>
           ) : !access ? (
             <button
@@ -230,12 +260,12 @@ export default function LessonAssetViewer({
               className="inline-flex min-h-10 items-center justify-center rounded-xl bg-[#092443] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#123b64] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isLoading
-                ? "Loading..."
+                ? t("Loading...")
                 : isVideo
-                  ? "Load video"
+                  ? t("Load video")
                   : isImage
-                    ? "View image"
-                    : "Open resource"}
+                    ? t("View image")
+                    : t("Open resource")}
             </button>
           ) : null}
 
@@ -246,7 +276,7 @@ export default function LessonAssetViewer({
               disabled={isDownloading}
               className="inline-flex min-h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 transition hover:border-[#0e8988] hover:text-[#0e8988] disabled:opacity-50"
             >
-              {isDownloading ? "Downloading..." : "Download"}
+              {isDownloading ? t("Downloading...") : t("Download")}
             </button>
           )}
         </div>
@@ -266,7 +296,7 @@ export default function LessonAssetViewer({
             }}
             className="ml-2 font-bold underline"
           >
-            Retry
+            {t("Retry")}
           </button>
         </div>
       )}
@@ -279,14 +309,14 @@ export default function LessonAssetViewer({
                 {imageLoadFailed ? (
                   <div className="flex flex-col items-center gap-3 p-6 text-center">
                     <p role="alert" className="text-sm font-semibold text-slate-600">
-                      The image could not be loaded.
+                      {t("The image could not be loaded.")}
                     </p>
                     <button
                       type="button"
                       onClick={retryImage}
                       className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:border-[#0e8988] hover:text-[#0e8988]"
                     >
-                      Retry image
+                      {t("Retry image")}
                     </button>
                   </div>
                 ) : (
@@ -315,19 +345,19 @@ export default function LessonAssetViewer({
                 <dl className="space-y-2 text-xs">
                   {asset.original_filename && (
                     <div>
-                      <dt className="font-bold text-slate-500">File name</dt>
+                      <dt className="font-bold text-slate-500">{t("File name")}</dt>
                       <dd className="mt-0.5 break-all text-slate-700">{asset.original_filename}</dd>
                     </div>
                   )}
                   {asset.mime_type && (
                     <div>
-                      <dt className="font-bold text-slate-500">File type</dt>
+                      <dt className="font-bold text-slate-500">{t("File type")}</dt>
                       <dd className="mt-0.5 text-slate-700">{asset.mime_type}</dd>
                     </div>
                   )}
                   {fileSize && (
                     <div>
-                      <dt className="font-bold text-slate-500">File size</dt>
+                      <dt className="font-bold text-slate-500">{t("File size")}</dt>
                       <dd className="mt-0.5 text-slate-700">{fileSize}</dd>
                     </div>
                   )}
@@ -342,7 +372,7 @@ export default function LessonAssetViewer({
               <div>
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <p className="text-xs font-bold text-slate-600">
-                    PDF Preview
+                    {t("PDF Preview")}
                   </p>
 
                   <a

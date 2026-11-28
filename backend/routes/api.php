@@ -108,6 +108,7 @@ Route::prefix('auth')->group(function () {
     // Authenticated auth endpoints.
     Route::middleware(['csrf.api', 'auth.jwt'])->group(function () {
         Route::get('/me', [AuthController::class, 'me'])
+            ->middleware('throttle:120,1')
             ->name('api.auth.me');
 
         Route::post('/logout', [AuthController::class, 'logout'])

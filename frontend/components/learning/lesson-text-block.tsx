@@ -13,6 +13,12 @@ import {
 interface LessonTextBlockProps {
   block: LessonBlock;
   params?: LearningRouteParams;
+  locale?: "en" | "fr";
+}
+
+function lessonText(locale: "en" | "fr", text: string): string {
+  if (locale !== "fr") return text;
+  return text === "Image unavailable" ? "Image indisponible" : text;
 }
 
 function sanitizeHref(href: unknown): string | null {
@@ -39,12 +45,14 @@ function InlineLessonImage({
   alt,
   title,
   params,
+  locale,
 }: {
   assetId: number | null;
   fallbackSrc: string | null;
   alt: string;
   title?: string;
   params?: LearningRouteParams;
+  locale: "en" | "fr";
 }) {
   const [fetchedSrc, setFetchedSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -84,7 +92,7 @@ function InlineLessonImage({
   if (failed) {
     return (
       <div className="my-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-xs text-slate-500">
-        Image unavailable
+        {lessonText(locale, "Image unavailable")}
       </div>
     );
   }
@@ -188,7 +196,8 @@ function renderTextWithMarks(
 function renderNode(
   node: TipTapNode,
   index: number,
-  params?: LearningRouteParams
+  params: LearningRouteParams | undefined,
+  locale: "en" | "fr"
 ): React.ReactNode {
   const key = `node-${index}`;
 
@@ -196,7 +205,7 @@ function renderNode(
     case "paragraph":
       return (
         <p key={key} className="mt-4 text-sm leading-8 text-slate-700 first:mt-0">
-          {node.content?.map((child, i) => renderNode(child, i, params)) ?? null}
+          {node.content?.map((child, i) => renderNode(child, i, params, locale)) ?? null}
         </p>
       );
 
@@ -205,7 +214,7 @@ function renderNode(
       const level = Number.isInteger(rawLevel) && rawLevel >= 1 && rawLevel <= 6
         ? rawLevel
         : 1;
-      const children = node.content?.map((child, i) => renderNode(child, i, params));
+      const children = node.content?.map((child, i) => renderNode(child, i, params, locale));
 
       if (level === 1) {
         return (
@@ -263,7 +272,7 @@ function renderNode(
     case "bulletList":
       return (
         <ul key={key} className="mt-4 list-disc space-y-1 pl-6 text-sm leading-7 text-slate-700">
-          {node.content?.map((child, i) => renderNode(child, i, params))}
+          {node.content?.map((child, i) => renderNode(child, i, params, locale))}
         </ul>
       );
 
@@ -275,7 +284,7 @@ function renderNode(
           start={start}
           className="mt-4 list-decimal space-y-1 pl-6 text-sm leading-7 text-slate-700"
         >
-          {node.content?.map((child, i) => renderNode(child, i, params))}
+          {node.content?.map((child, i) => renderNode(child, i, params, locale))}
         </ol>
       );
     }
@@ -283,7 +292,7 @@ function renderNode(
     case "listItem":
       return (
         <li key={key} className="leading-7">
-          {node.content?.map((child, i) => renderNode(child, i, params))}
+          {node.content?.map((child, i) => renderNode(child, i, params, locale))}
         </li>
       );
 
@@ -293,7 +302,7 @@ function renderNode(
           key={key}
           className="mt-5 border-l-4 border-[#0e8988] bg-slate-50/70 py-2 pl-4 pr-3 italic text-slate-700 rounded-r-xl"
         >
-          {node.content?.map((child, i) => renderNode(child, i, params))}
+          {node.content?.map((child, i) => renderNode(child, i, params, locale))}
         </blockquote>
       );
 
@@ -335,6 +344,7 @@ function renderNode(
           alt={alt}
           title={title}
           params={params}
+          locale={locale}
         />
       );
     }
@@ -346,7 +356,7 @@ function renderNode(
       if (node.content && node.content.length > 0) {
         return (
           <div key={key}>
-            {node.content.map((child, i) => renderNode(child, i, params))}
+            {node.content.map((child, i) => renderNode(child, i, params, locale))}
           </div>
         );
       }
@@ -354,7 +364,7 @@ function renderNode(
   }
 }
 
-export default function LessonTextBlock({ block, params }: LessonTextBlockProps) {
+export default function LessonTextBlock({ block, params, locale = "en" }: LessonTextBlockProps) {
   const content = block.content_json as TipTapDocument | null;
 
   if (!content || !Array.isArray(content.content) || content.content.length === 0) {
@@ -364,7 +374,7 @@ export default function LessonTextBlock({ block, params }: LessonTextBlockProps)
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 shadow-xs">
       <div className="prose prose-slate max-w-none text-slate-700">
-        {content.content.map((node, i) => renderNode(node, i, params))}
+        {content.content.map((node, i) => renderNode(node, i, params, locale))}
       </div>
     </article>
   );

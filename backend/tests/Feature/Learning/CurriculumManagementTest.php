@@ -288,6 +288,13 @@ class CurriculumManagementTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$tokenB}")
             ->postJson("/api/centers/{$centerA->slug}/admin/courses/{$courseA->slug}/modules", ['title' => 'Hack'])
             ->assertStatus(403);
+
+        $this->withHeader('Authorization', "Bearer {$tokenB}")
+            ->getJson("/api/centers/{$centerA->slug}/admin/courses/{$courseA->slug}/preview?version=draft")
+            ->assertStatus(403);
+
+        $this->getJson("/api/centers/{$centerA->slug}/admin/courses/{$courseA->slug}/preview?version=draft")
+            ->assertForbidden();
     }
 
     public function test_locale_aware_outcomes_preserve_other_language_and_existing_ids(): void
@@ -342,6 +349,32 @@ class CurriculumManagementTest extends TestCase
                 'outcomes' => [['content' => 'Bad']],
             ])
             ->assertStatus(422);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", [
+                'outcomes_locale' => 'fr',
+                'outcomes' => [
+                    ['id' => $frOutcome->id, 'locale' => 'fr', 'content' => 'Maîtriser la grammaire', 'is_highlight' => false],
+                    ['locale' => 'fr', 'content' => 'Parler avec confiance', 'is_highlight' => true],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertDatabaseHas('course_outcomes', ['id' => $enOutcomeId, 'locale' => 'en', 'content' => 'Understand basic grammar']);
+        $this->assertDatabaseHas('course_outcomes', ['id' => $frOutcome->id, 'locale' => 'fr', 'content' => 'Maîtriser la grammaire']);
+        $this->assertSame(2, CourseOutcome::query()->where('course_id', $course->id)->where('locale', 'fr')->count());
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", [
+                'title' => 'Updated Course Title',
+                'outcomes_locale' => 'en',
+                'outcomes' => [],
+            ])
+            ->assertOk()
+            ->assertJsonPath('data.title', 'Updated Course Title');
+
+        $this->assertSame(0, CourseOutcome::query()->where('course_id', $course->id)->where('locale', 'en')->count());
+        $this->assertSame(2, CourseOutcome::query()->where('course_id', $course->id)->where('locale', 'fr')->count());
     }
 
     public function test_module_restore_does_not_restore_independently_archived_lesson(): void
@@ -415,6 +448,7 @@ class CurriculumManagementTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$token}")
             ->getJson("{$base}/preview?version=published")
             ->assertOk()
+            ->assertHeader('Cache-Control', 'no-store, private')
             ->assertJsonPath('data.has_draft_changes', true)
             ->assertJsonCount(0, 'data.modules.0.lessons');
 
@@ -427,5 +461,265 @@ class CurriculumManagementTest extends TestCase
         $this->withHeader('Authorization', "Bearer {$token}")
             ->patchJson("{$base}/settings", ['pricing_mode' => 'free', 'price' => 100])
             ->assertStatus(422);
+    }
+
+    public function test_course_lifecycle_and_pricing_validation_are_consistent(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        Course::query()->whereKey($course->id)->update([
+            'status' => 'draft',
+            'published_at' => null,
+            'first_published_at' => null,
+            'pricing_mode' => Course::PRICING_UPON_REQUEST,
+            'price' => null,
+            'currency' => 'MAD',
+        ]);
+        $course = $course->fresh();
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'fixed', 'price' => 120, 'currency' => 'usd'])
+            ->assertOk()
+            ->assertJsonPath('data.currency', 'USD');
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'from', 'price' => 120, 'currency' => 'US1'])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['currency']);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'fixed', 'price' => 120, 'currency' => 'USD'])
+            ->assertOk();
+
+        // Publication must validate the same effective pricing state as a settings update.
+        Course::query()->whereKey($course->id)->update(['currency' => 'US1']);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/publish")
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['currency']);
+        Course::query()->whereKey($course->id)->update(['currency' => 'USD']);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/publish")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'published');
+
+        $firstPublishedAt = Course::findOrFail($course->id)->first_published_at;
+        $this->assertNotNull($firstPublishedAt);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/publish")
+            ->assertStatus(422);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/unpublish")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'draft');
+        $this->assertEquals($firstPublishedAt, Course::findOrFail($course->id)->first_published_at);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/unpublish")
+            ->assertStatus(422);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/archive")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'archived');
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/archive")
+            ->assertStatus(422);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/restore")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'draft');
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/restore")
+            ->assertStatus(422);
+        $this->assertEquals($firstPublishedAt, Course::findOrFail($course->id)->first_published_at);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'free', 'price' => 120])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['price']);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/settings", ['pricing_mode' => 'upon_request', 'price' => 120])
+            ->assertOk()
+            ->assertJsonPath('data.price', null);
+    }
+
+    public function test_archive_origin_is_idempotent_and_ambiguous_legacy_records_stay_archived(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+        $moduleId = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules", ['title' => 'Archive lifecycle'])
+            ->assertStatus(201)
+            ->json('data.id');
+        $lessonA = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$moduleId}/lessons", ['title' => 'Module archived', 'content_type' => 'reading'])
+            ->assertStatus(201)
+            ->json('data.id');
+        $lessonB = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$moduleId}/lessons", ['title' => 'Legacy ambiguous', 'content_type' => 'reading'])
+            ->assertStatus(201)
+            ->json('data.id');
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/modules/{$moduleId}/archive")
+            ->assertOk();
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/lessons/{$lessonA}/archive")
+            ->assertOk();
+        $this->assertSame('module', Lesson::findOrFail($lessonA)->archive_origin);
+
+        // Simulate an ambiguous pre-migration record; null origin is deliberately not restored.
+        Lesson::query()->whereKey($lessonB)->update(['archive_origin' => null]);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/lessons/{$lessonB}/restore")
+            ->assertStatus(422);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$moduleId}/restore")
+            ->assertOk();
+
+        $this->assertSame(Lesson::STATUS_DRAFT, Lesson::findOrFail($lessonA)->status);
+        $this->assertSame(Lesson::STATUS_ARCHIVED, Lesson::findOrFail($lessonB)->status);
+        $this->assertNull(Lesson::findOrFail($lessonA)->archive_origin);
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$moduleId}/restore")
+            ->assertStatus(422);
+        $this->assertSame(Lesson::STATUS_DRAFT, Lesson::findOrFail($lessonA)->status);
+    }
+
+    public function test_published_revision_prevents_unsafe_lesson_type_change_with_empty_draft(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+        $module = CourseModule::factory()->forCourse($course)->create();
+        $lessonId = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$module->id}/lessons", ['title' => 'Protected lesson', 'content_type' => 'reading'])
+            ->assertStatus(201)
+            ->json('data.id');
+        $lesson = Lesson::findOrFail($lessonId);
+        $publishedRevision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'version_number' => 2,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+            'title' => 'Protected lesson',
+            'content_locale' => 'en',
+            'published_at' => now(),
+        ]);
+        Lesson::query()->whereKey($lesson->id)->update([
+            'published_revision_id' => $publishedRevision->id,
+            'status' => Lesson::STATUS_PUBLISHED,
+            'published_at' => now(),
+        ]);
+        $asset = LessonAsset::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'title' => 'Published video',
+            'asset_type' => LessonAsset::TYPE_VIDEO,
+            'video_provider' => LessonAsset::VIDEO_PROVIDER_YOUTUBE,
+            'external_url' => 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            'status' => LessonAsset::STATUS_ACTIVE,
+        ]);
+        $block = LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'lesson_revision_id' => $publishedRevision->id,
+            'block_type' => LessonBlock::TYPE_MEDIA,
+            'sort_order' => 0,
+            'lesson_asset_id' => $asset->id,
+        ]);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->patchJson("{$base}/lessons/{$lesson->id}", ['content_type' => 'exercise'])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['content_type']);
+        $this->assertSame(Lesson::KIND_READING, Lesson::findOrFail($lesson->id)->content_type);
+        $this->assertDatabaseHas('lesson_blocks', ['id' => $block->id, 'lesson_asset_id' => $asset->id]);
+    }
+
+    public function test_never_published_course_preview_is_distinguished(): void
+    {
+        $center = Center::factory()->create();
+        $admin = User::factory()->create(['email_verified_at' => now()]);
+        $membership = CenterUser::query()->create([
+            'center_id' => $center->id,
+            'user_id' => $admin->id,
+            'status' => 'active',
+        ]);
+        $membership->roles()->attach(Role::query()->where('key', 'center_admin')->firstOrFail()->id);
+        $course = Course::factory()->forCenter($center)->create();
+
+        $this->withHeader('Authorization', 'Bearer '.$this->tokenFor($admin))
+            ->getJson("/api/centers/{$center->slug}/admin/courses/{$course->slug}/preview?version=published")
+            ->assertOk()
+            ->assertJsonPath('data.is_never_published', true)
+            ->assertJsonPath('data.has_draft_changes', false);
+    }
+
+    public function test_preview_selects_revision_by_version_and_excludes_archived_content(): void
+    {
+        [$center, $admin, $course] = $this->createCenterAdminCourse();
+        $token = $this->tokenFor($admin);
+        $base = "/api/centers/{$center->slug}/admin/courses/{$course->slug}";
+        $module = CourseModule::factory()->forCourse($course)->published()->create();
+        CourseModule::factory()->forCourse($course)->create(['status' => CourseModule::STATUS_ARCHIVED]);
+
+        $lessonId = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$module->id}/lessons", ['title' => 'Revision selector', 'content_type' => 'reading'])
+            ->assertStatus(201)
+            ->json('data.id');
+        $lesson = Lesson::findOrFail($lessonId);
+        $draftRevisionId = $lesson->draft_revision_id;
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lessonId,
+            'lesson_revision_id' => $draftRevisionId,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => ['type' => 'doc', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Draft revision content']]]]],
+        ]);
+
+        $publishedRevision = LessonRevision::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lessonId,
+            'version_number' => 2,
+            'status' => LessonRevision::STATUS_PUBLISHED,
+            'title' => 'Revision selector',
+            'content_locale' => 'en',
+            'published_at' => now(),
+        ]);
+        LessonBlock::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lessonId,
+            'lesson_revision_id' => $publishedRevision->id,
+            'block_type' => LessonBlock::TYPE_TEXT,
+            'sort_order' => 0,
+            'content_json' => ['type' => 'doc', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Published revision content']]]]],
+        ]);
+        Lesson::query()->whereKey($lessonId)->update([
+            'published_revision_id' => $publishedRevision->id,
+            'status' => Lesson::STATUS_PUBLISHED,
+            'published_at' => now(),
+        ]);
+
+        $archivedLessonId = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("{$base}/modules/{$module->id}/lessons", ['title' => 'Archived content', 'content_type' => 'reading'])
+            ->assertStatus(201)
+            ->json('data.id');
+        Lesson::query()->whereKey($archivedLessonId)->update(['status' => Lesson::STATUS_ARCHIVED]);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->getJson("{$base}/preview?version=published")
+            ->assertOk()
+            ->assertJsonPath('data.has_draft_changes', true)
+            ->assertJsonCount(1, 'data.modules')
+            ->assertJsonCount(1, 'data.modules.0.lessons')
+            ->assertJsonPath('data.modules.0.lessons.0.blocks.0.content_json.content.0.content.0.text', 'Published revision content');
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->getJson("{$base}/preview?version=draft")
+            ->assertOk()
+            ->assertJsonCount(1, 'data.modules')
+            ->assertJsonCount(1, 'data.modules.0.lessons')
+            ->assertJsonPath('data.modules.0.lessons.0.blocks.0.content_json.content.0.content.0.text', 'Draft revision content');
     }
 }

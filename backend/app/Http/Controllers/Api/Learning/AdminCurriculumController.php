@@ -98,6 +98,7 @@ class AdminCurriculumController extends Controller
                     'meta_description' => $course->meta_description,
                     'status' => $course->status,
                     'published_at' => $course->published_at?->toIso8601String(),
+                    'first_published_at' => $course->first_published_at?->toIso8601String(),
                     'updated_at' => $course->updated_at?->toIso8601String(),
                     'language' => $course->language ? [
                         'id' => $course->language->id,
@@ -423,13 +424,18 @@ class AdminCurriculumController extends Controller
             ->orderBy('id')
             ->get();
 
-        $isNeverPublished = $course->published_at === null && $course->status !== 'published';
-
         $hasAnyPublishedContent = $course->status === 'published'
-            || $allActiveModules->contains(static fn (CourseModule $m): bool => $m->status === CourseModule::STATUS_PUBLISHED);
+            || $course->first_published_at !== null
+            || $course->published_at !== null
+            || $allActiveModules->contains(static function (CourseModule $module): bool {
+                return $module->status === CourseModule::STATUS_PUBLISHED
+                    || $module->lessons->contains(static fn (Lesson $lesson): bool => $lesson->isPublished());
+            });
+
+        $isNeverPublished = ! $hasAnyPublishedContent;
 
         $hasDraftChanges = false;
-        if (! $isNeverPublished || $hasAnyPublishedContent) {
+        if (! $isNeverPublished) {
             $hasDraftChanges = $allActiveModules->contains(function (CourseModule $m): bool {
                 if ($m->status === CourseModule::STATUS_DRAFT) {
                     return true;
@@ -505,9 +511,6 @@ class AdminCurriculumController extends Controller
                                         'id' => $asset->id,
                                         'title' => $asset->title,
                                         'asset_type' => $asset->asset_type,
-                                        'video_provider' => $asset->video_provider,
-                                        'provider_asset_id' => $asset->provider_asset_id,
-                                        'external_url' => $asset->external_url,
                                         'original_filename' => $asset->original_filename,
                                         'mime_type' => $asset->mime_type,
                                         'size_bytes' => $asset->size_bytes,
@@ -515,6 +518,7 @@ class AdminCurriculumController extends Controller
                                         'alt_text' => $asset->alt_text,
                                         'caption' => $asset->caption,
                                         'is_downloadable' => (bool) $asset->is_downloadable,
+                                        'sort_order' => (int) $asset->sort_order,
                                         'status' => $asset->status,
                                     ] : null,
                                     'exercise' => $exercise ? [
@@ -526,6 +530,8 @@ class AdminCurriculumController extends Controller
                                         'show_correct_answers_after_submission' => (bool) $exercise->show_correct_answers_after_submission,
                                         'result_settings' => $exercise->resolvedResultSettings(),
                                         'status' => $exercise->status,
+                                        'published_at' => $exercise->published_at?->toIso8601String(),
+                                        'sort_order' => (int) $exercise->sort_order,
                                         'questions' => $exercise->questions->map(static fn ($q): array => [
                                             'id' => $q->id,
                                             'question_type' => $q->question_type,
@@ -613,7 +619,7 @@ class AdminCurriculumController extends Controller
                 Course::PRICING_FREE,
             ])],
             'price' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:999999.99'],
-            'currency' => ['sometimes', 'nullable', 'string', 'max:10'],
+            'currency' => ['sometimes', 'nullable', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
             'is_curriculum_public' => ['sometimes', 'boolean'],
             'meta_title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'meta_description' => ['sometimes', 'nullable', 'string', 'max:500'],
@@ -625,32 +631,7 @@ class AdminCurriculumController extends Controller
             'outcomes.*.is_highlight' => ['sometimes', 'boolean'],
         ]);
 
-        // Enforce pricing consistency
-        $effectivePricingMode = $validated['pricing_mode'] ?? $course->pricing_mode ?? Course::PRICING_UPON_REQUEST;
-        $effectivePrice = array_key_exists('price', $validated) ? $validated['price'] : $course->price;
-        $effectiveCurrency = array_key_exists('currency', $validated) ? $validated['currency'] : $course->currency;
-
-        if (in_array($effectivePricingMode, [Course::PRICING_FIXED, Course::PRICING_FROM], true)) {
-            if ($effectivePrice === null || (float) $effectivePrice <= 0) {
-                throw ValidationException::withMessages([
-                    'price' => ['A positive price is required when pricing mode is fixed or starting from.'],
-                ]);
-            }
-            if (! is_string($effectiveCurrency) || trim($effectiveCurrency) === '') {
-                throw ValidationException::withMessages([
-                    'currency' => ['Currency is required when pricing mode is fixed or starting from.'],
-                ]);
-            }
-        } elseif ($effectivePricingMode === Course::PRICING_FREE) {
-            if (array_key_exists('price', $validated) && $validated['price'] !== null && (float) $validated['price'] > 0) {
-                throw ValidationException::withMessages([
-                    'price' => ['A free course cannot have a non-zero price.'],
-                ]);
-            }
-            $validated['price'] = null;
-        } elseif ($effectivePricingMode === Course::PRICING_UPON_REQUEST) {
-            $validated['price'] = null;
-        }
+        $validated = $this->applyPricingRules($course, $validated);
 
         // Validate outcomes locale & duplicates
         if (array_key_exists('outcomes', $validated)) {
@@ -743,30 +724,32 @@ class AdminCurriculumController extends Controller
     public function publishCourse(Request $request): JsonResponse
     {
         [$center, $course] = $this->resolveCourseContext($request);
+        $course = DB::transaction(function () use ($center, $course): Course {
+            $locked = Course::query()
+                ->forCenter((int) $center->id)
+                ->whereKey($course->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        if ($course->status === 'archived') {
-            throw ValidationException::withMessages([
-                'status' => ['Archived courses must be restored to draft before publishing.'],
-            ]);
-        }
+            if ($locked->status !== 'draft') {
+                throw ValidationException::withMessages([
+                    'status' => ['Only draft courses can be published.'],
+                ]);
+            }
 
-        if (trim((string) $course->title) === '' || trim((string) $course->slug) === '' || ! $course->language_id || ! $course->level_id) {
-            throw ValidationException::withMessages([
-                'course' => ['Course title, slug, language, and level are required before publishing.'],
-            ]);
-        }
+            if (trim((string) $locked->title) === '' || trim((string) $locked->slug) === '' || ! $locked->language_id || ! $locked->level_id) {
+                throw ValidationException::withMessages([
+                    'course' => ['Course title, slug, language, and level are required before publishing.'],
+                ]);
+            }
 
-        if (in_array($course->pricing_mode, [Course::PRICING_FIXED, Course::PRICING_FROM], true)
-            && ($course->price === null || (float) $course->price <= 0)) {
-            throw ValidationException::withMessages([
-                'price' => ['A valid positive price is required before publishing this course.'],
-            ]);
-        }
+            $locked->fill($this->applyPricingRules($locked, []));
+            $locked->status = 'published';
+            $locked->published_at = now();
+            $locked->save();
 
-        $course->update([
-            'status' => 'published',
-            'published_at' => now(),
-        ]);
+            return $locked;
+        });
 
         return response()->json([
             'data' => $this->courseSettingsPayload($center, $course),
@@ -776,11 +759,26 @@ class AdminCurriculumController extends Controller
     public function unpublishCourse(Request $request): JsonResponse
     {
         [$center, $course] = $this->resolveCourseContext($request);
+        $course = DB::transaction(function () use ($center, $course): Course {
+            $locked = Course::query()
+                ->forCenter((int) $center->id)
+                ->whereKey($course->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        $course->update([
-            'status' => 'draft',
-            'published_at' => null,
-        ]);
+            if ($locked->status !== 'published') {
+                throw ValidationException::withMessages([
+                    'status' => ['Only published courses can be unpublished.'],
+                ]);
+            }
+
+            $locked->update([
+                'status' => 'draft',
+                'published_at' => null,
+            ]);
+
+            return $locked;
+        });
 
         return response()->json([
             'data' => $this->courseSettingsPayload($center, $course),
@@ -790,10 +788,23 @@ class AdminCurriculumController extends Controller
     public function archiveCourse(Request $request): JsonResponse
     {
         [$center, $course] = $this->resolveCourseContext($request);
+        $course = DB::transaction(function () use ($center, $course): Course {
+            $locked = Course::query()
+                ->forCenter((int) $center->id)
+                ->whereKey($course->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        $course->update([
-            'status' => 'archived',
-        ]);
+            if ($locked->status === 'archived') {
+                throw ValidationException::withMessages([
+                    'status' => ['Only active courses can be archived.'],
+                ]);
+            }
+
+            $locked->update(['status' => 'archived']);
+
+            return $locked;
+        });
 
         return response()->json([
             'data' => $this->courseSettingsPayload($center, $course),
@@ -803,17 +814,26 @@ class AdminCurriculumController extends Controller
     public function restoreCourse(Request $request): JsonResponse
     {
         [$center, $course] = $this->resolveCourseContext($request);
+        $course = DB::transaction(function () use ($center, $course): Course {
+            $locked = Course::query()
+                ->forCenter((int) $center->id)
+                ->whereKey($course->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        if ($course->status !== 'archived') {
-            throw ValidationException::withMessages([
-                'status' => ['Only archived courses can be restored.'],
+            if ($locked->status !== 'archived') {
+                throw ValidationException::withMessages([
+                    'status' => ['Only archived courses can be restored.'],
+                ]);
+            }
+
+            $locked->update([
+                'status' => 'draft',
+                'published_at' => null,
             ]);
-        }
 
-        $course->update([
-            'status' => 'draft',
-            'published_at' => null,
-        ]);
+            return $locked;
+        });
 
         return response()->json([
             'data' => $this->courseSettingsPayload($center, $course),
@@ -849,11 +869,59 @@ class AdminCurriculumController extends Controller
             'meta_description' => $fresh->meta_description,
             'status' => $fresh->status,
             'published_at' => $fresh->published_at?->toIso8601String(),
+            'first_published_at' => $fresh->first_published_at?->toIso8601String(),
             'updated_at' => $fresh->updated_at?->toIso8601String(),
             'language' => $fresh->language?->only(['id', 'code', 'name', 'native_name']),
             'level' => $fresh->level?->only(['id', 'code', 'name']),
             'outcomes' => $fresh->outcomes->map->only(['id', 'locale', 'content', 'is_highlight', 'sort_order', 'status'])->values(),
         ];
+    }
+
+    /**
+     * Apply the effective pricing contract for settings updates and publication.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @return array<string, mixed>
+     */
+    private function applyPricingRules(Course $course, array $attributes): array
+    {
+        $pricingMode = $attributes['pricing_mode'] ?? $course->pricing_mode ?? Course::PRICING_UPON_REQUEST;
+        $price = array_key_exists('price', $attributes) ? $attributes['price'] : $course->price;
+        $currency = array_key_exists('currency', $attributes) ? $attributes['currency'] : $course->currency;
+
+        if ($currency === null) {
+            unset($attributes['currency']);
+        }
+
+        if (in_array($pricingMode, [Course::PRICING_FIXED, Course::PRICING_FROM], true)) {
+            if ($price === null || ! is_numeric($price) || (float) $price <= 0) {
+                throw ValidationException::withMessages([
+                    'price' => ['A positive price is required when pricing mode is fixed or starting from.'],
+                ]);
+            }
+
+            $normalizedCurrency = is_string($currency) ? strtoupper(trim($currency)) : '';
+            if (! preg_match('/^[A-Z]{3}$/', $normalizedCurrency)) {
+                throw ValidationException::withMessages([
+                    'currency' => ['A valid three-letter currency code is required when pricing mode is fixed or starting from.'],
+                ]);
+            }
+
+            $attributes['price'] = $price;
+            $attributes['currency'] = $normalizedCurrency;
+        } elseif ($pricingMode === Course::PRICING_FREE) {
+            if (array_key_exists('price', $attributes) && $price !== null && is_numeric($price) && (float) $price > 0) {
+                throw ValidationException::withMessages([
+                    'price' => ['A free course cannot have a non-zero price.'],
+                ]);
+            }
+
+            $attributes['price'] = null;
+        } else {
+            $attributes['price'] = null;
+        }
+
+        return $attributes;
     }
 
     private function lessonPayload(Lesson $lesson): array
@@ -892,20 +960,83 @@ class AdminCurriculumController extends Controller
             ? (float) $primaryExercise->questions->sum(static fn ($q): float => (float) $q->points)
             : 0.0;
 
-        $imageBlock = $blocks->first(
+        $thumbnailBlocks = $blocks;
+        if ($lesson->draftRevision !== null && $lesson->publishedRevision !== null) {
+            $thumbnailBlocks = $thumbnailBlocks->concat($lesson->publishedRevision->blocks);
+        }
+
+        $thumbnailVideoBlock = $thumbnailBlocks->first(
+            static fn (LessonBlock $b): bool => $b->block_type === LessonBlock::TYPE_MEDIA
+                && $b->asset !== null
+                && $b->asset->status !== LessonAsset::STATUS_ARCHIVED
+                && $b->asset->asset_type === LessonAsset::TYPE_VIDEO
+        );
+        $imageBlock = $thumbnailBlocks->first(
             static fn (LessonBlock $b): bool => $b->block_type === LessonBlock::TYPE_MEDIA
                 && $b->asset !== null
                 && $b->asset->status !== LessonAsset::STATUS_ARCHIVED
                 && $b->asset->asset_type === LessonAsset::TYPE_IMAGE
         );
 
+        $embeddedImage = null;
+        foreach ($thumbnailBlocks as $block) {
+            if ($block->block_type !== LessonBlock::TYPE_TEXT || ! is_array($block->content_json)) {
+                continue;
+            }
+
+            $nodes = [$block->content_json];
+            while ($nodes !== []) {
+                $node = array_pop($nodes);
+                if (! is_array($node)) {
+                    continue;
+                }
+
+                if (($node['type'] ?? null) === 'image' && is_array($node['attrs'] ?? null)) {
+                    $rawAssetId = $node['attrs']['assetId'] ?? null;
+                    $assetId = is_int($rawAssetId)
+                        ? $rawAssetId
+                        : (is_string($rawAssetId) && ctype_digit($rawAssetId) ? (int) $rawAssetId : null);
+
+                    if ($assetId !== null && $assetId > 0) {
+                        $asset = LessonAsset::query()
+                            ->forCenter((int) $lesson->center_id)
+                            ->where('lesson_id', $lesson->id)
+                            ->whereKey($assetId)
+                            ->where('asset_type', LessonAsset::TYPE_IMAGE)
+                            ->where('status', LessonAsset::STATUS_ACTIVE)
+                            ->first();
+
+                        if ($asset) {
+                            $embeddedImage = [
+                                'asset_id' => $asset->id,
+                                'alt' => is_string($node['attrs']['alt'] ?? null) ? $node['attrs']['alt'] : null,
+                            ];
+                            break 2;
+                        }
+                    }
+                }
+
+                if (is_array($node['content'] ?? null)) {
+                    array_push($nodes, ...$node['content']);
+                }
+            }
+        }
+
+        $hasContentBlocks = collect([
+            $lesson->draftRevision,
+            $lesson->publishedRevision,
+        ])->contains(static fn ($revision): bool => $revision !== null && $revision->blocks->isNotEmpty());
+
         $thumbnailUrl = null;
         $thumbnailAssetId = null;
         $thumbnailAlt = null;
 
-        if ($videoBlock && $videoBlock->asset?->video_provider === LessonAsset::VIDEO_PROVIDER_YOUTUBE && $videoBlock->asset->provider_asset_id) {
-            $thumbnailUrl = 'https://i.ytimg.com/vi/' . rawurlencode($videoBlock->asset->provider_asset_id) . '/hqdefault.jpg';
-            $thumbnailAlt = $videoBlock->asset->title ?: $lesson->title;
+        if ($thumbnailVideoBlock && $thumbnailVideoBlock->asset?->video_provider === LessonAsset::VIDEO_PROVIDER_YOUTUBE && $thumbnailVideoBlock->asset->provider_asset_id) {
+            $thumbnailUrl = 'https://i.ytimg.com/vi/'.rawurlencode($thumbnailVideoBlock->asset->provider_asset_id).'/hqdefault.jpg';
+            $thumbnailAlt = $thumbnailVideoBlock->asset->title ?: $lesson->title;
+        } elseif ($embeddedImage !== null) {
+            $thumbnailAssetId = $embeddedImage['asset_id'];
+            $thumbnailAlt = $embeddedImage['alt'] ?: $lesson->title;
         } elseif ($imageBlock && $imageBlock->asset) {
             $thumbnailAssetId = $imageBlock->asset->id;
             $thumbnailAlt = $imageBlock->asset->alt_text ?: $imageBlock->asset->title ?: $lesson->title;
@@ -918,6 +1049,7 @@ class AdminCurriculumController extends Controller
             'description' => $lesson->description,
             'content_type' => $lesson->content_type,
             'effective_kind' => $effectiveKind,
+            'can_change_content_type' => ! $hasContentBlocks,
             'duration_minutes' => $lesson->duration_minutes,
             'sort_order' => $lesson->sort_order,
             'status' => $lesson->status,

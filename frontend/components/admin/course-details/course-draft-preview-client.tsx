@@ -50,6 +50,12 @@ const PREVIEW_I18N: Record<
     free: string;
     uponRequest: string;
     from: string;
+    publishedMetadataNote: string;
+    draftStatus: string;
+    publishedStatus: string;
+    archivedStatus: string;
+    previewLanguage: string;
+    previewVersion: string;
   }
 > = {
   en: {
@@ -82,6 +88,12 @@ const PREVIEW_I18N: Record<
     free: "Free",
     uponRequest: "Price upon request",
     from: "From",
+    publishedMetadataNote: "Published View uses published Lesson revisions and curriculum structure. Course details on this page reflect current settings because historical Course metadata snapshots are not available.",
+    draftStatus: "Draft",
+    publishedStatus: "Published",
+    archivedStatus: "Archived",
+    previewLanguage: "Preview language",
+    previewVersion: "Preview version",
   },
   fr: {
     loading: "Chargement de l'aperçu privé du cours…",
@@ -113,6 +125,12 @@ const PREVIEW_I18N: Record<
     free: "Gratuit",
     uponRequest: "Tarif sur demande",
     from: "À partir de",
+    publishedMetadataNote: "La vue publiée utilise les révisions des leçons et la structure du programme publiées. Les informations du cours affichées ici reflètent les paramètres actuels, car les instantanés historiques des métadonnées du cours ne sont pas disponibles.",
+    draftStatus: "Brouillon",
+    publishedStatus: "Publié",
+    archivedStatus: "Archivé",
+    previewLanguage: "Langue de l'aperçu",
+    previewVersion: "Version de l'aperçu",
   },
 };
 
@@ -145,12 +163,12 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
   const [version, setVersion] = useState<"draft" | "published">("draft");
   const [uiLocale, setUiLocale] = useState<UiLocale>("en");
   const [data, setData] = useState<AdminCoursePreviewData | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<{ key: string; error?: string } | null>(null);
   const [expandedLessons, setExpandedLessons] = useState<Record<number, boolean>>({});
   const [coverFailed, setCoverFailed] = useState(false);
 
   const t = PREVIEW_I18N[uiLocale];
+  const requestKey = JSON.stringify([centerSlug, courseSlug, version]);
 
   useEffect(() => {
     let active = true;
@@ -172,18 +190,15 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
   useEffect(() => {
     if (!authResolved) return;
     if (!user) {
-      setIsLoading(false);
       return;
     }
 
     let active = true;
-    setIsLoading(true);
-    setError(null);
-    setExpandedLessons({});
     void getAdminCoursePreview(centerSlug, courseSlug, version)
       .then((res) => {
         if (active) {
           setData(res);
+          setLoadState({ key: requestKey });
           // Expand the first lesson automatically for immediate inspection
           const firstLessonId = res.modules[0]?.lessons[0]?.id;
           if (firstLessonId) {
@@ -192,20 +207,22 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
         }
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : "Failed to load preview.");
-      })
-      .finally(() => {
-        if (active) setIsLoading(false);
+        if (active) {
+          setLoadState({
+            key: requestKey,
+            error: err instanceof Error ? err.message : "Failed to load preview.",
+          });
+        }
       });
 
     return () => {
       active = false;
     };
-  }, [authResolved, user, centerSlug, courseSlug, version]);
+  }, [authResolved, user, centerSlug, courseSlug, version, requestKey]);
 
   const backHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}`;
 
-  if (!authResolved || isLoading) {
+  if (!authResolved || (Boolean(user) && loadState?.key !== requestKey)) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <p className="text-sm font-bold text-slate-500">{t.loading}</p>
@@ -213,12 +230,12 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
     );
   }
 
-  if (!user || error) {
+  if (!user || loadState?.error) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
         <div className="max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center">
           <h1 className="text-lg font-black text-slate-900">{t.unavailableTitle}</h1>
-          <p className="mt-2 text-xs text-slate-600">{error || t.unavailableText}</p>
+          <p className="mt-2 text-xs text-slate-600">{loadState?.error || t.unavailableText}</p>
           <Link
             href={backHref}
             className="mt-5 inline-flex min-h-10 items-center rounded-xl bg-[#092443] px-4 text-xs font-bold text-white"
@@ -265,7 +282,7 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div role="group" aria-label="Preview language" className="flex rounded-lg bg-indigo-900 p-0.5">
+            <div role="group" aria-label={t.previewLanguage} className="flex rounded-lg bg-indigo-900 p-0.5">
               {(["en", "fr"] as UiLocale[]).map((loc) => (
                 <button
                   key={loc}
@@ -280,7 +297,7 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
               ))}
             </div>
 
-            <div role="tablist" aria-label="Preview version" className="flex rounded-lg bg-indigo-900 p-0.5">
+            <div role="tablist" aria-label={t.previewVersion} className="flex rounded-lg bg-indigo-900 p-0.5">
               <button
                 type="button"
                 role="tab"
@@ -319,6 +336,8 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
         <section className="grid gap-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-center">
           <div className="aspect-[4/3] overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
             {data.course.cover_image_url && !coverFailed ? (
+              // Course cover URLs are center-managed and vary by tenant at runtime.
+              // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={data.course.cover_image_url}
                 alt={data.course.cover_image_alt || data.course.title}
@@ -335,7 +354,7 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
               <span className="rounded-full bg-slate-100 px-2.5 py-0.5 uppercase text-slate-700">
-                {data.course.status}
+                {data.course.status === "draft" ? t.draftStatus : data.course.status === "published" ? t.publishedStatus : t.archivedStatus}
               </span>
               {data.course.language && (
                 <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-teal-800">
@@ -359,6 +378,12 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
             )}
           </div>
         </section>
+
+        {version === "published" && (
+          <p className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs leading-5 text-indigo-950">
+            {t.publishedMetadataNote}
+          </p>
+        )}
 
         {/* Objectives, Audience, Prerequisites */}
         {(outcomesForLocale.length > 0 || data.course.target_audience || data.course.prerequisites) && (
@@ -480,6 +505,7 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
                                       key={block.id}
                                       block={block}
                                       params={lessonParams}
+                                      locale={uiLocale}
                                     />
                                   );
                                 }
@@ -489,6 +515,8 @@ export default function CourseDraftPreviewClient({ centerSlug, courseSlug }: Pro
                                       key={block.id}
                                       block={block}
                                       params={lessonParams}
+                                      autoPreviewImages
+                                      locale={uiLocale}
                                     />
                                   );
                                 }

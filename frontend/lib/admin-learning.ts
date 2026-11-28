@@ -800,6 +800,7 @@ export interface CurriculumLesson {
   description: string | null;
   content_type: string;
   effective_kind: EffectiveLessonKind;
+  can_change_content_type: boolean;
   duration_minutes: number | null;
   sort_order: number;
   status: "draft" | "published" | "archived";
@@ -858,6 +859,7 @@ export interface CurriculumCourseSummary {
   meta_description: string | null;
   status: "draft" | "published" | "archived";
   published_at: string | null;
+  first_published_at?: string | null;
   updated_at: string | null;
   language: { id: number; code: string; name: string; native_name: string | null } | null;
   level: { id: number; code: string; name: string } | null;
@@ -1075,7 +1077,27 @@ export interface AdminCoursePreviewData {
   preview_version: "draft" | "published";
   is_never_published: boolean;
   has_draft_changes: boolean;
-  course: CurriculumCourseSummary;
+  course: {
+    id: number;
+    title: string;
+    slug: string;
+    short_description: string | null;
+    description: string | null;
+    prerequisites: string | null;
+    target_audience: string | null;
+    study_format: "in_person" | "online" | "hybrid";
+    duration_hours: number | null;
+    cover_image_url: string | null;
+    cover_image_alt: string | null;
+    price: string | null;
+    currency: string | null;
+    pricing_mode: "fixed" | "from" | "upon_request" | "free";
+    is_curriculum_public: boolean;
+    status: "draft" | "published" | "archived";
+    language: { id: number; code: string; name: string; native_name: string | null } | null;
+    level: { id: number; code: string; name: string } | null;
+    outcomes: CurriculumCourseOutcome[];
+  };
   modules: {
     id: number;
     title: string;
@@ -1163,20 +1185,39 @@ export async function triggerCourseRevalidation(
   centerSlug: string,
   courseSlug: string,
   options?: { oldSlug?: string; invalidateListing?: boolean }
-): Promise<void> {
+): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
-    await fetch("/api/revalidate/courses", {
+    const response = await fetch("/api/revalidate/courses", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         centerSlug,
         slug: courseSlug,
         oldSlug: options?.oldSlug,
-        invalidateListing: Boolean(options?.invalidateListing),
+        invalidateListing: options?.invalidateListing === true,
       }),
     });
-  } catch {
-    // Non-blocking best-effort cache invalidation
+
+    if (response.ok) {
+      return { ok: true };
+    }
+
+    const payload: unknown = await response.json().catch(() => null);
+    const message =
+      typeof payload === "object" && payload !== null && "error" in payload &&
+      typeof payload.error === "string"
+        ? payload.error
+        : `Course cache revalidation failed (HTTP ${response.status}).`;
+
+    return { ok: false, message };
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      message: error instanceof Error
+        ? error.message
+        : "Course cache revalidation could not be reached.",
+    };
   }
 }
 
