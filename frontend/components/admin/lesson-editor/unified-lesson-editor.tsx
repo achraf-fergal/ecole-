@@ -1287,9 +1287,30 @@ export default function UnifiedLessonEditor({
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-black text-[#102b4c]">Content Composer</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-black text-[#102b4c]">Content Composer</h2>
+              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-extrabold uppercase text-slate-700">
+                {content.lesson.content_type === "video"
+                  ? "Video Lesson"
+                  : content.lesson.content_type === "reading" || content.lesson.content_type === "text"
+                  ? "Reading Lesson"
+                  : content.lesson.content_type === "resources" || content.lesson.content_type === "file" || content.lesson.content_type === "image"
+                  ? "Resources Lesson"
+                  : content.lesson.content_type === "exercise" || content.lesson.content_type === "quiz"
+                  ? "Exercise Lesson"
+                  : "Legacy Mixed Lesson"}
+              </span>
+            </div>
             <p className="mt-0.5 text-xs text-slate-500">
-              Add rich text, media assets, or assessment exercises to this revision.
+              {content.lesson.content_type === "video"
+                ? "Upload or link your primary video, and optionally add a transcript or supporting notes."
+                : content.lesson.content_type === "reading" || content.lesson.content_type === "text"
+                ? "Author structured reading content with headings, lists, links, and inline images."
+                : content.lesson.content_type === "resources" || content.lesson.content_type === "file" || content.lesson.content_type === "image"
+                ? "Upload and organize downloadable files, documents, audio, or images."
+                : content.lesson.content_type === "exercise" || content.lesson.content_type === "quiz"
+                ? "Build, preview, and publish your graded exercise assessment."
+                : "Add rich text, media assets, or assessment exercises to this revision."}
             </p>
           </div>
 
@@ -1308,14 +1329,25 @@ export default function UnifiedLessonEditor({
 
             <button
               type="button"
-              onClick={() => handleSwitchComposer("media")}
+              onClick={() => {
+                if (content.lesson.content_type === "video") {
+                  setUploadType("video");
+                } else if (content.lesson.content_type === "resources" || content.lesson.content_type === "file") {
+                  setUploadType("file");
+                }
+                handleSwitchComposer("media");
+              }}
               className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
                 composerMode === "media"
                   ? "bg-[#0e8988] text-white"
                   : "border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
               }`}
             >
-              + Add Media
+              {content.lesson.content_type === "video"
+                ? "+ Add Video"
+                : content.lesson.content_type === "resources" || content.lesson.content_type === "file"
+                ? "+ Add Resource"
+                : "+ Add Media"}
             </button>
 
             <button

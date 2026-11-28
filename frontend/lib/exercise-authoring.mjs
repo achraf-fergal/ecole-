@@ -494,9 +494,9 @@ export function validateQuestionDraft(question, questionIndex) {
     errors[`${prefix}.options`] = "True / False must have exactly two options and one correct answer.";
   } else if (
     question?.question_type === "multiple_select"
-    && (options.length < 3 || correctCount < 2 || correctCount >= options.length)
+    && (options.length < 2 || correctCount < 1)
   ) {
-    errors[`${prefix}.options`] = "Multiple select needs at least three options, two correct answers, and one incorrect answer.";
+    errors[`${prefix}.options`] = "Multiple select needs at least two options and at least one correct answer.";
   }
 
   return errors;

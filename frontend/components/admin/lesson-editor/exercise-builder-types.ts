@@ -40,12 +40,54 @@ export type ExerciseDraft = Omit<AdminFullExercise, "questions"> & {
   questions: DraftQuestion[];
 };
 
-export const QUESTION_TYPE_OPTIONS: { value: QuestionType; label: string; shortLabel: string }[] = [
-  { value: "single_choice", label: "Single choice", shortLabel: "Single" },
-  { value: "true_false", label: "True / False", shortLabel: "T/F" },
-  { value: "multiple_select", label: "Multiple select", shortLabel: "Multi" },
-  { value: "short_answer", label: "Short answer", shortLabel: "Short" },
-  { value: "fill_in_the_blanks", label: "Fill in the Blanks", shortLabel: "Blanks" },
+export const QUESTION_TYPE_OPTIONS: {
+  value: QuestionType;
+  label: string;
+  shortLabel: string;
+  description: string;
+  useCase: string;
+  example: string;
+}[] = [
+  {
+    value: "single_choice",
+    label: "Single choice",
+    shortLabel: "Single",
+    description: "One correct answer from a list of options.",
+    useCase: "Vocabulary, grammar rules, comprehension",
+    example: "( ) A  (*) B  ( ) C",
+  },
+  {
+    value: "true_false",
+    label: "True / False",
+    shortLabel: "T/F",
+    description: "Binary statement check with True or False.",
+    useCase: "Quick fact or statement verification",
+    example: "(*) True   ( ) False",
+  },
+  {
+    value: "multiple_select",
+    label: "Multiple select",
+    shortLabel: "Multi",
+    description: "Select all matching options from the list.",
+    useCase: "Identifying multiple valid forms or usages",
+    example: "[x] A  [ ] B  [x] C",
+  },
+  {
+    value: "short_answer",
+    label: "Short answer",
+    shortLabel: "Short",
+    description: "Free-text response matched against accepted answers.",
+    useCase: "Translations, conjugations, short phrases",
+    example: "[ Paris           ]",
+  },
+  {
+    value: "fill_in_the_blanks",
+    label: "Fill in the Blanks",
+    shortLabel: "Blanks",
+    description: "Inline blanks inside a sentence or paragraph.",
+    useCase: "Cloze reading, verb tense in context",
+    example: "I [ ___ ] to school.",
+  },
 ];
 
 export const NORMALIZATION_RULE_DESCRIPTIONS: {

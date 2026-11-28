@@ -264,6 +264,52 @@ class ExercisePreviewAndReleaseTest extends TestCase
             'sort_order' => 2,
         ]);
 
+        $q4 = Question::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_TRUE_FALSE,
+            'prompt' => 'Earth is round',
+            'points' => 1,
+            'sort_order' => 3,
+        ]);
+        $q4True = QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q4->id,
+            'option_text' => 'True',
+            'is_correct' => true,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q4->id,
+            'option_text' => 'False',
+            'is_correct' => false,
+            'sort_order' => 1,
+        ]);
+
+        $q5 = Question::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_MULTIPLE_SELECT,
+            'prompt' => 'Pick vowels',
+            'points' => 2,
+            'sort_order' => 4,
+        ]);
+        $q5A = QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q5->id,
+            'option_text' => 'A',
+            'is_correct' => true,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q5->id,
+            'option_text' => 'B',
+            'is_correct' => false,
+            'sort_order' => 1,
+        ]);
+
         $attemptsBefore = ExerciseAttempt::query()->count();
         $answersBefore = ExerciseAttemptAnswer::query()->count();
         $progressBefore = LessonProgress::query()->count();
@@ -274,14 +320,16 @@ class ExercisePreviewAndReleaseTest extends TestCase
                     ['question_id' => $q1->id, 'selected_option_id' => $q1Correct->id],
                     ['question_id' => $q2->id, 'text_answer' => 'paris'],
                     ['question_id' => $q3->id, 'blank_answers' => ['b1' => 'wrong']],
+                    ['question_id' => $q4->id, 'selected_option_id' => $q4True->id],
+                    ['question_id' => $q5->id, 'selected_option_ids' => [$q5A->id]],
                 ],
             ]);
 
         $res->assertOk()
-            ->assertJsonPath('data.score', 4)
-            ->assertJsonPath('data.max_score', 6)
+            ->assertJsonPath('data.score', 7)
+            ->assertJsonPath('data.max_score', 9)
             ->assertJsonPath('data.passed', true)
-            ->assertJsonPath('data.correct_count', 2)
+            ->assertJsonPath('data.correct_count', 4)
             ->assertJsonPath('data.incorrect_count', 1)
             ->assertJsonPath('data.result_visibility.show_correct_answers', false)
             ->assertJsonMissingPath('data.questions.0.correct_option_id')
@@ -388,5 +436,122 @@ class ExercisePreviewAndReleaseTest extends TestCase
 
         $this->assertSame([], $errors);
         $this->assertCount(0, $queries);
+    }
+
+    public function test_simulate_grade_supports_first_and_final_attempt_scenarios_for_after_final_attempt(): void
+    {
+        [$center, $admin, $course, , $lesson] = $this->createAdminContext();
+        $token = $this->tokenFor($admin);
+
+        $exercise = Exercise::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'title' => 'Scenario Policy Test',
+            'max_attempts' => 3,
+            'passing_score' => 50,
+            'result_settings' => Exercise::normalizeResultSettings([
+                'release_timing' => Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT,
+                'show_score' => true,
+                'show_percentage' => true,
+                'show_pass_fail' => true,
+                'show_question_results' => true,
+                'show_student_answers' => true,
+                'show_correct_answers' => true,
+                'show_explanations' => true,
+                'show_points_per_question' => true,
+            ]),
+            'status' => Exercise::STATUS_DRAFT,
+        ]);
+
+        $q = Question::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_TRUE_FALSE,
+            'prompt' => 'Water is wet',
+            'explanation' => 'Yes.',
+            'points' => 1,
+            'sort_order' => 0,
+        ]);
+        $optTrue = QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q->id,
+            'option_text' => 'True',
+            'is_correct' => true,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q->id,
+            'option_text' => 'False',
+            'is_correct' => false,
+            'sort_order' => 1,
+        ]);
+
+        $firstRes = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("/api/centers/{$center->slug}/admin/courses/{$course->slug}/lessons/{$lesson->id}/exercises/{$exercise->id}/simulate-grade", [
+                'attempt_scenario' => 'first',
+                'answers' => [
+                    ['question_id' => $q->id, 'selected_option_id' => $optTrue->id],
+                ],
+            ]);
+
+        $firstRes->assertOk()
+            ->assertJsonPath('data.attempt_number', 1)
+            ->assertJsonPath('data.attempt_scenario', 'first')
+            ->assertJsonPath('data.result_visibility.results_released', false)
+            ->assertJsonPath('data.score', null)
+            ->assertJsonMissingPath('data.questions.0.correct_option_id');
+
+        $finalRes = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson("/api/centers/{$center->slug}/admin/courses/{$course->slug}/lessons/{$lesson->id}/exercises/{$exercise->id}/simulate-grade", [
+                'attempt_scenario' => 'final',
+                'answers' => [
+                    ['question_id' => $q->id, 'selected_option_id' => $optTrue->id],
+                ],
+            ]);
+
+        $finalRes->assertOk()
+            ->assertJsonPath('data.attempt_number', 3)
+            ->assertJsonPath('data.attempt_scenario', 'final')
+            ->assertJsonPath('data.result_visibility.results_released', true)
+            ->assertJsonPath('data.score', 1)
+            ->assertJsonPath('data.questions.0.correct_option_id', $optTrue->id);
+    }
+
+    public function test_multiple_select_accepts_two_options_and_one_correct_option(): void
+    {
+        [$center, , , , $lesson] = $this->createAdminContext();
+        $exercise = Exercise::query()->create([
+            'center_id' => $center->id,
+            'lesson_id' => $lesson->id,
+            'title' => 'Multi Select Validation',
+            'status' => Exercise::STATUS_DRAFT,
+        ]);
+
+        $q = Question::query()->create([
+            'center_id' => $center->id,
+            'exercise_id' => $exercise->id,
+            'question_type' => Question::TYPE_MULTIPLE_SELECT,
+            'prompt' => 'Select valid',
+            'points' => 1,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q->id,
+            'option_text' => 'Option 1',
+            'is_correct' => true,
+            'sort_order' => 0,
+        ]);
+        QuestionOption::query()->create([
+            'center_id' => $center->id,
+            'question_id' => $q->id,
+            'option_text' => 'Option 2',
+            'is_correct' => false,
+            'sort_order' => 1,
+        ]);
+
+        $loaded = Question::query()->with('options')->findOrFail($q->id);
+        $this->assertSame([], $loaded->optionConfigurationErrors());
     }
 }

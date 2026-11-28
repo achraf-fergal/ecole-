@@ -13,7 +13,11 @@ export type LessonContentType =
   | "image"
   | "file"
   | "quiz"
-  | "mixed";
+  | "mixed"
+  | "reading"
+  | "resources"
+  | "exercise"
+  | "legacy_mixed";
 
 export type LessonProgressStatus =
   | "not_started"

@@ -251,6 +251,7 @@ class AdminExerciseController extends Controller
         $exercise = $this->resolveExercise($lesson, (string) $request->route('exercise'));
 
         $validated = $request->validate([
+            'attempt_scenario' => ['nullable', 'string', 'in:first,final'],
             'answers' => ['present', 'array'],
             'answers.*' => ['array:question_id,selected_option_id,selected_option_ids,text_answer,blank_answers'],
             'answers.*.question_id' => ['required', 'integer', 'min:1'],
@@ -262,7 +263,11 @@ class AdminExerciseController extends Controller
             'answers.*.blank_answers.*' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $result = $this->exerciseService->simulateGrade($exercise, $validated['answers']);
+        $result = $this->exerciseService->simulateGrade(
+            $exercise,
+            $validated['answers'],
+            (string) ($validated['attempt_scenario'] ?? 'first')
+        );
 
         return response()->json([
             'data' => $result,

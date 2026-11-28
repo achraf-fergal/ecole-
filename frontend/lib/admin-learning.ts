@@ -760,7 +760,8 @@ export async function simulateAdminExerciseGrade(
   courseSlug: string,
   lessonId: number | string,
   exerciseId: number,
-  answers: SaveAttemptAnswerPayload[]
+  answers: SaveAttemptAnswerPayload[],
+  attemptScenario: "first" | "final" = "first"
 ): Promise<ExerciseAttemptData> {
   const center = encodeURIComponent(String(centerSlug).trim());
   const course = encodeURIComponent(String(courseSlug).trim());
@@ -769,9 +770,241 @@ export async function simulateAdminExerciseGrade(
 
   const response = await authFetch(endpoint, {
     method: "POST",
-    body: JSON.stringify({ answers }),
+    body: JSON.stringify({ answers, attempt_scenario: attemptScenario }),
   });
 
   return handleResponse<ExerciseAttemptData>(response, "Failed to grade simulated attempt.");
+}
+
+// ---------------------------------------------------------------------------
+// Curriculum Management (Modules & Lessons)
+// ---------------------------------------------------------------------------
+
+export type CanonicalLessonKind = "video" | "reading" | "resources" | "exercise";
+export type EffectiveLessonKind = CanonicalLessonKind | "legacy_mixed";
+
+export interface CurriculumLessonSummary {
+  has_video: boolean;
+  video_duration_seconds: number | null;
+  has_reading_content: boolean;
+  resources_count: number;
+  question_count: number;
+  total_points: number;
+}
+
+export interface CurriculumLesson {
+  id: number;
+  course_module_id: number;
+  title: string;
+  description: string | null;
+  content_type: string;
+  effective_kind: EffectiveLessonKind;
+  duration_minutes: number | null;
+  sort_order: number;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  updated_at: string | null;
+  draft_revision_id: number | null;
+  published_revision_id: number | null;
+  assets_count: number;
+  exercises_count: number;
+  summary: CurriculumLessonSummary;
+}
+
+export interface CurriculumModule {
+  id: number;
+  title: string;
+  description: string | null;
+  sort_order: number;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  lesson_count: number;
+  published_lesson_count: number;
+  lessons: CurriculumLesson[];
+}
+
+export interface CurriculumCourseSummary {
+  id: number;
+  title: string;
+  slug: string;
+  short_description: string | null;
+  description: string | null;
+  cover_image_url: string | null;
+  cover_image_alt: string | null;
+  source_locale: string;
+  study_format: "in_person" | "online" | "hybrid";
+  duration_hours: number | null;
+  status: "draft" | "published" | "archived";
+  published_at: string | null;
+  language: { id: number; code: string; name: string; native_name: string | null } | null;
+  level: { id: number; code: string; name: string } | null;
+}
+
+export interface CurriculumResponse {
+  center: { id: number; name: string; slug: string };
+  course: CurriculumCourseSummary;
+  statistics: {
+    modules: number;
+    lessons: number;
+    published_lessons: number;
+    draft_lessons: number;
+    archived_lessons: number;
+    exercises: number;
+    assets: number;
+  };
+  modules: CurriculumModule[];
+}
+
+function curriculumBase(centerSlug: string, courseSlug: string): string {
+  const center = encodeURIComponent(String(centerSlug).trim());
+  const course = encodeURIComponent(String(courseSlug).trim());
+  return `/api/centers/${center}/admin/courses/${course}`;
+}
+
+export async function getAdminCourseCurriculum(
+  centerSlug: string,
+  courseSlug: string
+): Promise<CurriculumResponse> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/curriculum`);
+  return handleResponse<CurriculumResponse>(response, "Failed to load course curriculum.");
+}
+
+export async function createAdminModule(
+  centerSlug: string,
+  courseSlug: string,
+  payload: { title: string; description?: string | null; status?: "draft" | "published" }
+): Promise<CurriculumModule> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<CurriculumModule>(response, "Failed to create module.");
+}
+
+export async function updateAdminModule(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number,
+  payload: { title?: string; description?: string | null; status?: "draft" | "published" | "archived" }
+): Promise<CurriculumModule> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<CurriculumModule>(response, "Failed to update module.");
+}
+
+export async function reorderAdminModules(
+  centerSlug: string,
+  courseSlug: string,
+  moduleIds: number[]
+): Promise<void> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/order`, {
+    method: "PUT",
+    body: JSON.stringify({ module_ids: moduleIds }),
+  });
+  await handleResponse<null>(response, "Failed to reorder modules.");
+}
+
+export async function archiveAdminModule(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number
+): Promise<void> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}/archive`, {
+    method: "PATCH",
+  });
+  await handleResponse<unknown>(response, "Failed to archive module.");
+}
+
+export async function createAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number,
+  payload: {
+    title: string;
+    description?: string | null;
+    content_type: CanonicalLessonKind;
+    duration_minutes?: number | null;
+  }
+): Promise<CurriculumLesson> {
+  const response = await authFetch(
+    `${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}/lessons`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }
+  );
+  return handleResponse<CurriculumLesson>(response, "Failed to create lesson.");
+}
+
+export async function updateAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number,
+  payload: {
+    title?: string;
+    description?: string | null;
+    content_type?: EffectiveLessonKind;
+    duration_minutes?: number | null;
+    status?: "draft" | "published" | "archived";
+  }
+): Promise<CurriculumLesson> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<CurriculumLesson>(response, "Failed to update lesson.");
+}
+
+export async function moveAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number,
+  targetModuleId: number
+): Promise<CurriculumLesson> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}/move`, {
+    method: "POST",
+    body: JSON.stringify({ target_module_id: targetModuleId }),
+  });
+  return handleResponse<CurriculumLesson>(response, "Failed to move lesson.");
+}
+
+export async function reorderAdminLessons(
+  centerSlug: string,
+  courseSlug: string,
+  moduleId: number,
+  lessonIds: number[]
+): Promise<void> {
+  const response = await authFetch(
+    `${curriculumBase(centerSlug, courseSlug)}/modules/${moduleId}/lessons/order`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ lesson_ids: lessonIds }),
+    }
+  );
+  await handleResponse<null>(response, "Failed to reorder lessons.");
+}
+
+export async function duplicateAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number
+): Promise<CurriculumLesson> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}/duplicate`, {
+    method: "POST",
+  });
+  return handleResponse<CurriculumLesson>(response, "Failed to duplicate lesson.");
+}
+
+export async function archiveAdminLesson(
+  centerSlug: string,
+  courseSlug: string,
+  lessonId: number
+): Promise<void> {
+  const response = await authFetch(`${curriculumBase(centerSlug, courseSlug)}/lessons/${lessonId}/archive`, {
+    method: "PATCH",
+  });
+  await handleResponse<unknown>(response, "Failed to archive lesson.");
 }
 

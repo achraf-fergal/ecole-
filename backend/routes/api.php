@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\Auth\AuthController;
 use App\Http\Controllers\Api\Auth\EmailVerificationController;
 use App\Http\Controllers\Api\Auth\GoogleAuthController;
 use App\Http\Controllers\Api\Auth\PasswordResetController;
+use App\Http\Controllers\Api\Learning\AdminCurriculumController;
 use App\Http\Controllers\Api\Learning\AdminExerciseController;
 use App\Http\Controllers\Api\Learning\CloudflareStreamWebhookController;
 use App\Http\Controllers\Api\Learning\ExerciseAttemptController;
@@ -186,6 +187,58 @@ Route::prefix('centers/{center}')
                 ])
                     ->middleware('csrf.api')
                     ->name('api.tenant.users.destroy');
+
+                /*
+                |--------------------------------------------------------------------------
+                | Curriculum Management (Modules & Lessons)
+                |--------------------------------------------------------------------------
+                */
+
+                Route::prefix('courses/{course}')
+                    ->group(function () {
+                        Route::get('/curriculum', [AdminCurriculumController::class, 'curriculum'])
+                            ->name('api.centers.admin.learning.curriculum.show');
+
+                        Route::post('/modules', [AdminCurriculumController::class, 'storeModule'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.store');
+
+                        Route::put('/modules/order', [AdminCurriculumController::class, 'reorderModules'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.reorder');
+
+                        Route::patch('/modules/{module}', [AdminCurriculumController::class, 'updateModule'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.update');
+
+                        Route::patch('/modules/{module}/archive', [AdminCurriculumController::class, 'archiveModule'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.modules.archive');
+
+                        Route::post('/modules/{module}/lessons', [AdminCurriculumController::class, 'storeLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.store');
+
+                        Route::put('/modules/{module}/lessons/order', [AdminCurriculumController::class, 'reorderLessons'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.reorder');
+
+                        Route::patch('/lessons/{lesson}', [AdminCurriculumController::class, 'updateLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.update');
+
+                        Route::post('/lessons/{lesson}/move', [AdminCurriculumController::class, 'moveLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.move');
+
+                        Route::post('/lessons/{lesson}/duplicate', [AdminCurriculumController::class, 'duplicateLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.duplicate');
+
+                        Route::patch('/lessons/{lesson}/archive', [AdminCurriculumController::class, 'archiveLesson'])
+                            ->middleware('csrf.api')
+                            ->name('api.centers.admin.learning.lessons.archive');
+                    });
 
                 /*
                 |--------------------------------------------------------------------------

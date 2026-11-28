@@ -582,8 +582,16 @@ export default function LearningPageClient({
                   </span>
                 )}
 
-                <span className="capitalize">
-                  {lesson.content_type} lesson
+                <span>
+                  {lesson.content_type === "video"
+                    ? "Video lesson"
+                    : lesson.content_type === "reading" || lesson.content_type === "text"
+                    ? "Reading lesson"
+                    : lesson.content_type === "resources" || lesson.content_type === "file" || lesson.content_type === "image"
+                    ? "Resources lesson"
+                    : lesson.content_type === "exercise" || lesson.content_type === "quiz"
+                    ? "Exercise lesson"
+                    : "Lesson"}
                 </span>
 
                 {lessonData.revision && (

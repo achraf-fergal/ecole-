@@ -1227,6 +1227,40 @@ export default function ExerciseDraftBuilder({
                 </button>
               </div>
 
+              {draft.questions.length > 0 && (() => {
+                const totalPoints = draft.questions.reduce((acc, q) => {
+                  const pts = q.question_type === "fill_in_the_blanks"
+                    ? sumBlankPoints((q.answer_config as BlankAnswerConfigPayload | null)?.blanks ?? [])
+                    : Number(q.points ?? 1);
+                  return acc + (Number.isFinite(pts) ? pts : 0);
+                }, 0);
+                const estMinutes = Math.max(1, Math.ceil(draft.questions.length * 1.5));
+                const typeCounts = QUESTION_TYPE_OPTIONS
+                  .map((t) => ({
+                    label: t.shortLabel,
+                    count: draft.questions.filter((q) => q.question_type === t.value).length,
+                  }))
+                  .filter((item) => item.count > 0);
+                return (
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+                    <div className="flex flex-wrap items-center gap-3 font-semibold">
+                      <span>{draft.questions.length} {draft.questions.length === 1 ? "question" : "questions"}</span>
+                      <span>·</span>
+                      <span>{totalPoints.toFixed(totalPoints % 1 === 0 ? 0 : 2)} total pts</span>
+                      <span>·</span>
+                      <span>~{estMinutes} min est.</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {typeCounts.map((item) => (
+                        <span key={item.label} className="rounded-md bg-white px-2 py-0.5 text-[10px] font-bold text-slate-600 ring-1 ring-slate-200">
+                          {item.label}: {item.count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {draft.questions.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-xs text-slate-500">
                   No questions yet. Click &quot;+ Add question&quot; to create your first question.
@@ -1286,25 +1320,46 @@ export default function ExerciseDraftBuilder({
                         Question {selectedQuestionIndex + 1}
                       </legend>
 
-                      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_160px]">
-                        <label className="text-xs font-semibold text-slate-700">
-                          Question type
-                          <select
-                            value={selectedQuestion.question_type}
-                            onChange={(event) =>
-                              changeQuestionType(selectedQuestionIndex, event.target.value as QuestionType)
-                            }
-                            className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2"
+                      <div className="space-y-3">
+                        <div>
+                          <span className="text-xs font-semibold text-slate-700">Question type</span>
+                          <div
+                            role="radiogroup"
+                            aria-label="Question type"
+                            className="mt-1.5 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"
                           >
-                            {QUESTION_TYPE_OPTIONS.map((type) => (
-                              <option key={type.value} value={type.value}>
-                                {type.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                            {QUESTION_TYPE_OPTIONS.map((type) => {
+                              const isActive = selectedQuestion.question_type === type.value;
+                              return (
+                                <button
+                                  key={type.value}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={isActive}
+                                  onClick={() =>
+                                    changeQuestionType(selectedQuestionIndex, type.value as QuestionType)
+                                  }
+                                  className={`rounded-xl border p-2.5 text-left transition ${
+                                    isActive
+                                      ? "border-[#0e8988] bg-teal-50/70 ring-1 ring-[#0e8988]"
+                                      : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-bold text-slate-900">{type.label}</span>
+                                    <code className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] text-slate-600">
+                                      {type.example}
+                                    </code>
+                                  </div>
+                                  <p className="mt-1 text-[11px] text-slate-600">{type.description}</p>
+                                  <p className="mt-0.5 text-[10px] text-slate-400">Best for: {type.useCase}</p>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
 
-                        <label className="text-xs font-semibold text-slate-700">
+                        <label className="block max-w-[200px] text-xs font-semibold text-slate-700">
                           {selectedQuestion.question_type === "fill_in_the_blanks"
                             ? "Total points (from blanks)"
                             : "Points"}

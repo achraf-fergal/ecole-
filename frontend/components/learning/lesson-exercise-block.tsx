@@ -91,6 +91,7 @@ export default function LessonExerciseBlock({
 
   // Isolated student simulation state (never persists to student attempt tables)
   const [simPhase, setSimPhase] = useState<"start" | "in_progress" | "result">("start");
+  const [simAttemptScenario, setSimAttemptScenario] = useState<"first" | "final">("first");
   const [simQuestionIndex, setSimQuestionIndex] = useState(0);
   const [simAnswers, setSimAnswers] = useState<Record<number, AnswerValue>>({});
   const [simResult, setSimResult] = useState<ExerciseAttemptData | null>(null);
@@ -583,7 +584,8 @@ export default function LessonExerciseBlock({
           params.courseSlug,
           params.lessonId,
           exercise.id,
-          payload
+          payload,
+          simAttemptScenario
         );
         setSimResult(graded);
         setSimPhase("result");
@@ -654,9 +656,40 @@ export default function LessonExerciseBlock({
                   <span>·</span>
                   <span>{exercise.max_attempts ? `Max attempts: ${exercise.max_attempts}` : "Unlimited attempts"}</span>
                 </div>
+                {exercise.max_attempts !== null && exercise.max_attempts > 1 && (
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[11px] font-bold text-slate-700">
+                      Attempt Scenario (simulates release timing policy)
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSimAttemptScenario("first")}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+                          simAttemptScenario === "first"
+                            ? "bg-[#0e8988] text-white shadow-xs"
+                            : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        First Attempt (1 of {exercise.max_attempts})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSimAttemptScenario("final")}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+                          simAttemptScenario === "final"
+                            ? "bg-[#0e8988] text-white shadow-xs"
+                            : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        Final Permitted Attempt ({exercise.max_attempts} of {exercise.max_attempts})
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
               <span className="rounded-full bg-teal-50 px-3 py-1 text-[10px] font-extrabold uppercase text-[#0e8988]">
-                Student Simulation
+                Student Simulation · {simAttemptScenario === "final" && exercise.max_attempts ? `Attempt ${exercise.max_attempts}/${exercise.max_attempts}` : "Attempt 1"}
               </span>
             </div>
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
@@ -706,7 +739,12 @@ export default function LessonExerciseBlock({
                   {exercise.title} — Simulation Result
                 </h4>
                 <p className="mt-1 text-xs text-slate-500">
-                  Graded via server rules with zero database persistence.
+                  Graded via server rules with zero database persistence · Scenario:{" "}
+                  <strong className="text-slate-700">
+                    {simAttemptScenario === "final" && exercise.max_attempts
+                      ? `Final Permitted Attempt (${exercise.max_attempts} of ${exercise.max_attempts})`
+                      : "First Attempt (Attempt 1)"}
+                  </strong>
                 </p>
               </div>
               <button

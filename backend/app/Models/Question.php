@@ -152,16 +152,12 @@ class Question extends Model
         }
 
         if ($this->question_type === self::TYPE_MULTIPLE_SELECT) {
-            if ($optionCount < 3) {
-                $errors[] = 'A multiple-select question requires at least three options.';
+            if ($optionCount < 2) {
+                $errors[] = 'A multiple-select question requires at least two options.';
             }
 
-            if ($correctCount < 2) {
-                $errors[] = 'A multiple-select question requires at least two correct options.';
-            }
-
-            if ($correctCount >= $optionCount) {
-                $errors[] = 'A multiple-select question requires at least one incorrect option.';
+            if ($correctCount < 1) {
+                $errors[] = 'A multiple-select question requires at least one correct option.';
             }
 
             return $errors;

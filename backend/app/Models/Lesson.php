@@ -24,6 +24,23 @@ class Lesson extends Model
 
     public const TYPE_MIXED = 'mixed';
 
+    public const KIND_VIDEO = 'video';
+
+    public const KIND_READING = 'reading';
+
+    public const KIND_RESOURCES = 'resources';
+
+    public const KIND_EXERCISE = 'exercise';
+
+    public const KIND_LEGACY_MIXED = 'legacy_mixed';
+
+    public const CANONICAL_KINDS = [
+        self::KIND_VIDEO,
+        self::KIND_READING,
+        self::KIND_RESOURCES,
+        self::KIND_EXERCISE,
+    ];
+
     public const CONTENT_TYPES = [
         self::TYPE_TEXT,
         self::TYPE_VIDEO,
@@ -31,6 +48,10 @@ class Lesson extends Model
         self::TYPE_FILE,
         self::TYPE_QUIZ,
         self::TYPE_MIXED,
+        self::KIND_READING,
+        self::KIND_RESOURCES,
+        self::KIND_EXERCISE,
+        self::KIND_LEGACY_MIXED,
     ];
 
     public const STATUS_DRAFT = 'draft';

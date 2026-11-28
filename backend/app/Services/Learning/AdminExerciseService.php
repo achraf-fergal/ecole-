@@ -748,7 +748,7 @@ class AdminExerciseService
      *
      * @param  list<array<string, mixed>>  $answersInput
      */
-    public function simulateGrade(Exercise $exercise, array $answersInput): array
+    public function simulateGrade(Exercise $exercise, array $answersInput, string $attemptScenario = 'first'): array
     {
         $exercise->loadMissing(['questions.options']);
 
@@ -759,10 +759,13 @@ class AdminExerciseService
             }
         }
 
+        $isFinalScenario = $attemptScenario === 'final' && $exercise->max_attempts !== null;
+        $simulatedAttemptNumber = $isFinalScenario ? (int) $exercise->max_attempts : 1;
+
         $settings = $exercise->resolvedResultSettings();
         $releaseTiming = $settings['release_timing'] ?? Exercise::RELEASE_TIMING_IMMEDIATELY;
         $resultsReleased = $releaseTiming === Exercise::RELEASE_TIMING_AFTER_FINAL_ATTEMPT
-            ? ($exercise->max_attempts !== null && $exercise->max_attempts <= 1)
+            ? ($exercise->max_attempts !== null && $simulatedAttemptNumber >= (int) $exercise->max_attempts)
             : true;
 
         $showScore = $resultsReleased && (bool) $settings['show_score'];
@@ -941,7 +944,8 @@ class AdminExerciseService
         return [
             'id' => 0,
             'exercise_id' => $exercise->id,
-            'attempt_number' => 1,
+            'attempt_number' => $simulatedAttemptNumber,
+            'attempt_scenario' => $isFinalScenario ? 'final' : 'first',
             'status' => ExerciseAttempt::STATUS_GRADED,
             'passing_score' => $showPassFail ? (float) $exercise->passing_score : null,
             'max_score' => $showScore ? $maxScore : null,

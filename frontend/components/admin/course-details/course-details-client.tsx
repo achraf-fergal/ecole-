@@ -8,9 +8,12 @@ import DashboardLayout from "@/components/dashboard/dashboard-layout";
 import LessonAssetViewer from "@/components/learning/lesson-asset-viewer";
 import {
   AdminLearningApiError,
+  getAdminCourseCurriculum,
   getAdminLessonContent,
   type AdminLessonContent,
+  type CurriculumResponse,
 } from "@/lib/admin-learning";
+import CurriculumBuilder from "./curriculum-builder";
 import {
   apiGetMe,
   type AuthUser,
@@ -246,7 +249,8 @@ export default function CourseDetailsClient({
   const [isChangingStatus, setIsChangingStatus] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [lessonPreviews, setLessonPreviews] = useState<Record<number, LessonPreviewState>>({});
-  const [visibleLessonCounts, setVisibleLessonCounts] = useState<Record<number, number>>({});
+  const [openPreviews, setOpenPreviews] = useState<Record<number, boolean>>({});
+  const [curriculum, setCurriculum] = useState<CurriculumResponse | null>(null);
 
   const savedForm = useMemo(
     () => details ? toCourseForm(details.course) : null,
@@ -274,11 +278,15 @@ export default function CourseDetailsClient({
     setPageError("");
     setDetails(null);
 
-    void apiGetPlatformCourseDetails(centerSlug, courseSlug)
-      .then((result) => {
+    void Promise.all([
+      apiGetPlatformCourseDetails(centerSlug, courseSlug),
+      getAdminCourseCurriculum(centerSlug, courseSlug).catch(() => null),
+    ])
+      .then(([result, curr]) => {
         if (!active) return;
         setDetails(result);
         setForm(toCourseForm(result.course));
+        if (curr) setCurriculum(curr);
       })
       .catch((error: unknown) => {
         if (!active) return;
@@ -290,6 +298,19 @@ export default function CourseDetailsClient({
 
     return () => { active = false; };
   }, [centerSlug, courseSlug, user]);
+
+  async function refreshCurriculum() {
+    const curr = await getAdminCourseCurriculum(centerSlug, details?.course.slug ?? courseSlug);
+    setCurriculum(curr);
+    setDetails((prev) =>
+      prev
+        ? {
+            ...prev,
+            statistics: curr.statistics,
+          }
+        : prev
+    );
+  }
 
   useEffect(() => {
     if (!isDirty) return;
@@ -614,129 +635,63 @@ export default function CourseDetailsClient({
               ))}
             </section>
 
-            <section id="course-content" className="scroll-mt-6 space-y-4">
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <h2 className="text-xl font-black text-[#092443]">Course content</h2>
-                  <p className="mt-1 text-xs text-slate-500">Expand modules and lessons to inspect their current content. Lesson details load only when opened.</p>
-                </div>
-                <span className="text-xs text-slate-500">{details.modules.length} modules</span>
-              </div>
-
-              {details.modules.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
-                  <h3 className="font-bold text-slate-800">No modules yet</h3>
-                  <p className="mt-2 text-xs text-slate-500">Modules and lessons can be added from the course content tools.</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {details.modules.map((module) => {
-                    const visibleCount = visibleLessonCounts[module.id] ?? 12;
-                    const visibleLessons = module.lessons.slice(0, visibleCount);
-                    return (
-                      <details key={module.id} className="group rounded-2xl border border-slate-200 bg-white shadow-sm">
-                        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 p-4 marker:hidden sm:p-5">
-                          <div className="flex min-w-0 items-center gap-3">
-                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#e8f5f3] text-xs font-black text-teal-800">{module.sort_order + 1}</span>
-                            <div className="min-w-0">
-                              <h3 className="break-words text-sm font-black text-[#102b4c]">{module.title}</h3>
-                              <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-slate-500">{module.description || "No module description."}</p>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <StatusBadge status={module.status} />
-                            <span className="rounded-lg bg-slate-100 px-2.5 py-1.5 text-[10px] font-bold text-slate-600">{module.lesson_count} lessons</span>
-                            <span className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold text-emerald-800">{module.published_lesson_count} published</span>
-                            <span aria-hidden="true" className="ml-1 text-slate-400 transition group-open:rotate-180">⌄</span>
-                          </div>
-                        </summary>
-
-                        <div className="border-t border-slate-100 p-3 sm:p-4">
-                          {module.lessons.length === 0 ? (
-                            <p className="rounded-xl bg-slate-50 p-5 text-center text-xs text-slate-500">No lessons in this module.</p>
-                          ) : (
-                            <div className="space-y-2">
-                              {visibleLessons.map((lesson) => {
-                                const preview = lessonPreviews[lesson.id];
-                                const lessonHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(course.slug)}/lessons/${lesson.id}`;
-                                return (
-                                  <details
-                                    key={lesson.id}
-                                    className="rounded-xl border border-slate-200 bg-slate-50/70"
-                                    onToggle={(event) => {
-                                      if ((event.currentTarget as HTMLDetailsElement).open) void loadLessonPreview(lesson.id);
-                                    }}
-                                  >
-                                    <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 p-3 marker:hidden">
-                                      <div className="min-w-0 flex-1">
-                                        <h4 className="break-words text-xs font-extrabold text-[#102b4c]">{lesson.title}</h4>
-                                        <p className="mt-1 line-clamp-2 text-[10px] leading-5 text-slate-500">{lesson.description || "No lesson description."}</p>
-                                      </div>
-                                      <div className="flex flex-wrap items-center gap-1.5">
-                                        <StatusBadge status={lesson.status} />
-                                        {lesson.duration_minutes !== null && <span className="rounded-md bg-white px-2 py-1 text-[10px] text-slate-600">{lesson.duration_minutes} min</span>}
-                                        <span className="rounded-md bg-white px-2 py-1 text-[10px] text-slate-600">{lesson.assets_count} assets</span>
-                                        <span className="rounded-md bg-white px-2 py-1 text-[10px] text-slate-600">{lesson.exercises_count} exercises</span>
-                                      </div>
-                                    </summary>
-
-                                    <div className="border-t border-slate-200 p-3 sm:p-4">
-                                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                                        <p className="text-[10px] text-slate-500">Updated {formatRelativeDate(lesson.updated_at)}</p>
-                                        <Link
-                                          href={lessonHref}
-                                          onClick={(event) => {
-                                            if (isDirty && !window.confirm("Leave this page and discard unsaved course edits?")) event.preventDefault();
-                                          }}
-                                          className="inline-flex min-h-9 items-center rounded-lg bg-[#092443] px-3 text-[10px] font-bold text-white hover:bg-[#123b64]"
-                                        >
-                                          Open lesson editor
-                                        </Link>
-                                      </div>
-
-                                      {!preview || preview.status === "loading" ? (
-                                        <p role="status" className="rounded-xl bg-white p-4 text-xs text-slate-500">Loading lesson content…</p>
-                                      ) : preview.status === "error" ? (
-                                        <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
-                                          <p>{preview.message}</p>
-                                          <button type="button" onClick={() => { setLessonPreviews((current) => { const next = { ...current }; delete next[lesson.id]; return next; }); void loadLessonPreview(lesson.id); }} className="mt-2 font-bold underline">Retry</button>
-                                        </div>
-                                      ) : (() => {
-                                        const revision = preview.content.draft_revision ?? preview.content.published_revision;
-                                        return (
-                                          <div className="space-y-3">
-                                            {revision && <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{revision.status} revision · v{revision.version_number}</p>}
-                                            <LessonBlocksPreview
-                                              blocks={revision?.blocks ?? []}
-                                              centerSlug={centerSlug}
-                                              courseSlug={course.slug}
-                                              lessonId={lesson.id}
-                                            />
-                                          </div>
-                                        );
-                                      })()}
-                                    </div>
-                                  </details>
-                                );
-                              })}
-                              {module.lessons.length > visibleCount && (
-                                <button
-                                  type="button"
-                                  onClick={() => setVisibleLessonCounts((current) => ({ ...current, [module.id]: visibleCount + 12 }))}
-                                  className="min-h-10 w-full rounded-xl border border-dashed border-slate-300 bg-white px-4 text-xs font-bold text-slate-600 hover:border-teal-300 hover:text-teal-800"
-                                >
-                                  Show {Math.min(12, module.lessons.length - visibleCount)} more of {module.lesson_count} lessons
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </details>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+            <CurriculumBuilder
+              centerSlug={centerSlug}
+              courseSlug={course.slug}
+              modules={curriculum?.modules ?? []}
+              onRefresh={refreshCurriculum}
+              openPreviews={openPreviews}
+              onTogglePreview={(lessonId) => {
+                const nextOpen = !openPreviews[lessonId];
+                setOpenPreviews((prev) => ({ ...prev, [lessonId]: nextOpen }));
+                if (nextOpen) {
+                  void loadLessonPreview(lessonId);
+                }
+              }}
+              renderLessonPreview={(lessonId) => {
+                const preview = lessonPreviews[lessonId];
+                if (!preview || preview.status === "loading") {
+                  return <p role="status" className="rounded-xl bg-slate-50 p-4 text-xs text-slate-500">Loading lesson content…</p>;
+                }
+                if (preview.status === "error") {
+                  return (
+                    <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
+                      <p>{preview.message}</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLessonPreviews((current) => {
+                            const next = { ...current };
+                            delete next[lessonId];
+                            return next;
+                          });
+                          void loadLessonPreview(lessonId);
+                        }}
+                        className="mt-2 font-bold underline"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  );
+                }
+                const revision = preview.content.draft_revision ?? preview.content.published_revision;
+                return (
+                  <div className="space-y-3">
+                    {revision && (
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        {revision.status} revision · v{revision.version_number}
+                      </p>
+                    )}
+                    <LessonBlocksPreview
+                      blocks={revision?.blocks ?? []}
+                      centerSlug={centerSlug}
+                      courseSlug={course.slug}
+                      lessonId={lessonId}
+                    />
+                  </div>
+                );
+              }}
+            />
           </>
         )}
       </div>
