@@ -185,6 +185,9 @@ export default function LearningPageClient({
   const lessonHrefPrefix = adminPreviewBasePath
     ? `${adminPreviewBasePath}/lessons`
     : `${courseReturnHref}/learn/lessons`;
+  const lessonHrefSuffix = adminPreviewBasePath ? "/preview" : "";
+  const lessonHref = (targetLessonId: number) =>
+    `${lessonHrefPrefix}/${targetLessonId}${lessonHrefSuffix}`;
 
   const routeParams = useMemo<LearningRouteParams>(
     () => ({
@@ -195,7 +198,7 @@ export default function LearningPageClient({
     [centerSlug, courseSlug, lessonId]
   );
 
-  const currentPath = `${lessonHrefPrefix}/${lessonId}`;
+  const currentPath = lessonHref(lessonId);
 
   const [overview, setOverview] =
     useState<LearningOverview | null>(null);
@@ -443,11 +446,11 @@ export default function LearningPageClient({
     !isAdminPreview && progress.status === "completed";
 
   const previousHref = navigation.previous_lesson
-    ? `${lessonHrefPrefix}/${navigation.previous_lesson.id}`
+    ? lessonHref(navigation.previous_lesson.id)
     : null;
 
   const nextHref = navigation.next_lesson
-    ? `${lessonHrefPrefix}/${navigation.next_lesson.id}`
+    ? lessonHref(navigation.next_lesson.id)
     : null;
 
   return (
@@ -510,6 +513,7 @@ export default function LearningPageClient({
         <LearningSidebar
           overview={overview}
           lessonHrefPrefix={lessonHrefPrefix}
+          lessonHrefSuffix={lessonHrefSuffix}
           courseOverviewHref={courseReturnHref}
           currentLessonId={lesson.id}
           isMobileOpen={isSidebarOpen}

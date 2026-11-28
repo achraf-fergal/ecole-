@@ -517,7 +517,7 @@ function PlatformCenterCoursesContent() {  const params = useParams<{ centerSlug
                         const lessonPreviewHref =
                           `/admin/learning/centers/${encodeURIComponent(centerSlug)}` +
                           `/courses/${encodeURIComponent(selectedCourse.slug)}` +
-                          `/lessons/${lesson.id}`;
+                          `/lessons/${lesson.id}/preview`;
 
                         return (
                           <div
@@ -548,7 +548,7 @@ function PlatformCenterCoursesContent() {  const params = useParams<{ centerSlug
                                 aria-label={`Preview ${lesson.title}`}
                                 className="text-[10px] font-extrabold text-[#0e8988] hover:underline"
                               >
-                                Open lesson →
+                                Preview lesson →
                               </Link>
                             </div>
                           </div>

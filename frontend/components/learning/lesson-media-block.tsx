@@ -11,6 +11,7 @@ interface LessonMediaBlockProps {
   block: LessonBlock;
   params: LearningRouteParams;
   autoPreviewImages?: boolean;
+  autoPreviewVideos?: boolean;
   locale?: "en" | "fr";
 }
 
@@ -18,6 +19,7 @@ export default function LessonMediaBlock({
   block,
   params,
   autoPreviewImages = true,
+  autoPreviewVideos = true,
   locale = "en",
 }: LessonMediaBlockProps) {
   if (!block.asset) {
@@ -26,7 +28,13 @@ export default function LessonMediaBlock({
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-xs">
-      <LessonAssetViewer asset={block.asset} params={params} autoPreviewImages={autoPreviewImages} locale={locale} />
+      <LessonAssetViewer
+        asset={block.asset}
+        params={params}
+        autoPreviewImages={autoPreviewImages}
+        autoPreviewVideos={autoPreviewVideos}
+        locale={locale}
+      />
     </div>
   );
 }

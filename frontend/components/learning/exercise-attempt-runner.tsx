@@ -258,7 +258,6 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             {activeAttempt.questions.map((question, index) => {
               const status = getQuestionCompletionStatus(question, selectedAnswers[question.id]);
               const statusLabel = status === "answered" ? "answered" : status === "partial" ? "incomplete" : "unanswered";
-              const shortLabel = status === "answered" ? "Answered" : status === "partial" ? "Incomplete" : "Open";
               return (
                 <button
                   key={question.id}
@@ -266,17 +265,17 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
                   aria-label={`Question ${index + 1}, ${statusLabel}`}
                   aria-current={index === currentQuestionIndex ? "step" : undefined}
                   onClick={() => navigateToQuestion(index)}
-                  className={`min-w-10 shrink-0 rounded-lg border px-3 py-2 text-xs font-bold ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900" : status === "partial" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-300 bg-white text-slate-700"}`}
+                  className={`inline-flex min-h-10 min-w-10 shrink-0 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${index === currentQuestionIndex ? "border-[#0e8988] bg-teal-50 text-teal-900 ring-2 ring-[#0e8988]/15" : status === "partial" ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100" : "border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50"}`}
                 >
-                  {index + 1} · {shortLabel}
+                  {index + 1}
+                  <span
+                    aria-hidden="true"
+                    className={`h-1.5 w-1.5 rounded-full ${status === "answered" ? "bg-emerald-500" : status === "partial" ? "bg-amber-500" : "bg-slate-300"}`}
+                  />
                 </button>
               );
             })}
           </nav>
-          <div className="mt-3 flex justify-between gap-2">
-            <button type="button" disabled={currentQuestionIndex <= 0} onClick={() => navigateToQuestion(currentQuestionIndex - 1)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Previous question</button>
-            <button type="button" disabled={currentQuestionIndex >= activeAttempt.questions.length - 1} onClick={() => navigateToQuestion(currentQuestionIndex + 1)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Next question</button>
-          </div>
         </div>
 
         <div className="mt-5 space-y-5">
@@ -326,13 +325,32 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
           })}
         </div>
 
-        <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-5">
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <button
+            type="button"
+            disabled={currentQuestionIndex <= 0}
+            onClick={() => navigateToQuestion(currentQuestionIndex - 1)}
+            className="inline-flex min-h-11 flex-1 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none"
+          >
+            Previous question
+          </button>
+          <button
+            type="button"
+            disabled={currentQuestionIndex >= activeAttempt.questions.length - 1}
+            onClick={() => navigateToQuestion(currentQuestionIndex + 1)}
+            className="inline-flex min-h-11 flex-1 items-center justify-center rounded-xl bg-[#102b4c] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#183b64] disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none"
+          >
+            Next question
+          </button>
+        </div>
+
+        <div className="mt-6 flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
           {isSimulation ? (
             <button
               type="button"
               disabled={isSubmitting}
               onClick={onResetSimulation}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+              className="inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
             >
               Reset Simulation
             </button>
@@ -341,7 +359,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
               type="button"
               disabled={isSaving || isSubmitting}
               onClick={() => void handleSaveAnswers()}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+              className="inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
             >
               {isSaving ? "Saving..." : "Save Progress"}
             </button>
@@ -351,7 +369,7 @@ export function ExerciseAttemptRunner(props: ExerciseAttemptRunnerProps) {
             type="button"
             disabled={isSaving || isSubmitting}
             onClick={handleSubmitAttempt}
-            className="rounded-xl bg-[#0e8988] px-5 py-2.5 text-xs font-bold text-white shadow-xs transition hover:bg-[#0c7776] disabled:opacity-50"
+            className="inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-[#0e8988] px-6 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-[#0c7776] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
             {isSubmitting ? "Submitting..." : isSimulation ? "Submit Simulation" : "Submit Assessment"}
           </button>

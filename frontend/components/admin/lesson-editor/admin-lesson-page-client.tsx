@@ -10,6 +10,7 @@ interface AdminLessonPageClientProps {
   lessonId: number;
   adminPreviewBasePath: string;
   adminPreviewReturnHref: string;
+  initialTab?: "editor" | "preview";
 }
 
 export default function AdminLessonPageClient({
@@ -18,8 +19,9 @@ export default function AdminLessonPageClient({
   lessonId,
   adminPreviewBasePath,
   adminPreviewReturnHref,
+  initialTab = "editor",
 }: AdminLessonPageClientProps) {
-  const [activeTab, setActiveTab] = useState<"editor" | "preview">("editor");
+  const [activeTab, setActiveTab] = useState<"editor" | "preview">(initialTab);
 
   return (
     <div className="min-h-screen bg-[#f8fafc]">

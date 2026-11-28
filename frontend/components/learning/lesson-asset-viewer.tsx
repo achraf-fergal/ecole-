@@ -37,6 +37,7 @@ interface LessonAssetViewerProps {
   asset: LearningLessonAsset;
   params: LearningRouteParams;
   autoPreviewImages?: boolean;
+  autoPreviewVideos?: boolean;
   locale?: "en" | "fr";
 }
 
@@ -93,6 +94,7 @@ export default function LessonAssetViewer({
   asset,
   params,
   autoPreviewImages = true,
+  autoPreviewVideos = true,
   locale = "en",
 }: LessonAssetViewerProps) {
   const t = (text: string) => assetViewerText(locale, text);
@@ -105,11 +107,13 @@ export default function LessonAssetViewer({
 
   const isVideo = asset.asset_type === "video";
   const isImage = asset.asset_type === "image";
+  const shouldAutoPreview =
+    (isImage && autoPreviewImages) || (isVideo && autoPreviewVideos);
   const isPdf = asset.mime_type === "application/pdf";
   const isArchived = asset.status === "archived";
 
   useEffect(() => {
-    if (!autoPreviewImages || !isImage || isArchived || access || error) return;
+    if (!shouldAutoPreview || isArchived || access || error) return;
 
     let cancelled = false;
     getLessonAssetAccess({ centerSlug, courseSlug, lessonId }, asset.id)
@@ -135,7 +139,7 @@ export default function LessonAssetViewer({
     return () => {
       cancelled = true;
     };
-  }, [access, asset.id, autoPreviewImages, centerSlug, courseSlug, error, isArchived, isImage, lessonId, locale]);
+  }, [access, asset.id, centerSlug, courseSlug, error, isArchived, lessonId, locale, shouldAutoPreview]);
 
   async function handleOpen() {
     if (isArchived || isLoading || access) return;
@@ -252,7 +256,7 @@ export default function LessonAssetViewer({
             <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
               {t("Archived — restore to preview")}
             </span>
-          ) : !access ? (
+          ) : !access && (!isVideo || !autoPreviewVideos) ? (
             <button
               type="button"
               onClick={handleOpen}
@@ -298,6 +302,21 @@ export default function LessonAssetViewer({
           >
             {t("Retry")}
           </button>
+        </div>
+      )}
+
+      {isVideo && autoPreviewVideos && !access && !isArchived && !error && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="border-t border-slate-100 p-4 sm:p-5"
+        >
+          <div className="flex aspect-video items-center justify-center rounded-xl bg-slate-950 text-sm font-semibold text-white/80">
+            <span className="flex items-center gap-3">
+              <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" aria-hidden="true" />
+              {t("Loading...")}
+            </span>
+          </div>
         </div>
       )}
 

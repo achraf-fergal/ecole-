@@ -10,6 +10,7 @@ import type {
 interface LearningSidebarProps {
   overview: LearningOverview;
   lessonHrefPrefix: string;
+  lessonHrefSuffix?: string;
   courseOverviewHref: string;
   currentLessonId: number;
   isMobileOpen: boolean;
@@ -86,6 +87,7 @@ function formatDuration(minutes: number | null): string {
 export default function LearningSidebar({
   overview,
   lessonHrefPrefix,
+  lessonHrefSuffix = "",
   courseOverviewHref,
   currentLessonId,
   isMobileOpen,
@@ -254,7 +256,7 @@ export default function LearningSidebar({
                         const isActive =
                           lesson.id === currentLessonId;
 
-                        const href = `${lessonHrefPrefix}/${lesson.id}`;
+                        const href = `${lessonHrefPrefix}/${lesson.id}${lessonHrefSuffix}`;
 
                         return (
                           <Link
