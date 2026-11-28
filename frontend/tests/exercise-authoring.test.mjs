@@ -108,10 +108,11 @@ test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, 
 
   // Sum blank points
   assert.equal(sumBlankPoints([{ points: 0.5 }, { points: 1 }, { points: 1.5 }]), 3);
+  assert.equal(sumBlankPoints([{ points: 0.5 }, { points: 0.75 }, { points: 1.25 }]), 2.5);
   assert.equal(sumExercisePoints([
     { question_type: "single_choice", points: 1.25 },
-    { question_type: "fill_in_the_blanks", answer_config: { blanks: [{ points: 0.5 }, { points: 1.25 }] } },
-  ]), 3);
+    { question_type: "fill_in_the_blanks", answer_config: { blanks: [{ points: 0.5 }, { points: 0.75 }] } },
+  ]), 2.5);
 
   // Prompt placeholder validation
   assert.equal(
@@ -132,10 +133,14 @@ test("fill_in_the_blanks draft creation, completion state, payload, unique IDs, 
   );
 });
 
-test("exercise question points must match the configured final total", () => {
+test("exercise points are derived from question points and empty exercises are not publishable", () => {
   const question = createQuestionDraft("true_false");
   question.prompt = "The statement is true.";
   question.points = 3;
+  question.options = [
+    { ...question.options[0], option_text: "True", is_correct: true },
+    { ...question.options[1], option_text: "False", is_correct: false },
+  ];
   const draft = {
     title: "Points total",
     total_points: 2,
@@ -144,11 +149,20 @@ test("exercise question points must match the configured final total", () => {
     questions: [question],
   };
 
-  assert.match(validateExerciseDraft(draft).errors.total_points, /exceeds the exercise total/);
-  draft.total_points = 4;
-  assert.match(validateExerciseDraft(draft).errors.total_points, /must equal the exercise total/);
-  draft.total_points = 3;
+  assert.equal(sumExercisePoints(draft.questions), 3);
+  assert.equal(validateExerciseDraft(draft).valid, true);
   assert.equal(validateExerciseDraft(draft).errors.total_points, undefined);
+
+  draft.total_points = 4;
+  assert.equal(validateExerciseDraft(draft).valid, true);
+
+  const emptyDraft = { ...draft, total_points: 0, questions: [] };
+  assert.match(validateExerciseDraft(emptyDraft).errors.questions, /Add at least one question/);
+  const zeroPointDraft = {
+    ...draft,
+    questions: [{ ...question, points: 0 }],
+  };
+  assert.match(validateExerciseDraft(zeroPointDraft).errors["questions.0.points"], /greater than zero/);
 });
 
 test("FITB inline blank conversion, rename sync, delete sync, and centralized draft validation", () => {

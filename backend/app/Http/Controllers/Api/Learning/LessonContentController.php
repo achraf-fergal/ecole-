@@ -780,6 +780,7 @@ class LessonContentController extends Controller
                 'mime_type' => $asset->mime_type,
                 'size_bytes' => $asset->size_bytes,
                 'duration_seconds' => $asset->duration_seconds,
+                'video_thumbnail_url' => $asset->videoThumbnailUrl(),
                 'alt_text' => $asset->alt_text,
                 'caption' => $asset->caption,
                 'is_downloadable' => $asset->is_downloadable,

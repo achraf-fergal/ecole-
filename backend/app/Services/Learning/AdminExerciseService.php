@@ -52,7 +52,7 @@ class AdminExerciseService
                 'instructions' => $data['instructions'] ?? null,
                 'max_attempts' => $data['max_attempts'] ?? null,
                 'passing_score' => $data['passing_score'] ?? 70.00,
-                'total_points' => $data['total_points'] ?? 1.00,
+                'total_points' => 0.00,
                 'show_correct_answers_after_submission' => (bool) ($data['show_correct_answers_after_submission'] ?? false),
                 'sort_order' => $sortOrder,
                 'status' => Exercise::STATUS_DRAFT,
@@ -94,6 +94,9 @@ class AdminExerciseService
                 'show_correct_answers_after_submission',
                 'sort_order',
             ]));
+            $fillable['total_points'] = $this->answerGrader->minorUnitsToDecimalString(
+                $this->storedQuestionTotalMinorUnits($lockedExercise)
+            );
 
             $lockedExercise->update($fillable);
 
@@ -162,19 +165,12 @@ class AdminExerciseService
                     : $lockedExercise->max_attempts;
                 $effectiveResultSettings = $fillable['result_settings'] ?? $lockedExercise->resolvedResultSettings();
 
-                $effectiveTotalPoints = array_key_exists('total_points', $fillable)
-                    ? $fillable['total_points']
-                    : (isset($data['questions']) && is_array($data['questions'])
-                        ? $this->answerGrader->minorUnitsToDecimalString($this->questionPayloadTotalMinorUnits($data['questions']))
-                        : $lockedExercise->total_points);
                 $questionTotalMinorUnits = isset($data['questions']) && is_array($data['questions'])
                     ? $this->questionPayloadTotalMinorUnits($data['questions'])
                     : $this->storedQuestionTotalMinorUnits($lockedExercise);
-                $this->assertQuestionTotalDoesNotExceedExerciseTotal(
-                    $questionTotalMinorUnits,
-                    $effectiveTotalPoints
+                $fillable['total_points'] = $this->answerGrader->minorUnitsToDecimalString(
+                    $questionTotalMinorUnits
                 );
-                $fillable['total_points'] = $effectiveTotalPoints;
 
                 if (
                     array_key_exists('max_attempts', $fillable)
@@ -226,10 +222,11 @@ class AdminExerciseService
                     'instructions' => $data['instructions'] ?? null,
                     'max_attempts' => $data['max_attempts'] ?? null,
                     'passing_score' => $data['passing_score'] ?? 70.00,
-                    'total_points' => $data['total_points']
-                        ?? (isset($data['questions']) && is_array($data['questions']) && $data['questions'] !== []
-                            ? $this->answerGrader->minorUnitsToDecimalString($this->questionPayloadTotalMinorUnits($data['questions']))
-                            : 1.00),
+                    'total_points' => $this->answerGrader->minorUnitsToDecimalString(
+                        isset($data['questions']) && is_array($data['questions'])
+                            ? $this->questionPayloadTotalMinorUnits($data['questions'])
+                            : 0
+                    ),
                     'show_correct_answers_after_submission' => (bool) $normalizedResultSettings['show_correct_answers'],
                     'result_settings' => $normalizedResultSettings,
                     'sort_order' => $sortOrder,
@@ -237,17 +234,14 @@ class AdminExerciseService
                     'published_at' => null,
                 ]);
 
-                $questionTotalMinorUnits = isset($data['questions']) && is_array($data['questions'])
-                    ? $this->questionPayloadTotalMinorUnits($data['questions'])
-                    : 0;
-                $this->assertQuestionTotalDoesNotExceedExerciseTotal(
-                    $questionTotalMinorUnits,
-                    $exercise->total_points
-                );
             }
 
             if (isset($data['questions']) && is_array($data['questions'])) {
                 $this->syncQuestionsAndOptions($exercise, $data['questions']);
+            }
+
+            if (! isset($data['questions']) || ! is_array($data['questions'])) {
+                $this->recalculateExerciseTotalPoints($exercise);
             }
 
             return $exercise->fresh([
@@ -418,12 +412,25 @@ class AdminExerciseService
                 }
             }
 
-            // Delete questions not present in the payload
-            Question::query()
+            // Delete options first because question_options intentionally restricts question deletion.
+            $deletedQuestionIds = Question::query()
                 ->where('center_id', $lockedExercise->center_id)
                 ->where('exercise_id', $lockedExercise->id)
                 ->whereNotIn('id', $submittedQuestionIds)
-                ->delete();
+                ->pluck('id');
+
+            if ($deletedQuestionIds->isNotEmpty()) {
+                QuestionOption::query()
+                    ->where('center_id', $lockedExercise->center_id)
+                    ->whereIn('question_id', $deletedQuestionIds)
+                    ->delete();
+
+                Question::query()
+                    ->where('center_id', $lockedExercise->center_id)
+                    ->where('exercise_id', $lockedExercise->id)
+                    ->whereIn('id', $deletedQuestionIds)
+                    ->delete();
+            }
 
             foreach ($questionsData as $qIndex => $qData) {
                 $qId = isset($qData['id']) && $qData['id'] !== null ? (int) $qData['id'] : null;
@@ -520,6 +527,8 @@ class AdminExerciseService
                     }
                 }
             }
+
+            $this->recalculateExerciseTotalPoints($lockedExercise);
         });
     }
 
@@ -563,6 +572,12 @@ class AdminExerciseService
             if ($questions->isEmpty()) {
                 throw ValidationException::withMessages([
                     'questions' => ['An exercise must contain at least one question before publication.'],
+                ]);
+            }
+
+            if ($this->answerGrader->decimalToMinorUnits($lockedExercise->total_points) <= 0) {
+                throw ValidationException::withMessages([
+                    'total_points' => ['An exercise must have positive total points before publication.'],
                 ]);
             }
 
@@ -1066,26 +1081,13 @@ class AdminExerciseService
             );
     }
 
-    private function assertQuestionTotalDoesNotExceedExerciseTotal(
-        int $questionTotalMinorUnits,
-        int|float|string $exerciseTotal
-    ): void {
-        $exerciseTotalMinorUnits = $this->answerGrader->decimalToMinorUnits($exerciseTotal);
-        if ($exerciseTotalMinorUnits <= 0) {
-            throw ValidationException::withMessages([
-                'total_points' => ['Exercise total points must be greater than zero.'],
-            ]);
-        }
-
-        if ($questionTotalMinorUnits > $exerciseTotalMinorUnits) {
-            throw ValidationException::withMessages([
-                'total_points' => [sprintf(
-                    'Question points total (%s) exceeds the exercise total (%s).',
-                    $this->answerGrader->minorUnitsToDecimalString($questionTotalMinorUnits),
-                    $this->answerGrader->minorUnitsToDecimalString($exerciseTotalMinorUnits)
-                )],
-            ]);
-        }
+    private function recalculateExerciseTotalPoints(Exercise $exercise): void
+    {
+        $exercise->forceFill([
+            'total_points' => $this->answerGrader->minorUnitsToDecimalString(
+                $this->storedQuestionTotalMinorUnits($exercise)
+            ),
+        ])->save();
     }
 
     private function isSimulatedFillBlankUnanswered(?string $textAnswer): bool

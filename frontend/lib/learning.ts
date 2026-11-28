@@ -210,6 +210,7 @@ export interface LearningLessonAsset {
   mime_type: string | null;
   size_bytes: number | null;
   duration_seconds: number | null;
+  video_thumbnail_url?: string | null;
   alt_text: string | null;
   caption: string | null;
   is_downloadable: boolean;

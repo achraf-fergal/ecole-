@@ -795,7 +795,7 @@ export function FillInTheBlanksEditor({
                 <label className="text-xs font-semibold text-slate-700">Points</label>
                 <input
                   type="number"
-                  min={0.01}
+                  min={0}
                   step={0.01}
                   value={blank.points ?? 1}
                   aria-label={`Blank ${blankIndex + 1} points`}

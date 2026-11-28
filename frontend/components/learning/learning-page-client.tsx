@@ -36,6 +36,7 @@ interface LearningPageClientProps {
   lessonId: number;
   adminPreviewBasePath?: string;
   adminPreviewReturnHref?: string;
+  locale?: "en" | "fr";
 }
 
 type PageError =
@@ -175,6 +176,7 @@ export default function LearningPageClient({
   lessonId,
   adminPreviewBasePath,
   adminPreviewReturnHref,
+  locale = "en",
 }: LearningPageClientProps) {
   const router = useRouter();
 
@@ -186,8 +188,17 @@ export default function LearningPageClient({
     ? `${adminPreviewBasePath}/lessons`
     : `${courseReturnHref}/learn/lessons`;
   const lessonHrefSuffix = adminPreviewBasePath ? "/preview" : "";
+  const previewLocaleQuery = adminPreviewBasePath ? `?locale=${locale}` : "";
   const lessonHref = (targetLessonId: number) =>
-    `${lessonHrefPrefix}/${targetLessonId}${lessonHrefSuffix}`;
+    `${lessonHrefPrefix}/${targetLessonId}${lessonHrefSuffix}${previewLocaleQuery}`;
+  const t = (text: string) => locale === "fr"
+    ? ({
+        "Student Preview Simulation": "Simulation de l'aperçu élève",
+        "Draft Version": "Version brouillon",
+        "Published Version": "Version publiée",
+        "Legacy Lesson": "Leçon héritée",
+      }[text] ?? text)
+    : text;
 
   const routeParams = useMemo<LearningRouteParams>(
     () => ({
@@ -484,8 +495,8 @@ export default function LearningPageClient({
 
           <div className="flex shrink-0 items-center gap-3">
             {isAdminPreview && (
-              <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[9px] font-extrabold uppercase tracking-wide text-indigo-700">
-                Admin Preview
+              <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-extrabold tracking-wide text-indigo-700">
+                {t("Student Preview Simulation")}
               </span>
             )}
 
@@ -556,15 +567,19 @@ export default function LearningPageClient({
 
                 {isAdminPreview ? (
                   <span
-                    className={`rounded-full px-3 py-1.5 text-[10px] font-extrabold uppercase ${
-                      lesson.status === "published"
-                        ? "bg-emerald-50 text-emerald-700"
-                        : lesson.status === "draft"
-                          ? "bg-amber-50 text-amber-700"
-                          : "bg-slate-100 text-slate-600"
+                    className={`rounded-full border px-3 py-1.5 text-xs font-extrabold ${
+                      lessonData.revision?.status === "published"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : lessonData.revision?.status === "draft"
+                          ? "border-amber-200 bg-amber-50 text-amber-800"
+                          : "border-slate-200 bg-slate-100 text-slate-700"
                     }`}
                   >
-                    {lesson.status}
+                    {lessonData.revision?.status === "published"
+                      ? t("Published Version")
+                      : lessonData.revision?.status === "draft"
+                        ? t("Draft Version")
+                        : t("Legacy Lesson")}
                   </span>
                 ) : (
                   <span
@@ -630,6 +645,7 @@ export default function LearningPageClient({
                           key={`block-${block.id}`}
                           block={block}
                           params={routeParams}
+                          locale={locale}
                         />
                       );
                     case "media":
@@ -689,6 +705,7 @@ export default function LearningPageClient({
                             key={asset.id}
                             asset={asset}
                             params={routeParams}
+                            locale={locale}
                           />
                         ))}
                       </div>

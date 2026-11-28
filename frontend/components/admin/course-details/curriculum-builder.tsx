@@ -84,6 +84,8 @@ const STATUS_BADGES: Record<string, string> = {
 };
 
 const BUILDER_FR: Record<string, string> = {
+  "Total points": "Points totaux", "Exercise Ready": "Exercice prêt",
+  "exercise configuration incomplete": "la configuration de l'exercice est incomplète",
   "Video": "Vidéo", "Reading": "Lecture", "Resources": "Ressources", "Exercise": "Exercice",
   "Mixed Content": "Contenu mixte", "Primary video with optional notes": "Vidéo principale avec notes facultatives",
   "Rich text & inline images": "Texte enrichi et images intégrées", "Downloadable files & handouts": "Fichiers et documents téléchargeables",
@@ -122,6 +124,10 @@ const BUILDER_FR: Record<string, string> = {
   "Empty reading draft": "Brouillon de lecture vide", "valid resource(s)": "ressource(s) valide(s)", "question(s)": "question(s)",
   "missing/archived asset(s)": "ressource(s) manquante(s) ou archivée(s)", "Move lesson up": "Monter la leçon", "Move lesson down": "Descendre la leçon",
   Hide: "Masquer", Preview: "Aperçu", Edit: "Modifier", "Open Editor": "Ouvrir l'éditeur", "More actions for ": "Autres actions pour ",
+  "Quick Preview": "Aperçu rapide", "Student Preview": "Aperçu élève", "Hide Quick Preview": "Masquer l'aperçu rapide",
+  "Edit Details": "Modifier les détails", "Needs attention": "À vérifier", "Empty Draft": "Brouillon vide",
+  Ready: "Prêt", Incomplete: "Incomplet", "Passing score": "Score de réussite",
+  "Exercise readiness": "État de l'exercice",
   "Move To…": "Déplacer vers…", Duplicate: "Dupliquer", "Move to:": "Déplacer vers :", "Destination module": "Module de destination",
   Placement: "Emplacement", "First in module": "Première dans le module", "Last in module": "Dernière dans le module",
   "Before lesson…": "Avant la leçon…", "After lesson…": "Après la leçon…", "Anchor lesson": "Leçon de référence",
@@ -1105,7 +1111,8 @@ export default function CurriculumBuilder({
                             const isPreviewOpen = Boolean(openPreviews[lesson.id]);
                             const isMenuOpen = openMenuLessonId === lesson.id;
                             const isLessonArchived = lesson.status === "archived";
-                            const editorHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/lessons/${lesson.id}`;
+                            const editorHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/lessons/${lesson.id}?locale=${locale}`;
+                            const studentPreviewHref = `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses/${encodeURIComponent(courseSlug)}/lessons/${lesson.id}/preview?locale=${locale}`;
                             const videoDur = formatVideoDuration(lesson.summary?.video_duration_seconds ?? null);
 
                             const moveDestinationLessons =
@@ -1197,19 +1204,19 @@ export default function CurriculumBuilder({
                                       ) : (
                                         <>
                                           <div className="flex flex-wrap items-center gap-2">
-                                            <span className={`inline-flex rounded-md border px-2 py-0.5 text-[10px] font-extrabold uppercase ${kindMeta.badgeClass}`}>
+                                            <span className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-extrabold uppercase ${kindMeta.badgeClass}`}>
                                               {t(kindMeta.label)}
                                             </span>
-                                            <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${STATUS_BADGES[lesson.status] ?? STATUS_BADGES.draft}`}>
+                                            <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-bold uppercase ${STATUS_BADGES[lesson.status] ?? STATUS_BADGES.draft}`}>
                                               {t(lesson.status)}
                                             </span>
                                             {lesson.has_draft_changes && lesson.status === "published" && (
-                                              <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-800">
+                                              <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs font-bold text-indigo-800">
                                                 {t("Draft changes")}
                                               </span>
                                             )}
                                             {lesson.duration_minutes ? (
-                                              <span className="text-[11px] font-semibold text-slate-500">
+                                              <span className="text-xs font-semibold text-slate-500">
                                                 {lesson.duration_minutes} {t("min")}
                                               </span>
                                             ) : null}
@@ -1220,7 +1227,7 @@ export default function CurriculumBuilder({
                                           )}
 
                                           {/* Type-specific indicators */}
-                                          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-600">
+                                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-600">
                                             {kind === "video" && (
                                               <span className="rounded-md bg-indigo-50/70 px-2 py-0.5 font-medium text-indigo-800">
                                                 {lesson.summary?.has_video
@@ -1239,9 +1246,29 @@ export default function CurriculumBuilder({
                                               </span>
                                             )}
                                             {kind === "exercise" && (
-                                              <span className="rounded-md bg-emerald-50/70 px-2 py-0.5 font-medium text-emerald-800">
-                                                {lesson.summary?.question_count ?? 0} {t("question(s)")} · {lesson.summary?.total_points ?? 0} pts
-                                              </span>
+                                              <div className="flex flex-wrap items-center gap-2">
+                                                <span className="rounded-md bg-emerald-50/70 px-2 py-0.5 font-semibold text-emerald-900">
+                                                  {lesson.summary?.question_count ?? 0} {t("question(s)")} · {Number(lesson.summary?.total_points ?? 0).toFixed(2)} {t("Total points")}
+                                                </span>
+                                                {lesson.summary?.passing_score !== null && lesson.summary?.passing_score !== undefined && (
+                                                  <span className="rounded-md bg-slate-100 px-2 py-0.5 font-semibold text-slate-700">
+                                                    {t("Passing score")}: {Number(lesson.summary.passing_score).toFixed(0)}%
+                                                  </span>
+                                                )}
+                                                {lesson.summary?.exercise_readiness === "needs_attention" ? (
+                                                  <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900">
+                                                    {t("Needs attention")}: {t("exercise configuration incomplete")}
+                                                  </span>
+                                                ) : lesson.summary?.exercise_readiness === "ready" ? (
+                                                  <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900">
+                                                    {t("Exercise Ready")}
+                                                  </span>
+                                                ) : lesson.summary?.exercise_status ? (
+                                                  <span className="rounded-md border border-slate-200 bg-white px-2 py-0.5 font-semibold text-slate-700">
+                                                    {t(lesson.summary.exercise_status)}
+                                                  </span>
+                                                ) : null}
+                                              </div>
                                             )}
                                             {kind === "legacy_mixed" && (
                                               <span className="rounded-md bg-slate-100 px-2 py-0.5 font-medium text-slate-700">
@@ -1260,7 +1287,7 @@ export default function CurriculumBuilder({
                                   </div>
 
                                   {/* Primary Actions + Overflow Menu (Phase C 5.4) */}
-                                  <div className="relative flex flex-wrap items-center gap-1.5">
+                                  <div className="relative flex min-w-0 max-w-full flex-wrap items-center gap-2">
                                     {!hasActiveFilters && !isLessonArchived && (
                                       <>
                                         <button
@@ -1285,12 +1312,35 @@ export default function CurriculumBuilder({
                                         </button>
                                       </>
                                     )}
+                                    <Link
+                                      href={editorHref}
+                                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-[#0e8988] px-3.5 text-xs font-extrabold text-white hover:bg-[#0b7170] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0e8988]"
+                                    >
+                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4" aria-hidden="true">
+                                        <path d="M4 20h4l11-11a2.1 2.1 0 0 0-4-4L4 16v4Z" />
+                                        <path d="m13.5 6.5 4 4" />
+                                      </svg>
+                                      {t("Open Editor")}
+                                    </Link>
+                                    <Link
+                                      href={studentPreviewHref}
+                                      aria-label={`${t("Student Preview")}: ${lesson.title}`}
+                                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-bold text-indigo-900 hover:bg-indigo-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                                    >
+                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4" aria-hidden="true">
+                                        <path d="M2.5 12s3.2-6 9.5-6 9.5 6 9.5 6-3.2 6-9.5 6-9.5-6-9.5-6Z" />
+                                        <circle cx="12" cy="12" r="2.5" />
+                                      </svg>
+                                      {t("Student Preview")}
+                                    </Link>
                                     <button
                                       type="button"
+                                      aria-expanded={isPreviewOpen}
+                                      aria-controls={`lesson-quick-preview-${lesson.id}`}
                                       onClick={() => onTogglePreview(lesson.id)}
-                                      className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                                      className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
                                     >
-                                      {isPreviewOpen ? t("Hide") : t("Preview")}
+                                      {isPreviewOpen ? t("Hide Quick Preview") : t("Quick Preview")}
                                     </button>
                                     <button
                                       type="button"
@@ -1301,16 +1351,10 @@ export default function CurriculumBuilder({
                                         setEditLessonKind(lesson.effective_kind);
                                         setEditLessonDuration(lesson.duration_minutes ? String(lesson.duration_minutes) : "");
                                       }}
-                                      className="min-h-9 rounded-lg border border-slate-200 px-3 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                                      className="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
                                     >
-                                      {t("Edit")}
+                                      {t("Edit Details")}
                                     </button>
-                                    <Link
-                                      href={editorHref}
-                                      className="inline-flex min-h-9 items-center rounded-lg bg-[#0e8988] px-3.5 text-xs font-extrabold text-white hover:bg-[#0b7170]"
-                                    >
-                                      {t("Open Editor")}
-                                    </Link>
 
                                     <button
                                       type="button"
@@ -1453,7 +1497,7 @@ export default function CurriculumBuilder({
 
                                 {/* On-demand Lesson Preview */}
                                 {isPreviewOpen && (
-                                  <div className="mt-3 border-t border-slate-100 pt-3">
+                                  <div id={`lesson-quick-preview-${lesson.id}`} className="mt-3 border-t border-slate-100 pt-3">
                                     {renderLessonPreview(lesson.id)}
                                   </div>
                                 )}

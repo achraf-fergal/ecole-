@@ -486,6 +486,14 @@ export default function CourseDetailsClient({
   const [curriculumError, setCurriculumError] = useState<string | null>(null);
   const t = (text: string) => courseDetailsText(text, uiLocale);
 
+  useEffect(() => {
+    const locale = new URLSearchParams(window.location.search).get("locale");
+    if (locale === "en" || locale === "fr") {
+      setUiLocale(locale);
+      setOutcomesLocale(locale);
+    }
+  }, []);
+
   const activeCourse = curriculum?.course ?? details?.course ?? null;
   const activeCenter = curriculum?.center ?? details?.center ?? null;
   const activeStats = curriculum?.statistics ?? details?.statistics ?? null;
@@ -834,7 +842,13 @@ export default function CourseDetailsClient({
             <select
               id="course-ui-language"
               value={uiLocale}
-              onChange={(event) => setUiLocale(event.target.value as AdminUiLocale)}
+              onChange={(event) => {
+                const nextLocale = event.target.value as AdminUiLocale;
+                setUiLocale(nextLocale);
+                const query = new URLSearchParams(window.location.search);
+                query.set("locale", nextLocale);
+                router.replace(`${window.location.pathname}?${query.toString()}`, { scroll: false });
+              }}
               className="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700"
             >
               <option value="en">{t("English")}</option>

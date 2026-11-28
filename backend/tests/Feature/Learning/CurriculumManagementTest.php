@@ -191,6 +191,18 @@ class CurriculumManagementTest extends TestCase
             'sort_order' => 0,
             'exercise_id' => $exercise->id,
         ]);
+
+        $curriculum = $this->withHeader('Authorization', "Bearer {$token}")
+            ->getJson("{$base}/curriculum")
+            ->assertOk();
+        $exerciseLessonPayload = collect($curriculum->json('data.modules'))
+            ->flatMap(static fn (array $module) => $module['lessons'])
+            ->firstWhere('id', $lExId);
+        $this->assertSame(1, $exerciseLessonPayload['summary']['question_count']);
+        $this->assertSame(1, $exerciseLessonPayload['summary']['incomplete_question_count']);
+        $this->assertSame('needs_attention', $exerciseLessonPayload['summary']['exercise_readiness']);
+        $this->assertArrayNotHasKey('questions', $exerciseLessonPayload);
+
         $studentUser = User::factory()->create();
         CenterUser::query()->create([
             'center_id' => $center->id,

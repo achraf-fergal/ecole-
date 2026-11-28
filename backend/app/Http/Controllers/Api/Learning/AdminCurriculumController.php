@@ -42,7 +42,61 @@ class AdminCurriculumController extends Controller
                         ->with([
                             'draftRevision.blocks.asset',
                             'publishedRevision.blocks.asset',
-                            'exercises.questions:id,exercise_id,points',
+                            'exercises' => fn ($exercises) => $exercises
+                                ->select(['id', 'center_id', 'lesson_id', 'status', 'passing_score', 'total_points'])
+                                ->withCount('questions')
+                                ->withCount([
+                                    'questions as incomplete_questions_count' => function ($questions): void {
+                                        $questions->where(function ($question): void {
+                                            $question
+                                                ->whereNull('prompt')
+                                                ->orWhereRaw("TRIM(prompt) = ''")
+                                                ->orWhere('points', '<=', 0)
+                                                ->orWhere(function ($choice): void {
+                                                    $choice
+                                                        ->whereIn('question_type', ['single_choice', 'multiple_select'])
+                                                        ->where(function ($configuration): void {
+                                                            $configuration
+                                                                ->has('options', '<', 2)
+                                                                ->orWhereDoesntHave('options', fn ($options) => $options->where('is_correct', true));
+                                                        });
+                                                })
+                                                ->orWhere(function ($trueFalse): void {
+                                                    $trueFalse
+                                                        ->where('question_type', 'true_false')
+                                                        ->where(function ($configuration): void {
+                                                            $configuration
+                                                                ->has('options', '!=', 2)
+                                                                ->orWhereHas(
+                                                                    'options',
+                                                                    fn ($options) => $options->where('is_correct', true),
+                                                                    '!=',
+                                                                    1
+                                                                );
+                                                        });
+                                                })
+                                                ->orWhere(function ($shortAnswer): void {
+                                                    $shortAnswer
+                                                        ->where('question_type', 'short_answer')
+                                                        ->where(function ($configuration): void {
+                                                            $configuration
+                                                                ->whereNull('answer_config')
+                                                                ->orWhereJsonLength('answer_config->accepted_answers', '<', 1);
+                                                        });
+                                                })
+                                                ->orWhere(function ($fillBlanks): void {
+                                                    $fillBlanks
+                                                        ->where('question_type', 'fill_in_the_blanks')
+                                                        ->where(function ($configuration): void {
+                                                            $configuration
+                                                                ->whereNull('answer_config')
+                                                                ->orWhereJsonLength('answer_config->blanks', '<', 1);
+                                                        });
+                                                });
+                                        });
+                                    },
+                                ])
+                                ->withSum('questions', 'points'),
                         ])
                         ->withCount([
                             'assets as assets_count' => fn ($assets) => $assets->where('center_id', $center->id),
@@ -515,6 +569,7 @@ class AdminCurriculumController extends Controller
                                         'mime_type' => $asset->mime_type,
                                         'size_bytes' => $asset->size_bytes,
                                         'duration_seconds' => $asset->duration_seconds,
+                                        'video_thumbnail_url' => $asset->videoThumbnailUrl(),
                                         'alt_text' => $asset->alt_text,
                                         'caption' => $asset->caption,
                                         'is_downloadable' => (bool) $asset->is_downloadable,
@@ -956,10 +1011,24 @@ class AdminCurriculumController extends Controller
             ? $lesson->exercises->firstWhere('id', $exerciseBlock->exercise_id)
             : ($lesson->relationLoaded('exercises') ? $lesson->exercises->first() : null);
 
-        $questionCount = $primaryExercise?->questions?->count() ?? 0;
-        $totalPoints = $primaryExercise?->questions
-            ? (float) $primaryExercise->questions->sum(static fn ($q): float => (float) $q->points)
-            : 0.0;
+        $loadedQuestions = $primaryExercise?->relationLoaded('questions')
+            ? $primaryExercise->questions
+            : null;
+        $questionCount = (int) ($primaryExercise?->questions_count ?? $loadedQuestions?->count() ?? 0);
+        $totalPoints = (float) (
+            $primaryExercise?->questions_sum_points
+            ?? $loadedQuestions?->sum(static fn ($question): float => (float) $question->points)
+            ?? 0
+        );
+        $incompleteQuestionCount = (int) ($primaryExercise?->incomplete_questions_count ?? 0);
+        $storedTotalPoints = (float) ($primaryExercise?->total_points ?? 0);
+        $toMinorUnits = static fn (float $points): int => (int) round($points * 100);
+        $exerciseNeedsAttention = $primaryExercise !== null && (
+            $questionCount === 0
+            || $incompleteQuestionCount > 0
+            || $totalPoints <= 0
+            || $toMinorUnits($totalPoints) !== $toMinorUnits($storedTotalPoints)
+        );
 
         $thumbnailBlocks = $blocks;
         if ($lesson->draftRevision !== null && $lesson->publishedRevision !== null) {
@@ -1071,7 +1140,15 @@ class AdminCurriculumController extends Controller
                 'resources_count' => $resourceCount,
                 'broken_media_count' => $brokenMediaCount,
                 'question_count' => $questionCount,
+                'incomplete_question_count' => $incompleteQuestionCount,
                 'total_points' => $totalPoints,
+                'passing_score' => $primaryExercise !== null ? (float) $primaryExercise->passing_score : null,
+                'exercise_status' => $primaryExercise?->status,
+                'exercise_readiness' => $primaryExercise === null
+                    ? null
+                    : ($exerciseNeedsAttention
+                        ? 'needs_attention'
+                        : ($primaryExercise->status === 'published' ? 'ready' : 'draft')),
             ],
         ];
     }

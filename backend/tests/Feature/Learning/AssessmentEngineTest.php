@@ -262,7 +262,7 @@ class AssessmentEngineTest extends TestCase
         $pubRes->assertJsonValidationErrors(['questions']);
     }
 
-    public function test_question_points_cannot_exceed_final_total_and_must_match_to_publish(): void
+    public function test_exercise_total_points_are_derived_from_questions_and_update_when_questions_change(): void
     {
         $context = $this->createAdminContext();
         $token = $this->tokenFor($context['user']);
@@ -282,40 +282,124 @@ class AssessmentEngineTest extends TestCase
             ],
         ];
 
-        $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
-            'title' => 'Over total points',
+        $created = $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
+            'title' => 'Automatic points total',
             'total_points' => 3,
             'questions' => [$question],
-        ])->assertUnprocessable()->assertJsonValidationErrors(['total_points']);
-        $this->assertDatabaseMissing('exercises', ['title' => 'Over total points']);
-
-        $created = $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
-            'title' => 'Final points validation',
-            'total_points' => 5,
-            'questions' => [$question],
         ])->assertCreated()
-            ->assertJsonPath('data.total_points', 5);
+            ->assertJsonPath('data.total_points', 4);
+
         $exerciseId = (int) $created->json('data.id');
+        $questionId = (int) $created->json('data.questions.0.id');
         $publishRoute = route('api.centers.admin.learning.exercises.publish', [
             ...$routeParameters,
             'exercise' => $exerciseId,
         ]);
 
-        $this->withHeader('Authorization', "Bearer {$token}")->postJson($publishRoute)
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors(['total_points']);
-
-        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+        $updated = $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
             route('api.centers.admin.learning.exercises.update', [
                 ...$routeParameters,
                 'exercise' => $exerciseId,
             ]),
-            ['total_points' => 4]
-        )->assertOk()->assertJsonPath('data.total_points', 4);
+            [
+                'total_points' => 99,
+                'questions' => [[
+                    'id' => $questionId,
+                    'prompt' => $question['prompt'],
+                    'question_type' => $question['question_type'],
+                    'points' => 1.25,
+                ]],
+            ]
+        )->assertOk()->assertJsonPath('data.total_points', 1.25);
 
         $this->withHeader('Authorization', "Bearer {$token}")->postJson($publishRoute)
             ->assertOk()
             ->assertJsonPath('data.status', Exercise::STATUS_PUBLISHED);
+
+        $this->assertDatabaseHas('exercises', [
+            'id' => $exerciseId,
+            'total_points' => '1.25',
+        ]);
+    }
+
+    public function test_fractional_exercise_totals_include_fill_blank_points_and_recalculate_after_question_removal(): void
+    {
+        $context = $this->createAdminContext();
+        $token = $this->tokenFor($context['user']);
+        $routeParameters = [
+            'center' => $context['center']->slug,
+            'course' => $context['course']->slug,
+            'lesson' => $context['lesson']->id,
+        ];
+        $createRoute = route('api.centers.admin.learning.exercises.store', $routeParameters);
+        $fitb = [
+            'prompt' => 'I [blank_1] [blank_2].',
+            'question_type' => Question::TYPE_FILL_IN_THE_BLANKS,
+            'answer_config' => [
+                'blanks' => [
+                    ['id' => 'blank_1', 'points' => 0.50, 'accepted_answers' => ['am']],
+                    ['id' => 'blank_2', 'points' => 0.75, 'accepted_answers' => ['ready']],
+                ],
+            ],
+        ];
+        $choice = [
+            'prompt' => 'Choose the correct answer.',
+            'question_type' => Question::TYPE_SINGLE_CHOICE,
+            'points' => 1.25,
+            'options' => [
+                ['option_text' => 'Correct', 'is_correct' => true],
+                ['option_text' => 'Incorrect', 'is_correct' => false],
+            ],
+        ];
+
+        $created = $this->withHeader('Authorization', "Bearer {$token}")->postJson($createRoute, [
+            'title' => 'Fractional exercise total',
+            'questions' => [$fitb, $choice],
+        ])->assertCreated()
+            ->assertJsonPath('data.total_points', 2.5)
+            ->assertJsonPath('data.questions.0.points', 1.25);
+
+        $exerciseId = (int) $created->json('data.id');
+        $fitbId = (int) $created->json('data.questions.0.id');
+
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            [
+                'questions' => [[
+                    'id' => $fitbId,
+                    ...$fitb,
+                    'answer_config' => [
+                        'blanks' => [
+                            ['id' => 'blank_1', 'points' => 0.25, 'accepted_answers' => ['am']],
+                            ['id' => 'blank_2', 'points' => 0.75, 'accepted_answers' => ['ready']],
+                        ],
+                    ],
+                ], [
+                    'id' => (int) $created->json('data.questions.1.id'),
+                    ...$choice,
+                    'points' => 1.25,
+                ]],
+            ]
+        )->assertOk()->assertJsonPath('data.total_points', 2.25);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            ['questions' => [[
+                'id' => $fitbId,
+                ...$fitb,
+                'answer_config' => [
+                    'blanks' => [
+                        ['id' => 'blank_1', 'points' => 0.25, 'accepted_answers' => ['am']],
+                        ['id' => 'blank_2', 'points' => 0.75, 'accepted_answers' => ['ready']],
+                    ],
+                ],
+            ]]]
+        )->assertOk()->assertJsonPath('data.total_points', 1);
+
+        $this->assertDatabaseHas('exercises', [
+            'id' => $exerciseId,
+            'total_points' => '1.00',
+        ]);
     }
 
     public function test_complete_assessment_workflow_end_to_end(): void
@@ -2114,9 +2198,19 @@ class AssessmentEngineTest extends TestCase
             ['title' => 'Draft language practice']
         )->assertCreated()
             ->assertJsonPath('data.status', Exercise::STATUS_DRAFT)
+            ->assertJsonPath('data.total_points', 0)
             ->assertJsonPath('data.passing_score', 70);
 
         $exerciseId = (int) $created->json('data.id');
+        $this->withHeader('Authorization', "Bearer {$token}")->patchJson(
+            route('api.centers.admin.learning.exercises.update', [...$routeParameters, 'exercise' => $exerciseId]),
+            ['questions' => []]
+        )->assertOk()->assertJsonPath('data.total_points', 0);
+
+        $this->withHeader('Authorization', "Bearer {$token}")->postJson(
+            route('api.centers.admin.learning.exercises.publish', [...$routeParameters, 'exercise' => $exerciseId])
+        )->assertUnprocessable()->assertJsonValidationErrors(['questions']);
+
         $normalization = [
             'case_sensitive' => false,
             'trim_whitespace' => true,
@@ -2353,6 +2447,16 @@ class AssessmentEngineTest extends TestCase
         );
         $this->assertSame(1.0, (float) $attempt->answers->firstWhere('question_id', $shortQuestion->id)->points_possible);
         $this->assertSame('Complete: I ___ ready.', $attempt->answers->firstWhere('question_id', $shortQuestion->id)->prompt_snapshot);
+
+        // A later change to the current exercise configuration cannot rewrite a submitted result.
+        Exercise::query()->whereKey($exerciseId)->update(['total_points' => 40]);
+        Question::query()->whereKey($shortQuestion->id)->update(['points' => 20]);
+        $attempt->refresh();
+        $attempt->load('answers');
+        $this->assertSame(4.0, (float) $attempt->score);
+        $this->assertSame(4.0, (float) $attempt->max_score);
+        $this->assertSame(100.0, (float) $attempt->percentage);
+        $this->assertSame(1.0, (float) $attempt->answers->firstWhere('question_id', $shortQuestion->id)->points_possible);
     }
 
     public function test_admin_service_rejects_duplicate_option_labels_after_unicode_and_whitespace_normalization(): void

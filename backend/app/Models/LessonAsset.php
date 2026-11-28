@@ -159,6 +159,18 @@ class LessonAsset extends Model
             && filled($this->provider_asset_id);
     }
 
+    public function videoThumbnailUrl(): ?string
+    {
+        if (
+            ! $this->isProviderVideo()
+            || $this->video_provider !== self::VIDEO_PROVIDER_YOUTUBE
+        ) {
+            return null;
+        }
+
+        return 'https://i.ytimg.com/vi/'.rawurlencode((string) $this->provider_asset_id).'/hqdefault.jpg';
+    }
+
     /**
      * Check whether the asset has been archived.
      */

@@ -250,6 +250,7 @@ export default function ExerciseDraftBuilder({
     const updated = update(current);
     const nextDraft = {
       ...updated,
+      total_points: sumExercisePoints(updated.questions),
       questions: updated.questions.map((question, sort_order) => ({
         ...question,
         sort_order,
@@ -287,7 +288,7 @@ export default function ExerciseDraftBuilder({
     try {
       const created = await createAdminExercise(centerSlug, courseSlug, lessonId, {
         title: "Untitled Exercise",
-        total_points: 1,
+        total_points: 0,
         passing_score: 70,
       });
       const nextDraft = toDraftExercise(created);
@@ -313,7 +314,7 @@ export default function ExerciseDraftBuilder({
     return {
       title: value.title,
       instructions: value.instructions,
-      total_points: value.total_points,
+      total_points: sumExercisePoints(value.questions),
       passing_score: value.passing_score,
       max_attempts: value.max_attempts,
       show_correct_answers_after_submission: resolvedSettings.show_correct_answers,
@@ -696,7 +697,6 @@ export default function ExerciseDraftBuilder({
   };
 
   const readError = (path: string) => fieldErrors[path];
-  const totalPointsError = readError("total_points") ?? liveValidation?.errors.total_points;
   const editable = draft?.status === "draft";
 
   const selectedQuestionIndex = draft
@@ -762,6 +762,64 @@ export default function ExerciseDraftBuilder({
           </button>
         </div>
       </div>
+
+      {draft && (() => {
+        const assignedPoints = sumExercisePoints(draft.questions);
+        const storedPoints = Number(draft.total_points);
+        const hasLegacyMismatch = Math.round(storedPoints * 100) !== Math.round(assignedPoints * 100);
+        const typeCounts = QUESTION_TYPE_OPTIONS
+          .map((type) => ({
+            label: type.shortLabel,
+            count: draft.questions.filter((question) => question.question_type === type.value).length,
+          }))
+          .filter((item) => item.count > 0);
+        const readiness = hasLegacyMismatch
+          ? "Needs attention"
+          : draft.questions.length === 0
+            ? "Empty Draft"
+            : liveValidation?.valid
+              ? "Ready"
+              : "Incomplete";
+        const readinessStyle = readiness === "Ready"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+          : readiness === "Needs attention"
+            ? "border-rose-200 bg-rose-50 text-rose-800"
+            : "border-amber-200 bg-amber-50 text-amber-800";
+
+        return (
+          <section aria-label="Exercise summary" className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-700">
+                <span><strong>{draft.questions.length}</strong> {draft.questions.length === 1 ? "question" : "questions"}</span>
+                <span><strong>{assignedPoints.toFixed(2)}</strong> total points</span>
+                <span>Passing score: <strong>{Number(draft.passing_score).toFixed(0)}%</strong></span>
+              </div>
+              <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${readinessStyle}`}>
+                {readiness}
+              </span>
+            </div>
+            {typeCounts.length > 0 && (
+              <ul aria-label="Question counts by type" className="mt-3 flex flex-wrap gap-2">
+                {typeCounts.map((item) => (
+                  <li key={item.label} className="rounded-md bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                    {item.label}: {item.count}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {hasLegacyMismatch && (
+              <p role="status" className="mt-3 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs leading-5 text-rose-800">
+                Saved total ({storedPoints.toFixed(2)}) differs from assigned question points ({assignedPoints.toFixed(2)}). Saving recalculates the total from its questions.
+              </p>
+            )}
+            {draft.questions.length === 0 && (
+              <p className="mt-2 text-xs leading-5 text-slate-600">
+                Empty drafts can be saved. Add questions with positive points before publishing.
+              </p>
+            )}
+          </section>
+        );
+      })()}
 
       {error && (
         <div role="alert" className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
@@ -913,35 +971,6 @@ export default function ExerciseDraftBuilder({
                       rows={2}
                       className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2"
                     />
-                  </label>
-
-                  <label className="text-xs font-semibold text-slate-700">
-                    Exercise total points
-                    <input
-                      type="number"
-                      min={0.01}
-                      max={99999999.99}
-                      step={0.01}
-                      value={draft.total_points}
-                      onChange={(event) =>
-                        updateDraft(
-                          (current) => ({ ...current, total_points: Number(event.target.value) }),
-                          ["total_points"]
-                        )
-                      }
-                      aria-invalid={Boolean(totalPointsError)}
-                      aria-describedby={totalPointsError ? "field-error-total-points" : undefined}
-                      data-field-path="total_points"
-                      className={`mt-1 w-full rounded-lg border bg-white p-2 ${totalPointsError ? "border-rose-400" : "border-slate-300"}`}
-                    />
-                    <span className="mt-1 block text-[11px] font-normal text-slate-500">
-                      Questions assigned: {sumExercisePoints(draft.questions)} / {draft.total_points} points
-                    </span>
-                    {totalPointsError && (
-                      <span id="field-error-total-points" className="mt-1 block text-rose-700" role="alert">
-                        {totalPointsError}
-                      </span>
-                    )}
                   </label>
 
                   <label className="text-xs font-semibold text-slate-700">
@@ -1398,7 +1427,7 @@ export default function ExerciseDraftBuilder({
                             : "Points"}
                           <input
                             type="number"
-                            min={0.01}
+                            min={0}
                             step={0.01}
                             readOnly={selectedQuestion.question_type === "fill_in_the_blanks"}
                             aria-readonly={

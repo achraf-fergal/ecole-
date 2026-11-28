@@ -792,7 +792,11 @@ export interface CurriculumLessonSummary {
   resources_count: number;
   broken_media_count?: number;
   question_count: number;
+  incomplete_question_count?: number;
   total_points: number;
+  passing_score?: number | null;
+  exercise_status?: "draft" | "published" | "archived" | null;
+  exercise_readiness?: "ready" | "draft" | "needs_attention" | null;
 }
 
 export interface CurriculumLesson {

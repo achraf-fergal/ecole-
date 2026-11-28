@@ -19,6 +19,7 @@ interface PageProps {
     courseSlug: string;
     lessonId: string;
   }>;
+  searchParams?: Promise<{ locale?: string }>;
 }
 
 function isValidSlug(value: string): boolean {
@@ -41,12 +42,15 @@ function isValidLessonId(value: string): boolean {
 
 export default async function AdminLearningLessonPreviewPage({
   params,
+  searchParams,
 }: PageProps) {
   const {
     centerSlug,
     courseSlug,
     lessonId,
   } = await params;
+  const query: { locale?: string } = searchParams ? await searchParams : {};
+  const locale = query.locale === "fr" ? "fr" : "en";
 
   if (
     !isValidSlug(centerSlug) ||
@@ -62,7 +66,7 @@ export default async function AdminLearningLessonPreviewPage({
 
   const adminPreviewReturnHref =
     `/admin/learning/centers/${encodeURIComponent(centerSlug)}` +
-    `/courses`;
+    `/courses/${encodeURIComponent(courseSlug)}?locale=${locale}`;
 
   return (
     <AdminLessonPageClient
@@ -71,6 +75,7 @@ export default async function AdminLearningLessonPreviewPage({
       lessonId={Number(lessonId)}
       adminPreviewBasePath={adminPreviewBasePath}
       adminPreviewReturnHref={adminPreviewReturnHref}
+      locale={locale}
     />
   );
 }

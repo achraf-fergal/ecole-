@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   downloadLessonAsset,
@@ -49,6 +49,8 @@ const ASSET_VIEWER_FR: Record<string, string> = {
   "Archived — restore to preview": "Archivé — restaurez pour afficher l'aperçu",
   "Loading...": "Chargement…",
   "Load video": "Charger la vidéo",
+  "Video preview": "Aperçu vidéo",
+  "Preparing video player...": "Préparation du lecteur vidéo...",
   "View image": "Afficher l'image",
   "Open resource": "Ouvrir la ressource",
   "Downloading...": "Téléchargement…",
@@ -99,18 +101,51 @@ export default function LessonAssetViewer({
 }: LessonAssetViewerProps) {
   const t = (text: string) => assetViewerText(locale, text);
   const { centerSlug, courseSlug, lessonId } = params;
+  const videoPreviewRef = useRef<HTMLDivElement | null>(null);
   const [access, setAccess] = useState<LessonAssetAccess | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [error, setError] = useState("");
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [failedVideoThumbnailUrl, setFailedVideoThumbnailUrl] = useState<string | null>(null);
+  const [isVideoNearViewport, setIsVideoNearViewport] = useState(false);
 
   const isVideo = asset.asset_type === "video";
   const isImage = asset.asset_type === "image";
   const shouldAutoPreview =
-    (isImage && autoPreviewImages) || (isVideo && autoPreviewVideos);
+    (isImage && autoPreviewImages) || (isVideo && autoPreviewVideos && isVideoNearViewport);
   const isPdf = asset.mime_type === "application/pdf";
   const isArchived = asset.status === "archived";
+
+  const videoThumbnailFailed = Boolean(
+    asset.video_thumbnail_url && failedVideoThumbnailUrl === asset.video_thumbnail_url
+  );
+
+  useEffect(() => {
+    if (!isVideo || !autoPreviewVideos || isArchived || access || isVideoNearViewport) return;
+
+    const element = videoPreviewRef.current;
+    if (!element) return;
+
+    const IntersectionObserverConstructor = window.IntersectionObserver;
+    if (typeof IntersectionObserverConstructor !== "function") {
+      const timer = window.setTimeout(() => setIsVideoNearViewport(true), 0);
+      return () => window.clearTimeout(timer);
+    }
+
+    const observer = new IntersectionObserverConstructor(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsVideoNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "320px 0px" }
+    );
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [access, autoPreviewVideos, isArchived, isVideo, isVideoNearViewport]);
 
   useEffect(() => {
     if (!shouldAutoPreview || isArchived || access || error) return;
@@ -305,17 +340,44 @@ export default function LessonAssetViewer({
         </div>
       )}
 
-      {isVideo && autoPreviewVideos && !access && !isArchived && !error && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="border-t border-slate-100 p-4 sm:p-5"
-        >
-          <div className="flex aspect-video items-center justify-center rounded-xl bg-slate-950 text-sm font-semibold text-white/80">
-            <span className="flex items-center gap-3">
-              <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" aria-hidden="true" />
-              {t("Loading...")}
-            </span>
+      {isVideo && !access && !isArchived && (
+        <div className="border-t border-slate-100 p-4 sm:p-5">
+          <div
+            ref={videoPreviewRef}
+            role="group"
+            aria-label={`${title} — ${t("Video preview")}${duration ? `, ${duration}` : ""}`}
+            aria-busy={autoPreviewVideos && isVideoNearViewport && !error}
+            className="relative isolate flex aspect-video items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-[#123b64] via-[#071d36] to-black text-white"
+          >
+            {asset.video_thumbnail_url && !videoThumbnailFailed && (
+              // This is a provider thumbnail URL constructed by the API from validated YouTube metadata.
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={asset.video_thumbnail_url}
+                alt=""
+                aria-hidden="true"
+                loading="lazy"
+                onError={() => setFailedVideoThumbnailUrl(asset.video_thumbnail_url ?? null)}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-black/20" aria-hidden="true" />
+            <div className="relative flex flex-col items-center gap-3 px-5 text-center">
+              <span className="flex h-14 w-14 items-center justify-center rounded-full border border-white/50 bg-black/40 shadow-lg backdrop-blur-sm" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor" className="ml-1 h-6 w-6">
+                  <path d="M7 4.8c0-.8.9-1.3 1.6-.9l11 7.1a1.2 1.2 0 0 1 0 2L8.6 20.1c-.7.4-1.6-.1-1.6-.9V4.8Z" />
+                </svg>
+              </span>
+              <span className="rounded-full border border-white/30 bg-black/40 px-3 py-1.5 text-xs font-bold backdrop-blur-sm">
+                {t("Video preview")}{duration ? ` · ${duration}` : ""}
+              </span>
+            </div>
+            {autoPreviewVideos && isVideoNearViewport && !error && (
+              <span role="status" className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-full bg-black/65 px-3 py-1.5 text-xs font-semibold text-white">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/35 border-t-white" aria-hidden="true" />
+                {t("Preparing video player...")}
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -438,6 +500,8 @@ export default function LessonAssetViewer({
                   access={access}
                   title={title}
                   caption={asset.caption}
+                  posterUrl={asset.video_thumbnail_url}
+                  locale={locale}
                 />
                 <dl className="flex flex-wrap gap-x-8 gap-y-3 rounded-xl bg-slate-50 p-4 text-xs">
                   <div>

@@ -12,7 +12,16 @@ interface LessonVideoPlayerProps {
   access: VideoAccess;
   title: string;
   caption: string | null;
+  posterUrl?: string | null;
+  locale?: "en" | "fr";
 }
+
+const VIDEO_PLAYER_FR: Record<string, string> = {
+  "This video provider returned an invalid playback link.": "Le fournisseur vidéo a renvoyé un lien de lecture invalide.",
+  "Loading video…": "Chargement de la vidéo…",
+  "Unable to load the video player.": "Impossible de charger le lecteur vidéo.",
+  "Retry video": "Réessayer la vidéo",
+};
 
 function isTrustedEmbedUrl(access: VideoAccess): boolean {
   let url: URL;
@@ -50,14 +59,18 @@ export default function LessonVideoPlayer({
   access,
   title,
   caption,
+  posterUrl,
+  locale = "en",
 }: LessonVideoPlayerProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const t = (text: string) => locale === "fr" ? VIDEO_PLAYER_FR[text] ?? text : text;
 
   if (!isTrustedEmbedUrl(access)) {
     return (
       <p role="alert" className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
-        This video provider returned an invalid playback link.
+        {t("This video provider returned an invalid playback link.")}
       </p>
     );
   }
@@ -72,12 +85,22 @@ export default function LessonVideoPlayer({
   return (
     <div>
       <div className="relative aspect-video overflow-hidden rounded-xl bg-[#071d36]">
+        {posterUrl && isLoading && (
+          // The API only returns provider-generated, validated thumbnail URLs.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={posterUrl}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        )}
         {isLoading && !hasError && (
           <div
             role="status"
             className="absolute inset-0 z-10 flex items-center justify-center text-sm font-semibold text-white"
           >
-            Loading video…
+            {t("Loading video…")}
           </div>
         )}
 
@@ -86,7 +109,18 @@ export default function LessonVideoPlayer({
             role="alert"
             className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-white"
           >
-            <p>Unable to load the video player.</p>
+            <p>{t("Unable to load the video player.")}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setHasError(false);
+                setIsLoading(true);
+                setRetryCount((count) => count + 1);
+              }}
+              className="rounded-lg border border-white/50 px-3 py-2 text-xs font-bold hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              {t("Retry video")}
+            </button>
             {openUrl && (
               <a
                 href={openUrl}
@@ -100,6 +134,7 @@ export default function LessonVideoPlayer({
           </div>
         ) : (
           <iframe
+            key={retryCount}
             src={iframeUrl}
             title={title}
             className="absolute inset-0 h-full w-full"

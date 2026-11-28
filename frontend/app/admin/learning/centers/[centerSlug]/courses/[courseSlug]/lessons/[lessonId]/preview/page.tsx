@@ -19,6 +19,7 @@ interface PageProps {
     courseSlug: string;
     lessonId: string;
   }>;
+  searchParams?: Promise<{ locale?: string }>;
 }
 
 function isValidSlug(value: string): boolean {
@@ -36,8 +37,12 @@ function isValidLessonId(value: string): boolean {
   return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value));
 }
 
-async function AdminLearningLessonPreviewRoute({ params }: PageProps) {
-  const { centerSlug, courseSlug, lessonId } = await params;
+async function AdminLearningLessonPreviewRoute({ params, searchParams }: PageProps) {
+  const [{ centerSlug, courseSlug, lessonId }, query] = await Promise.all([
+    params,
+    searchParams ?? Promise.resolve<{ locale?: string }>({}),
+  ]);
+  const locale = query.locale === "fr" ? "fr" : "en";
 
   if (
     !isValidSlug(centerSlug) ||
@@ -52,7 +57,8 @@ async function AdminLearningLessonPreviewRoute({ params }: PageProps) {
     `/courses/${encodeURIComponent(courseSlug)}`;
 
   const adminPreviewReturnHref =
-    `/admin/learning/centers/${encodeURIComponent(centerSlug)}/courses`;
+    `/admin/learning/centers/${encodeURIComponent(centerSlug)}` +
+    `/courses/${encodeURIComponent(courseSlug)}?locale=${locale}`;
 
   return (
     <AdminLessonPageClient
@@ -63,6 +69,7 @@ async function AdminLearningLessonPreviewRoute({ params }: PageProps) {
       adminPreviewBasePath={adminPreviewBasePath}
       adminPreviewReturnHref={adminPreviewReturnHref}
       initialTab="preview"
+      locale={locale}
     />
   );
 }
